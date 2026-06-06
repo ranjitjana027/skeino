@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-07
+
 ### Changed
 
 - The `status` filter on `GET /threads/{id}/runs` is now typed as the `RunStatus`
@@ -71,5 +73,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ranjitjana027/skeino/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ranjitjana027/skeino/releases/tag/v0.1.0
