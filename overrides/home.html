@@ -1,0 +1,67 @@
+{% extends "main.html" %}
+
+{#
+  Premium landing page for skeino.
+  Renders a hero (title, tagline, CTAs, code sample) above the normal
+  Markdown body from docs/index.md, then drops the usual page chrome.
+#}
+
+{% block tabs %}
+{{ super() }}
+<section class="skeino-hero">
+  <div class="skeino-hero__grid md-grid">
+    <div class="skeino-hero__intro">
+      <p class="skeino-hero__eyebrow">LangGraph server · embeddable · Apache-2.0</p>
+      <h1 class="skeino-hero__title">Ship your LangGraph as a real HTTP API.</h1>
+      <p class="skeino-hero__lede">
+        <strong>skeino</strong> is a reusable, embeddable replacement for the
+        <code>langgraph&nbsp;dev</code> server — threads, runs, streaming, and
+        assistants — the LangGraph Studio surface over any graph you own.
+      </p>
+      <div class="skeino-hero__cta">
+        <a href="{{ 'getting-started/' | url }}" class="md-button md-button--primary">
+          Get started
+        </a>
+        <a href="{{ 'concepts/threads-and-runs/' | url }}" class="md-button">
+          How it works
+        </a>
+        <a href="{{ config.repo_url }}" class="md-button md-button--ghost" target="_blank" rel="noopener">
+          GitHub ↗
+        </a>
+      </div>
+      <ul class="skeino-hero__pills">
+        <li>FastAPI</li>
+        <li>SSE streaming</li>
+        <li>Pluggable checkpointers</li>
+        <li>Python 3.11+</li>
+      </ul>
+    </div>
+
+    <div class="skeino-hero__panel" markdown>
+      <div class="skeino-code">
+        <div class="skeino-code__chrome">
+          <span></span><span></span><span></span>
+          <em>app.py</em>
+        </div>
+<pre><code><span class="c">## Your graph, served over the LangGraph HTTP API</span>
+<span class="k">from</span> skeino <span class="k">import</span> create_app, SkeinoSettings
+<span class="k">from</span> my_project.graph <span class="k">import</span> graph
+
+app = <span class="f">create_app</span>(
+    graphs={<span class="s">"my_agent"</span>: graph},
+    settings=<span class="f">SkeinoSettings</span>(
+        postgres_uri=<span class="s">"postgresql://localhost/skeino"</span>,
+    ),
+)</code></pre>
+        <div class="skeino-code__run">$ uvicorn app:app --port 8000</div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endblock %}
+
+{% block content %}
+<div class="skeino-landing md-typeset">
+  {{ page.content }}
+</div>
+{% endblock %}
