@@ -59,6 +59,9 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
+# .claude/ holds agent/editor tooling (e.g. hook scripts), not shippable
+# package code, so it is exempt from the library lint rules (e.g. T201).
+extend-exclude = [".claude"]
 lint.select = [
     "E",    # pycodestyle
     "F",    # pyflakes
