@@ -25,8 +25,6 @@ from skeino.serialization import (
     serialize_value,
 )
 
-_THREAD_STATUS_ERROR: ThreadStatus = "error"
-
 
 def _to_isoformat(value: datetime | None) -> str | None:
     """Convert an optional datetime to ISO 8601."""
@@ -209,15 +207,25 @@ class ThreadOps:
             return None
         try:
             return frozenset(schema.model_fields.keys())
-        except Exception:
-            return None
+        except AttributeError:
+            # Fail closed: drop all values rather than leak internal fields when
+            # the declared output schema cannot be introspected.
+            if self._logger is not None:
+                self._logger.warning(
+                    "Could not resolve output schema fields; returning an empty "
+                    "allow-set to avoid leaking internal fields to clients"
+                )
+            return frozenset()
 
     async def build_model_from_row(self, row: dict[str, Any]) -> ThreadModel:
         """Combine stored metadata with the latest graph state."""
         thread_id = str(row["thread_id"])
+        thread_status: ThreadStatus = row["status"]
+        values: dict[str, Any] = {}
+        interrupts: Any = []
         try:
             state = await self.get_state(thread_id)
-            values: dict[str, Any] = (
+            resolved_values: dict[str, Any] = (
                 state.values
                 if isinstance(state.values, dict)
                 else {"data": state.values}
@@ -227,19 +235,25 @@ class ThreadOps:
             # returned to API clients.
             allowed = self._output_keys()
             if allowed is not None:
-                values = {k: v for k, v in values.items() if k in allowed}
+                resolved_values = {
+                    k: v for k, v in resolved_values.items() if k in allowed
+                }
+            values = resolved_values
             interrupts = serialize_value(state.interrupts)
-            thread_status: ThreadStatus = row["status"]
         except Exception as exc:
+            # A checkpoint-read failure is not the same as the thread being in
+            # an error state: keep the stored status and surface the failure
+            # with a traceback rather than masking it as status="error". Caught
+            # broadly on purpose — this runs once per row in search(), so one
+            # unreadable checkpoint must not 500 the entire listing.
             if self._logger is not None:
-                self._logger.warning(
-                    "Failed to load checkpoint for thread %s: %s; returning placeholder",
+                self._logger.error(
+                    "Failed to load checkpoint for thread %s; returning stored "
+                    "status %r with empty values",
                     thread_id,
-                    exc,
+                    thread_status,
+                    exc_info=exc,
                 )
-            values = {}
-            interrupts = []
-            thread_status = _THREAD_STATUS_ERROR
         ttl_payload = row.get("ttl")
         ttl_info = (
             ThreadTtlInfo(

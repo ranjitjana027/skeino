@@ -11,6 +11,7 @@ The runner is intentionally stateless across calls; per-stream state lives in
 locals of the async generator.
 """
 
+import logging
 from typing import Any, AsyncIterator
 
 from skeino.schemas import JsonValue, RunCreateRequest
@@ -20,6 +21,8 @@ from skeino.serialization import (
     serialize_value,
 )
 from skeino.streaming.incremental import stream_incremental_values
+
+logger = logging.getLogger(__name__)
 
 
 class Streamer:
@@ -41,11 +44,20 @@ class Streamer:
     def _resolve_output_keys(self) -> frozenset[str] | None:
         schema = getattr(self._graph, "output_schema", None)
         if schema is None:
+            # No declared output schema → no filtering (everything passes).
             return None
         try:
             return frozenset(schema.model_fields.keys())
-        except Exception:
-            return None
+        except AttributeError:
+            # The schema exists but is not introspectable. Fail *closed*: an
+            # empty allow-set drops every field rather than leaking internal
+            # pipeline state to clients.
+            logger.warning(
+                "Could not resolve output schema fields for %s; filtering out "
+                "all streamed values to avoid leaking internal fields",
+                type(self._graph).__name__,
+            )
+            return frozenset()
 
     def _filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         if self._output_keys is None:
