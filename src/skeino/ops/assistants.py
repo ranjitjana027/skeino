@@ -76,14 +76,18 @@ class AssistantOps:
         """Return True only for ids that resolve to the singleton assistant.
 
         Accepts a supported id, the configured default id, or the deterministic
-        assistant UUID. A syntactically-valid but unrelated UUID is *not*
+        assistant UUID (compared by value, so any valid textual form — uppercase,
+        URN, braces — matches). A syntactically-valid but unrelated UUID is *not*
         accepted — it resolves to 404 via :meth:`ensure_supported`.
         """
-        return (
-            assistant_id in self._supported_ids
-            or assistant_id == self._default_assistant_id
-            or assistant_id == str(self._assistant_uuid)
-        )
+        if assistant_id in self._supported_ids:
+            return True
+        if assistant_id == self._default_assistant_id:
+            return True
+        try:
+            return UUID(assistant_id) == self._assistant_uuid
+        except ValueError:
+            return False
 
     def ensure_supported(self, assistant_id: str) -> None:
         """Validate that the requested assistant is available."""

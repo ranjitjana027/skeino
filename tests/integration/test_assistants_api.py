@@ -30,6 +30,14 @@ def test_get_assistant_by_deterministic_uuid(skeino_client: TestClient) -> None:
     assert r.json()["graph_id"] == "test_agent"
 
 
+def test_get_assistant_by_uppercase_uuid(skeino_client: TestClient) -> None:
+    """A non-canonical textual form of the deterministic UUID still matches."""
+    assistant_uuid = uuid5(NAMESPACE_URL, "https://skeino.local/assistants/test_agent")
+    r = skeino_client.get(f"/assistants/{str(assistant_uuid).upper()}")
+    assert r.status_code == 200
+    assert r.json()["graph_id"] == "test_agent"
+
+
 def test_get_assistant_by_unrelated_uuid_returns_404(skeino_client: TestClient) -> None:
     """An unrelated but valid UUID no longer resolves to the singleton."""
     r = skeino_client.get(f"/assistants/{uuid4()}")
