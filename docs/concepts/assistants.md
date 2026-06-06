@@ -27,10 +27,10 @@ In v1, skeino routes a **single assistant** (the default). The default id is:
 An incoming `assistant_id` is accepted if it matches a supported id, the default
 id, or the assistant's **deterministic UUID** (derived from `assistant_namespace`
 and the default id; compared by value, so any valid textual form — lowercase,
-uppercase, URN, or braces — matches). This is the id skeino returns from
-`/assistants/search` and `/info`, so Studio and SDK clients round-trip it back
-unchanged. Any other id — including an unrelated but syntactically valid UUID —
-returns **404**.
+uppercase, URN, or braces — matches). This is the id skeino returns as
+`assistant_id` from the assistant endpoints (`/assistants/search` and
+`/assistants/{id}`), so Studio and SDK clients round-trip it back unchanged. Any
+other id — including an unrelated but syntactically valid UUID — returns **404**.
 
 ## The endpoints
 
