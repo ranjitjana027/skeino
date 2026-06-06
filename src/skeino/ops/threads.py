@@ -139,9 +139,12 @@ class ThreadOps:
         """
         await self.ensure_exists(thread_id)
         config = build_thread_config(thread_id, {}, request.checkpoint)
+        # Explicit None check: an empty list payload (`[]`) must stay a list,
+        # not be coerced to `{}` by truthiness.
+        values = request.values if request.values is not None else {}
         new_config = await self._graph.aupdate_state(
             config,
-            normalize_input_payload(request.values or {}),
+            normalize_input_payload(values),
             as_node=request.as_node,
         )
         await self._metadata_store.update_thread(thread_id, mark_state_updated=True)

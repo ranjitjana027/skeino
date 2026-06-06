@@ -54,9 +54,13 @@ class ThreadCreateRequest(BaseModel):
 
 
 class ThreadPatchRequest(BaseModel):
-    """Mutable fields updatable on an existing thread."""
+    """Mutable fields updatable on an existing thread.
 
-    metadata: dict[str, JsonValue] = Field(default_factory=dict)
+    ``metadata`` is optional so an empty body is a no-op; send
+    ``{"metadata": {}}`` to intentionally clear a thread's metadata.
+    """
+
+    metadata: dict[str, JsonValue] | None = None
 
 
 class ThreadStateUpdateRequest(BaseModel):

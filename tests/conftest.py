@@ -31,6 +31,7 @@ class _FakeCheckpointer:
     async def adelete_thread(self, thread_id: str) -> None:
         self._graph.state_by_thread.pop(thread_id, None)
         self._graph.history_by_thread.pop(thread_id, None)
+        self._graph.checkpoints_by_thread.pop(thread_id, None)
 
 
 class FakeGraph:
@@ -39,6 +40,9 @@ class FakeGraph:
     def __init__(self) -> None:
         self.state_by_thread: dict[str, dict[str, Any]] = {}
         self.history_by_thread: dict[str, list[SimpleNamespace]] = {}
+        # Ordered per-thread checkpoints: [{checkpoint_id, values}, ...] — lets
+        # aget_state honour a checkpoint_id selector (time travel).
+        self.checkpoints_by_thread: dict[str, list[dict[str, Any]]] = {}
         self.checkpointer = _FakeCheckpointer(self)
         self._checkpoint_seq = 0
         # --- Failure-injection hooks (default: fully cooperative) ---
@@ -66,24 +70,40 @@ class FakeGraph:
             state.update(values)
         else:
             state["data"] = values
+        checkpoint_id = self._record_checkpoint(thread_id, state)
         self.history_by_thread.setdefault(thread_id, []).append(
-            self._snapshot(thread_id, state)
+            self._snapshot(thread_id, state, checkpoint_id)
         )
-        self._checkpoint_seq += 1
         return {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_id": f"ckpt-{self._checkpoint_seq}",
-            }
+            "configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}
         }
+
+    def _record_checkpoint(self, thread_id: str, values: dict[str, Any]) -> str:
+        """Snapshot ``values`` under a fresh checkpoint id and return it."""
+        self._checkpoint_seq += 1
+        checkpoint_id = f"ckpt-{self._checkpoint_seq}"
+        self.checkpoints_by_thread.setdefault(thread_id, []).append(
+            {"checkpoint_id": checkpoint_id, "values": dict(values)}
+        )
+        return checkpoint_id
 
     async def aget_state(
         self, config: dict[str, Any], *, subgraphs: bool = False
     ) -> SimpleNamespace:
         del subgraphs
-        thread_id = str(config["configurable"]["thread_id"])
-        values = self.state_by_thread.get(thread_id, {})
-        return self._snapshot(thread_id, values)
+        configurable = config.get("configurable", {})
+        thread_id = str(configurable["thread_id"])
+        checkpoint_id = configurable.get("checkpoint_id")
+        if checkpoint_id is not None:
+            for ckpt in self.checkpoints_by_thread.get(thread_id, []):
+                if ckpt["checkpoint_id"] == checkpoint_id:
+                    return self._snapshot(thread_id, ckpt["values"], checkpoint_id)
+            return self._snapshot(thread_id, {}, checkpoint_id)
+        checkpoints = self.checkpoints_by_thread.get(thread_id, [])
+        latest_id = checkpoints[-1]["checkpoint_id"] if checkpoints else None
+        return self._snapshot(
+            thread_id, self.state_by_thread.get(thread_id, {}), latest_id
+        )
 
     async def ainvoke(
         self,
@@ -219,12 +239,20 @@ class FakeGraph:
         for snapshot in history:
             yield snapshot
 
-    def _snapshot(self, thread_id: str, values: dict[str, Any]) -> SimpleNamespace:
+    def _snapshot(
+        self,
+        thread_id: str,
+        values: dict[str, Any],
+        checkpoint_id: str | None = None,
+    ) -> SimpleNamespace:
+        configurable: dict[str, Any] = {"thread_id": thread_id}
+        if checkpoint_id is not None:
+            configurable["checkpoint_id"] = checkpoint_id
         return SimpleNamespace(
             values=dict(values),
             next=(),
             tasks=(),
-            config={"configurable": {"thread_id": thread_id}},
+            config={"configurable": configurable},
             metadata={},
             created_at=_utcnow(),
             parent_config=None,
