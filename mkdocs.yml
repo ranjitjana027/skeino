@@ -1,0 +1,135 @@
+site_name: skeino
+site_description: >-
+  Reusable, embeddable replacement for the langgraph dev HTTP server —
+  threads, runs, streaming, and assistants over any LangGraph graph.
+site_url: https://ranjitjana027.github.io/skeino/
+repo_url: https://github.com/ranjitjana027/skeino
+repo_name: ranjitjana027/skeino
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; Ranjit Jana — Apache-2.0
+
+theme:
+  name: material
+  custom_dir: overrides
+  font:
+    text: Inter
+    code: JetBrains Mono
+  features:
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.code.annotate
+    - content.tooltips
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+    - search.share
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Switch to light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to system preference
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ranjitjana027/skeino
+      name: skeino on GitHub
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/skeino/
+      name: skeino on PyPI
+  generator: false
+
+hooks:
+  - overrides/hooks/gen_openapi.py
+
+plugins:
+  - search
+  - social:
+      enabled: !ENV [CI, false]
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src]
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_full_path: false
+            show_symbol_type_heading: true
+            show_symbol_type_toc: true
+            members_order: source
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+            merge_init_into_class: true
+            filters: ["!^_"]
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: [.]
+      check_paths: true
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts:
+      - Threads & runs: concepts/threads-and-runs.md
+      - Streaming (SSE): concepts/streaming.md
+      - Assistants: concepts/assistants.md
+      - Persistence & checkpointers: concepts/persistence.md
+      - Configuration: concepts/configuration.md
+  - How-to guides:
+      - Embed in an existing FastAPI app: guides/embedding-fastapi.md
+      - Set up Postgres persistence: guides/postgres.md
+      - Write a custom checkpointer: guides/custom-checkpointer.md
+      - Deploy skeino: guides/deployment.md
+  - API reference:
+      - HTTP endpoints (v1): api-reference/http.md
+      - API explorer: api-reference/explorer.md
+      - Python API: api-reference/python.md
+  - Changelog: changelog.md

@@ -8,7 +8,7 @@ license = "Apache-2.0"
 readme = "README.md"
 homepage = "https://github.com/ranjitjana027/skeino"
 repository = "https://github.com/ranjitjana027/skeino"
-documentation = "https://github.com/ranjitjana027/skeino#readme"
+documentation = "https://ranjitjana027.github.io/skeino/"
 keywords = ["langgraph", "fastapi", "server", "agents", "sse", "streaming", "checkpointer"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -49,6 +49,13 @@ httpx = ">=0.27.0"
 ruff = ">=0.14.0"
 mypy = ">=1.19.0,<3.0.0"
 bandit = { version = ">=1.7.0", extras = ["toml"] }
+
+[tool.poetry.group.docs]
+optional = true
+
+[tool.poetry.group.docs.dependencies]
+mkdocs-material = { version = ">=9.5.0", extras = ["imaging"] }
+mkdocstrings = { version = ">=0.26.0", extras = ["python"] }
 
 [build-system]
 requires = ["poetry-core"]

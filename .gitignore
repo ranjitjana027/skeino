@@ -12,6 +12,9 @@ dist/
 *.egg-info/
 *.egg
 
+# Docs site build output
+site/
+
 # Virtual environments
 .venv/
 venv/

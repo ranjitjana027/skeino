@@ -1,0 +1,282 @@
+/* ===========================================================================
+   skeino — premium Material theme
+   Brand: deep indigo → violet. Headings in Space Grotesk, body in Inter.
+   =========================================================================== */
+
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap");
+
+:root {
+  --skeino-indigo: #4f46e5;
+  --skeino-violet: #7c3aed;
+  --skeino-fuchsia: #c026d3;
+
+  /* Material primary/accent (palette: custom) */
+  --md-primary-fg-color: #4f46e5;
+  --md-primary-fg-color--light: #6366f1;
+  --md-primary-fg-color--dark: #4338ca;
+  --md-accent-fg-color: #7c3aed;
+  --md-accent-fg-color--transparent: rgba(124, 58, 237, 0.1);
+
+  --skeino-heading-font: "Space Grotesk", var(--md-text-font-family), sans-serif;
+}
+
+/* Headings get the display font for a more designed feel. */
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  font-family: var(--skeino-heading-font);
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+/* Tighten the brand wordmark in the header. */
+.md-header__title {
+  font-family: var(--skeino-heading-font);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* ---- Buttons -------------------------------------------------------------- */
+
+.md-typeset .md-button {
+  border-radius: 0.6rem;
+  font-weight: 600;
+  transition: transform 0.12s ease, box-shadow 0.12s ease, background 0.12s ease;
+}
+.md-typeset .md-button:hover {
+  transform: translateY(-1px);
+}
+.md-typeset .md-button--primary {
+  background: linear-gradient(135deg, var(--skeino-indigo), var(--skeino-violet));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 8px 24px -10px rgba(79, 70, 229, 0.7);
+}
+.md-typeset .md-button--ghost {
+  border-color: transparent;
+  background: transparent;
+}
+
+/* ===========================================================================
+   Hero
+   =========================================================================== */
+
+.skeino-hero {
+  position: relative;
+  overflow: hidden;
+  padding: 4.5rem 0 4rem;
+  color: #fff;
+  background:
+    radial-gradient(1200px 500px at 12% -10%, rgba(124, 58, 237, 0.55), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(192, 38, 211, 0.40), transparent 55%),
+    linear-gradient(135deg, #1e1b4b 0%, #312e81 45%, #4338ca 100%);
+}
+.skeino-hero::after {
+  /* subtle grid texture */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 38px 38px;
+  -webkit-mask-image: radial-gradient(70% 60% at 30% 0%, #000 30%, transparent 80%);
+  mask-image: radial-gradient(70% 60% at 30% 0%, #000 30%, transparent 80%);
+  pointer-events: none;
+}
+.skeino-hero__grid {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: 2.5rem;
+  align-items: center;
+  position: relative;
+  z-index: 1;
+}
+.skeino-hero__eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.66rem;
+  font-weight: 700;
+  color: #c7d2fe;
+  margin: 0 0 0.8rem;
+}
+.skeino-hero__title {
+  font-family: var(--skeino-heading-font);
+  font-weight: 700;
+  font-size: 2.7rem;
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  margin: 0 0 1rem;
+  color: #fff;
+  background: linear-gradient(180deg, #fff 30%, #e0e7ff);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+.skeino-hero__lede {
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: #dbe2ff;
+  max-width: 34rem;
+  margin: 0 0 1.6rem;
+}
+.skeino-hero__lede code {
+  background: rgba(255, 255, 255, 0.14);
+  padding: 0.05rem 0.35rem;
+  border-radius: 0.3rem;
+}
+.skeino-hero__cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-bottom: 1.6rem;
+}
+.skeino-hero__cta .md-button {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.skeino-hero__cta .md-button--primary {
+  border-color: transparent;
+}
+.skeino-hero__cta .md-button--ghost:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+.skeino-hero__pills {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+.skeino-hero__pills li {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #e0e7ff;
+  padding: 0.28rem 0.7rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(4px);
+}
+
+/* Code panel in the hero */
+.skeino-hero__panel {
+  position: relative;
+  z-index: 1;
+}
+.skeino-code {
+  border-radius: 0.9rem;
+  overflow: hidden;
+  background: #0b1020;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 30px 60px -25px rgba(0, 0, 0, 0.7);
+}
+.skeino-code__chrome {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.65rem 0.9rem;
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.skeino-code__chrome span {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #475569;
+}
+.skeino-code__chrome span:nth-child(1) { background: #ff5f56; }
+.skeino-code__chrome span:nth-child(2) { background: #ffbd2e; }
+.skeino-code__chrome span:nth-child(3) { background: #27c93f; }
+.skeino-code__chrome em {
+  margin-left: auto;
+  font-style: normal;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  font-family: var(--md-code-font-family), monospace;
+}
+.skeino-code pre {
+  margin: 0;
+  padding: 1.1rem 1.2rem;
+  overflow-x: auto;
+  font-family: var(--md-code-font-family), monospace;
+  font-size: 0.78rem;
+  line-height: 1.7;
+  color: #e2e8f0;
+}
+.skeino-code .c { color: #64748b; font-style: italic; }
+.skeino-code .k { color: #c084fc; }
+.skeino-code .f { color: #60a5fa; }
+.skeino-code .s { color: #34d399; }
+.skeino-code__run {
+  padding: 0.7rem 1.2rem;
+  font-family: var(--md-code-font-family), monospace;
+  font-size: 0.74rem;
+  color: #a5b4fc;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(124, 58, 237, 0.08);
+}
+
+@media screen and (max-width: 76.1875em) {
+  .skeino-hero__grid { grid-template-columns: 1fr; }
+  .skeino-hero__title { font-size: 2.2rem; }
+  .skeino-hero__panel { order: -1; }
+}
+
+/* ===========================================================================
+   Landing body (feature cards from index.md)
+   =========================================================================== */
+
+.skeino-landing {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 3rem 1.2rem 2rem;
+}
+.skeino-landing > h1:first-child {
+  /* hero already shows the name */
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+/* Material "grid cards" polish */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border-radius: 0.8rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+.md-typeset .grid.cards > ul > li:hover {
+  transform: translateY(-3px);
+  border-color: var(--md-accent-fg-color);
+  box-shadow: 0 16px 36px -22px rgba(79, 70, 229, 0.6);
+}
+
+/* ===========================================================================
+   General polish
+   =========================================================================== */
+
+.md-typeset pre > code {
+  border-radius: 0.55rem;
+}
+.md-typeset table:not([class]) {
+  border-radius: 0.55rem;
+  overflow: hidden;
+  box-shadow: 0 0 0 1px var(--md-default-fg-color--lightest);
+}
+.md-typeset table:not([class]) th {
+  background: var(--md-default-fg-color--lightest);
+  font-weight: 600;
+}
+
+/* mkdocstrings: make symbol headings a touch more prominent */
+.md-typeset .doc-heading code {
+  font-size: 0.92em;
+}
+
+/* Scalar API explorer host fills the content area nicely */
+.skeino-scalar {
+  margin: 0 -0.8rem;
+}
