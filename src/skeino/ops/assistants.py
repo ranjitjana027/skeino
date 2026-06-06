@@ -73,18 +73,21 @@ class AssistantOps:
         )
 
     def matches(self, assistant_id: str) -> bool:
-        """Return True when ``assistant_id`` should resolve to the singleton."""
+        """Return True only for ids that resolve to the singleton assistant.
+
+        Accepts a supported id, the configured default id, or the deterministic
+        assistant UUID (compared by value, so any valid textual form — uppercase,
+        URN, braces — matches). A syntactically-valid but unrelated UUID is *not*
+        accepted — it resolves to 404 via :meth:`ensure_supported`.
+        """
         if assistant_id in self._supported_ids:
             return True
         if assistant_id == self._default_assistant_id:
             return True
-        if assistant_id == str(self._assistant_uuid):
-            return True
         try:
-            UUID(assistant_id)
+            return UUID(assistant_id) == self._assistant_uuid
         except ValueError:
             return False
-        return True
 
     def ensure_supported(self, assistant_id: str) -> None:
         """Validate that the requested assistant is available."""
@@ -138,20 +141,24 @@ class AssistantOps:
     def get_graph(
         self, assistant_id: str, *, xray: bool | int = False
     ) -> dict[str, Any]:
-        """Return the graph structure (nodes, edges) for visualization."""
-        del xray
+        """Return the graph structure (nodes, edges) for visualization.
+
+        ``xray`` is forwarded to LangGraph to expand subgraph internals.
+        """
         self.ensure_supported(assistant_id)
-        graph_obj = self._graph.get_graph()
+        graph_obj = self._graph.get_graph(xray=xray)
         raw = graph_obj.to_json()
         return serialize_mapping(raw)
 
     def get_subgraphs(
         self, assistant_id: str, *, recurse: bool = False
     ) -> dict[str, Any]:
-        """Return subgraph schemas, or the main graph schema if no subgraphs."""
-        del recurse
+        """Return subgraph schemas, or the main graph schema if no subgraphs.
+
+        ``recurse`` is forwarded to LangGraph to descend into nested subgraphs.
+        """
         self.ensure_supported(assistant_id)
-        subgraphs_raw = dict(self._graph.get_subgraphs())
+        subgraphs_raw = dict(self._graph.get_subgraphs(recurse=recurse))
         if not subgraphs_raw:
             schema = self._graph_schema_dict(self._graph)
             return {self._default_assistant_id: schema}

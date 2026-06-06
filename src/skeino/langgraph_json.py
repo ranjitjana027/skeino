@@ -8,7 +8,8 @@ This is the high-level entry point that mirrors how ``langgraph dev`` boots:
 4. Build a :class:`SkeinoSettings` from the env / manifest.
 5. Hand off to :func:`skeino.create_app`.
 
-v1 ignores ``http.app`` overrides, ``store``, and ``auth`` (warns when present).
+v1 consumes ``store.uri`` (as the Postgres URI) and ``http.cors``; it ignores
+``http.app``, ``auth``, and ``ui``, logging a warning when those are present.
 ``graphs[name]`` may resolve to either a precompiled
 ``CompiledStateGraph`` (used as-is) or a callable
 ``(checkpointer) -> CompiledStateGraph`` (called by skeino with its resolved

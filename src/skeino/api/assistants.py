@@ -1,5 +1,7 @@
 """Assistant search, lookup, and graph-schema routes."""
 
+from typing import Any
+
 from fastapi import APIRouter, Query, Request
 
 from skeino.api._request import get_state, parse_request_model
@@ -40,8 +42,10 @@ async def get_assistant_schemas(
 async def get_assistant_graph(
     request: Request,
     assistant_id: str,
-    xray: bool = Query(default=False, description="Include subgraph representation"),
-) -> dict:
+    xray: bool = Query(
+        default=False, description="Expand subgraph internals in the graph."
+    ),
+) -> dict[str, Any]:
     """Return the graph structure (nodes, edges) for visualization."""
     state = get_state(request)
     return state.assistant_ops.get_graph(assistant_id, xray=xray)
@@ -51,8 +55,10 @@ async def get_assistant_graph(
 async def get_assistant_subgraphs(
     request: Request,
     assistant_id: str,
-    recurse: bool = Query(default=False, description="Recursively retrieve subgraphs"),
-) -> dict:
+    recurse: bool = Query(
+        default=False, description="Descend recursively into nested subgraphs."
+    ),
+) -> dict[str, Any]:
     """Return subgraph schemas for an assistant."""
     state = get_state(request)
     return state.assistant_ops.get_subgraphs(assistant_id, recurse=recurse)
