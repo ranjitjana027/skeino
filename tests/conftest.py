@@ -144,12 +144,14 @@ class FakeGraph:
     def get_context_jsonschema(self) -> dict[str, Any]:
         return {"type": "object", "properties": {}}
 
-    def get_graph(self) -> Any:
+    def get_graph(self, *, xray: bool | int = False) -> Any:
+        self.last_xray = xray
         g = SimpleNamespace()
         g.to_json = lambda: {"nodes": [{"id": "router"}], "edges": []}
         return g
 
-    def get_subgraphs(self) -> Any:
+    def get_subgraphs(self, *, recurse: bool = False) -> Any:
+        self.last_recurse = recurse
         return iter(())
 
     async def aget_state_history(

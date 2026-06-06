@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Assistant lookups no longer resolve an arbitrary valid UUID to the singleton
+  assistant: only a supported id, the configured default id, or the assistant's
+  deterministic UUID match; any other id returns 404.
+- The `xray` (`/graph`) and `recurse` (`/subgraphs`) query parameters are now
+  forwarded to LangGraph instead of being silently ignored, so the documented
+  behaviour matches what the endpoints do.
+- Corrected the `from_langgraph_json` module docstring: `store.uri` and
+  `http.cors` are consumed; `http.app`, `auth`, and `ui` are ignored with a
+  warning (previously it wrongly listed `store` as ignored and omitted `ui`).
+
 ## [0.1.0] - 2026-06-06
 
 ### Added
