@@ -10,6 +10,7 @@ from skeino.persistence import MetadataStoreProtocol
 from skeino.schemas import (
     CheckpointConfigModel,
     JsonValue,
+    RunIfNotExists,
     ThreadCreateRequest,
     ThreadModel,
     ThreadSearchRequest,
@@ -181,7 +182,9 @@ class ThreadOps:
             )
         return row
 
-    async def ensure_thread_for_run(self, thread_id: str, if_not_exists: str) -> None:
+    async def ensure_thread_for_run(
+        self, thread_id: str, if_not_exists: RunIfNotExists
+    ) -> None:
         """Ensure a thread exists before a run starts, creating it on demand."""
         row = await self._metadata_store.fetch_thread_row(thread_id)
         if row is not None:

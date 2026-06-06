@@ -22,6 +22,7 @@ from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
     RunStatus,
+    ThreadIfExists,
     ThreadSearchRequest,
     ThreadStatus,
     ThreadTtlConfig,
@@ -121,7 +122,7 @@ class MetadataStore:
         metadata: dict[str, JsonValue],
         config: dict[str, JsonValue],
         ttl: ThreadTtlConfig | None,
-        if_exists: str,
+        if_exists: ThreadIfExists,
     ) -> dict[str, Any]:
         """Insert a thread row and return the stored record."""
         ttl_payload = self._build_ttl_payload(ttl)
@@ -337,7 +338,7 @@ class MetadataStore:
         *,
         limit: int,
         offset: int,
-        status_value: str | None,
+        status_value: RunStatus | None,
     ) -> list[dict[str, Any]]:
         """List run rows for a thread."""
         conditions: list[str] = ["thread_id = %s"]

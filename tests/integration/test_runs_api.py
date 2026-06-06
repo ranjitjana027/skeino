@@ -53,3 +53,17 @@ def test_get_run_returns_one_record(skeino_client: TestClient) -> None:
     r = skeino_client.get(f"/threads/{thread_id}/runs/{run['run_id']}")
     assert r.status_code == 200
     assert r.json()["run_id"] == run["run_id"]
+
+
+def test_list_runs_accepts_valid_status_filter(skeino_client: TestClient) -> None:
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    r = skeino_client.get(f"/threads/{thread_id}/runs?status=success")
+    assert r.status_code == 200
+
+
+def test_list_runs_rejects_invalid_status_filter(skeino_client: TestClient) -> None:
+    # The status query param is now a RunStatus Literal, so FastAPI rejects
+    # unknown values at the edge with a 422.
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    r = skeino_client.get(f"/threads/{thread_id}/runs?status=bogus")
+    assert r.status_code == 422

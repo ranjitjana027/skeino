@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 from skeino.schemas.common import (
     CheckpointConfigModel,
     JsonValue,
+    ThreadIfExists,
     ThreadStatus,
 )
 from skeino.schemas.runs import CommandModel
@@ -47,7 +48,7 @@ class ThreadCreateRequest(BaseModel):
 
     thread_id: UUID | None = None
     metadata: dict[str, JsonValue] = Field(default_factory=dict)
-    if_exists: Literal["raise", "do_nothing"] = "raise"
+    if_exists: ThreadIfExists = "raise"
     ttl: ThreadTtlConfig | None = None
     supersteps: list[ThreadSuperstep] = Field(default_factory=list)
 

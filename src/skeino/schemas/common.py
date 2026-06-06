@@ -11,6 +11,8 @@ JsonValue: TypeAlias = JsonObject | JsonArray | str | int | float | bool | None
 ThreadStatus = Literal["idle", "busy", "interrupted", "error"]
 RunStatus = Literal["pending", "running", "error", "success", "timeout", "interrupted"]
 MultitaskStrategy = Literal["reject", "rollback", "interrupt", "enqueue"]
+ThreadIfExists = Literal["raise", "do_nothing"]
+RunIfNotExists = Literal["create", "reject"]
 StreamMode = Literal[
     "values",
     "messages",

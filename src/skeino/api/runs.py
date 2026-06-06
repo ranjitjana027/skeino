@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
 from skeino.api._request import get_state, parse_request_model, run_location
-from skeino.schemas import RunCreateRequest, RunModel
+from skeino.schemas import RunCreateRequest, RunModel, RunStatus
 
 router = APIRouter(prefix="/threads/{thread_id}")
 
@@ -52,7 +52,7 @@ async def list_runs(
     thread_id: UUID,
     limit: int = Query(default=10, ge=1),
     offset: int = Query(default=0, ge=0),
-    status: str | None = Query(default=None),
+    status: RunStatus | None = Query(default=None),
 ) -> list[RunModel]:
     """List persisted runs for a thread."""
     state = get_state(request)
