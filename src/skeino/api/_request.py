@@ -2,7 +2,7 @@
 
 import json
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, TypeVar, cast
 from uuid import UUID
 
 from fastapi import HTTPException, Request, status
@@ -27,7 +27,7 @@ class SkeinoState:
 
 def get_state(request: Request) -> SkeinoState:
     """Return the skeino state bundle from ``app.state.skeino``."""
-    return request.app.state.skeino  # type: ignore[return-value]
+    return cast(SkeinoState, request.app.state.skeino)
 
 
 def run_location(thread_id: UUID, run_id: UUID) -> str:

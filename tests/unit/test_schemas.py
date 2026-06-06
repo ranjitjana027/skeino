@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+
 from skeino.schemas import (
     AssistantSearchRequest,
     CheckpointConfigModel,

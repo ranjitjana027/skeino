@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 
 import pytest
+
 from skeino.persistence import open_checkpointer, register_checkpointer
 from skeino.persistence.checkpointer import CheckpointerSpec
 

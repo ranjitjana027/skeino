@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from skeino.concurrency import ThreadLockManager
 from skeino.ops.assistants import AssistantOps
 from skeino.ops.threads import ThreadOps
-from skeino.persistence import MetadataStore
+from skeino.persistence import MetadataStoreProtocol
 from skeino.schemas import (
     JsonValue,
     RunCreateRequest,
@@ -22,6 +22,7 @@ from skeino.serialization import (
     coerce_stream_modes,
     normalize_command_payload,
     normalize_input_payload,
+    serialize_mapping,
     serialize_value,
 )
 from skeino.streaming import (
@@ -51,7 +52,7 @@ class RunOps:
         self,
         *,
         graph: Any,
-        metadata_store: MetadataStore,
+        metadata_store: MetadataStoreProtocol,
         streamer: Streamer,
         thread_ops: ThreadOps,
         assistant_ops: AssistantOps,
@@ -355,8 +356,8 @@ class RunOps:
             created_at=row["created_at"].isoformat(),
             updated_at=row["updated_at"].isoformat(),
             status=row["status"],
-            metadata=serialize_value(row["metadata"]),
-            kwargs=serialize_value(row["kwargs"]),
+            metadata=serialize_mapping(row["metadata"]),
+            kwargs=serialize_mapping(row["kwargs"]),
             multitask_strategy=row["multitask_strategy"],
         )
 
@@ -385,7 +386,7 @@ class RunOps:
         """Persist the key run settings used to invoke the graph."""
         checkpoint: dict[str, JsonValue] | None = None
         if request.checkpoint is not None:
-            checkpoint = serialize_value(request.checkpoint.model_dump(mode="python"))
+            checkpoint = serialize_mapping(request.checkpoint.model_dump(mode="python"))
         return {
             "assistant_id": request.assistant_id,
             "config": serialize_value(request.config),

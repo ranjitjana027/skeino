@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 
 import pytest
+
 from skeino import GraphRegistry
 
 

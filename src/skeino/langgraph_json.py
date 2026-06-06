@@ -22,7 +22,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI
 
@@ -76,7 +76,7 @@ def _resolve_graph_target(spec: str, manifest_dir: Path) -> GraphInput:
     module = _load_module(target_path)
     if not hasattr(module, attr):
         raise AttributeError(f"Module {target_path} has no attribute {attr!r}.")
-    return getattr(module, attr)
+    return cast(GraphInput, getattr(module, attr))
 
 
 def _maybe_load_dotenv(manifest_dir: Path, env_spec: Any) -> None:

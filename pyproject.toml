@@ -1,10 +1,33 @@
 [tool.poetry]
 name = "skeino"
 version = "0.1.0"
-description = "Reusable LangGraph dev-server replacement: threads, runs, streaming over any LangGraph graph."
-authors = ["stocks-ai team"]
+description = "Reusable, embeddable replacement for the langgraph dev HTTP server: threads, runs, streaming, and assistants over any LangGraph graph."
+authors = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
+maintainers = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
+license = "Apache-2.0"
 readme = "README.md"
+homepage = "https://github.com/ranjitjana027/skeino"
+repository = "https://github.com/ranjitjana027/skeino"
+documentation = "https://github.com/ranjitjana027/skeino#readme"
+keywords = ["langgraph", "fastapi", "server", "agents", "sse", "streaming", "checkpointer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Framework :: FastAPI",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 packages = [{ include = "skeino", from = "src" }]
+
+[tool.poetry.urls]
+"Changelog" = "https://github.com/ranjitjana027/skeino/blob/main/CHANGELOG.md"
+"Issues" = "https://github.com/ranjitjana027/skeino/issues"
 
 [tool.poetry.dependencies]
 python = ">=3.11,<4.0"
@@ -23,6 +46,9 @@ uvicorn = "^0.41.0"
 pytest = ">=9.0.0"
 pytest-asyncio = ">=0.24.0"
 httpx = ">=0.27.0"
+ruff = ">=0.14.0"
+mypy = ">=1.19.0,<2.0.0"
+bandit = { version = ">=1.7.0", extras = ["toml"] }
 
 [build-system]
 requires = ["poetry-core"]
@@ -31,3 +57,43 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+lint.select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "D",    # pydocstyle
+    "D401", # First line should be in imperative mood
+    "T201",
+    "UP",
+]
+lint.ignore = [
+    "UP006",
+    "UP007",
+    "UP035",
+    "D417",
+    "E501",
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "src"
+explicit_package_bases = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[tool.bandit]
+exclude_dirs = ["tests"]

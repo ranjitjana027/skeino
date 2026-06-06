@@ -18,7 +18,11 @@ from skeino.schemas import (
     GraphSchemaModel,
     ServerInfoModel,
 )
-from skeino.serialization import serialize_value
+from skeino.serialization import (
+    serialize_mapping,
+    serialize_optional_mapping,
+    serialize_value,
+)
 
 
 class AssistantOps:
@@ -118,11 +122,17 @@ class AssistantOps:
         self.ensure_supported(assistant_id)
         return GraphSchemaModel(
             graph_id=self._default_assistant_id,
-            input_schema=serialize_value(self._graph.get_input_jsonschema()),
-            output_schema=serialize_value(self._graph.get_output_jsonschema()),
-            state_schema=serialize_value(self._graph.get_input_jsonschema()),
-            config_schema=serialize_value(self._graph.get_config_jsonschema()),
-            context_schema=serialize_value(self._graph.get_context_jsonschema()),
+            input_schema=serialize_optional_mapping(self._graph.get_input_jsonschema()),
+            output_schema=serialize_optional_mapping(
+                self._graph.get_output_jsonschema()
+            ),
+            state_schema=serialize_mapping(self._graph.get_input_jsonschema()),
+            config_schema=serialize_optional_mapping(
+                self._graph.get_config_jsonschema()
+            ),
+            context_schema=serialize_optional_mapping(
+                self._graph.get_context_jsonschema()
+            ),
         )
 
     def get_graph(
@@ -133,7 +143,7 @@ class AssistantOps:
         self.ensure_supported(assistant_id)
         graph_obj = self._graph.get_graph()
         raw = graph_obj.to_json()
-        return serialize_value(raw)
+        return serialize_mapping(raw)
 
     def get_subgraphs(
         self, assistant_id: str, *, recurse: bool = False

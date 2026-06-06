@@ -197,11 +197,13 @@ class MetadataStore:
             return
 
         values.append(thread_id)
+        # nosec B608: `assignments` holds only hardcoded "column = %s"/NOW()
+        # fragments built above; every user value is bound via %s parameters.
         query = f"""
             UPDATE app_threads
             SET {", ".join(assignments)}
             WHERE thread_id = %s
-        """
+        """  # nosec B608
         async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(query, values)
@@ -229,6 +231,9 @@ class MetadataStore:
         if sort_order not in {"asc", "desc"}:
             sort_order = DEFAULT_SORT_ORDER
 
+        # nosec B608: `where_clause` is composed of hardcoded "column = %s"
+        # conditions, and `sort_by`/`sort_order` are whitelisted against
+        # THREAD_SORT_FIELDS and {"asc","desc"}; user values are bound via %s.
         query = f"""
             SELECT thread_id, created_at, updated_at, state_updated_at,
                    metadata, config, status, ttl
@@ -237,7 +242,7 @@ class MetadataStore:
             ORDER BY {sort_by} {sort_order.upper()}
             LIMIT %s
             OFFSET %s
-        """
+        """  # nosec B608
         values.extend([request.limit, request.offset])
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
@@ -341,6 +346,8 @@ class MetadataStore:
             conditions.append("status = %s")
             values.append(status_value)
 
+        # nosec B608: `conditions` holds only hardcoded "column = %s" fragments
+        # built above; every user value is bound via %s parameters.
         query = f"""
             SELECT run_id, thread_id, assistant_id, created_at, updated_at,
                    status, metadata, kwargs, multitask_strategy
@@ -349,7 +356,7 @@ class MetadataStore:
             ORDER BY created_at DESC
             LIMIT %s
             OFFSET %s
-        """
+        """  # nosec B608
         values.extend([limit, offset])
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row

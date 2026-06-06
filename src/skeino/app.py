@@ -26,7 +26,12 @@ from skeino.api._request import SkeinoState
 from skeino.concurrency import ThreadLockManager
 from skeino.config import SkeinoSettings
 from skeino.ops import AssistantOps, RunOps, ThreadOps
-from skeino.persistence import InMemoryMetadataStore, MetadataStore, open_checkpointer
+from skeino.persistence import (
+    InMemoryMetadataStore,
+    MetadataStore,
+    MetadataStoreProtocol,
+    open_checkpointer,
+)
 from skeino.registry import GraphRegistry
 from skeino.streaming import Streamer
 
@@ -43,12 +48,12 @@ async def _materialise_graph(
     entry: GraphInput, checkpointer: BaseCheckpointSaver | None
 ) -> CompiledStateGraph:
     """Resolve a graph entry into a compiled graph instance."""
-    if callable(entry) and not isinstance(entry, CompiledStateGraph):
-        result = entry(checkpointer)
-        if isinstance(result, Awaitable):
-            result = await result  # type: ignore[assignment]
-        return result  # type: ignore[return-value]
-    return entry  # type: ignore[return-value]
+    if isinstance(entry, CompiledStateGraph):
+        return entry
+    result = entry(checkpointer)
+    if isinstance(result, Awaitable):
+        return await result
+    return result
 
 
 def _resolve_default_id(
@@ -101,7 +106,7 @@ def create_app(
             registry = GraphRegistry(compiled, default=default_id)
             default_graph = registry.default_graph
 
-            metadata_store: MetadataStore | InMemoryMetadataStore
+            metadata_store: MetadataStoreProtocol
             if settings.postgres_uri:
                 metadata_store = MetadataStore(settings.postgres_uri)
             else:

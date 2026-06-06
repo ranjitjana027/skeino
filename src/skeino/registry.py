@@ -53,5 +53,5 @@ class GraphRegistry:
         return key in self._graphs
 
     def __len__(self) -> int:
-        """Number of registered graphs."""
+        """Return the number of registered graphs."""
         return len(self._graphs)

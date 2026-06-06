@@ -142,6 +142,33 @@ def serialize_value(value: Any) -> JsonValue:
     return str(value)
 
 
+def serialize_mapping(value: Any) -> dict[str, JsonValue]:
+    """Serialize a value expected to be a mapping into a JSON-safe dict.
+
+    Non-mapping inputs collapse to an empty dict. Use at call sites whose API
+    contract guarantees a dict (metadata, config, JSON schemas) so the result
+    matches the ``dict[str, JsonValue]`` field type.
+    """
+    serialized = serialize_value(value)
+    return serialized if isinstance(serialized, dict) else {}
+
+
+def serialize_optional_mapping(value: Any) -> dict[str, JsonValue] | None:
+    """Serialize an optional mapping, preserving ``None`` for absent values."""
+    if value is None:
+        return None
+    serialized = serialize_value(value)
+    return serialized if isinstance(serialized, dict) else None
+
+
+def serialize_collection(value: Any) -> dict[str, JsonValue] | list[JsonValue]:
+    """Serialize a value expected to be a dict or list into its JSON-safe form."""
+    serialized = serialize_value(value)
+    if isinstance(serialized, (dict, list)):
+        return serialized
+    return {}
+
+
 def _serialize_snapshot_message(message: BaseMessage) -> JsonValue:
     """Serialize a LangChain message using its full schema for Studio compatibility."""
     return serialize_value(message.model_dump())
@@ -210,7 +237,7 @@ def serialize_task(task: Any) -> ThreadTaskModel:
             thread_id=getattr(task_checkpoint, "thread_id", None),
             checkpoint_ns=getattr(task_checkpoint, "checkpoint_ns", None),
             checkpoint_id=getattr(task_checkpoint, "checkpoint_id", None),
-            checkpoint_map=serialize_value(
+            checkpoint_map=serialize_optional_mapping(
                 getattr(task_checkpoint, "checkpoint_map", None)
             ),
         )
@@ -223,7 +250,7 @@ def serialize_task(task: Any) -> ThreadTaskModel:
         error=getattr(task, "error", None),
         interrupts=[serialize_interrupt(interrupt) for interrupt in task_interrupts],
         checkpoint=serialized_checkpoint,
-        state=serialize_value(task_state) if task_state is not None else None,
+        state=serialize_optional_mapping(task_state),
     )
 
 
@@ -232,24 +259,24 @@ def serialize_state_snapshot(snapshot: Any) -> ThreadStateModel:
     checkpoint_config = snapshot.config.get("configurable", {})
     parent_config = getattr(snapshot, "parent_config", None)
     return ThreadStateModel(
-        values=serialize_value(snapshot.values),
+        values=serialize_collection(snapshot.values),
         next=[str(item) for item in snapshot.next],
         tasks=[serialize_task(task) for task in snapshot.tasks],
         checkpoint=CheckpointConfigModel(
             thread_id=checkpoint_config.get("thread_id"),
             checkpoint_ns=checkpoint_config.get("checkpoint_ns"),
             checkpoint_id=checkpoint_config.get("checkpoint_id"),
-            checkpoint_map=serialize_value(checkpoint_config.get("checkpoint_map")),
+            checkpoint_map=serialize_optional_mapping(
+                checkpoint_config.get("checkpoint_map")
+            ),
         ),
-        metadata=serialize_value(snapshot.metadata or {}),
+        metadata=serialize_mapping(snapshot.metadata or {}),
         created_at=(
             snapshot.created_at.isoformat()
             if isinstance(snapshot.created_at, datetime)
             else snapshot.created_at
         ),
-        parent_checkpoint=serialize_value(parent_config)
-        if parent_config is not None
-        else None,
+        parent_checkpoint=serialize_optional_mapping(parent_config),
         interrupts=[
             serialize_interrupt(interrupt)
             for interrupt in (getattr(snapshot, "interrupts", ()) or ())

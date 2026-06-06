@@ -18,6 +18,7 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
     """Thin wrapper that enriches checkpoint metadata with run_id from config."""
 
     def __init__(self, inner: AsyncPostgresSaver) -> None:
+        """Wrap an existing ``AsyncPostgresSaver`` and share its connection state."""
         super().__init__(inner.conn, serde=inner.serde)
         self.__dict__.update(inner.__dict__)
         self._inner = inner
@@ -48,6 +49,7 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
     async def aput(
         self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
     ) -> Any:
+        """Persist a checkpoint, enriching its metadata with ``run_id`` first."""
         return await self._inner.aput(
             config, checkpoint, self._enrich(metadata, config), new_versions
         )
@@ -55,6 +57,7 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
     def put(
         self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
     ) -> Any:
+        """Persist a checkpoint synchronously, enriching its metadata with ``run_id``."""
         return self._inner.put(
             config, checkpoint, self._enrich(metadata, config), new_versions
         )

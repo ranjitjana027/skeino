@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 
-from skeino.persistence import MetadataStore
+from skeino.persistence import MetadataStoreProtocol
 from skeino.schemas import (
     CheckpointConfigModel,
     JsonValue,
@@ -20,6 +20,7 @@ from skeino.schemas import (
 from skeino.serialization import (
     build_thread_config,
     normalize_input_payload,
+    serialize_mapping,
     serialize_state_snapshot,
     serialize_value,
 )
@@ -67,7 +68,7 @@ class ThreadOps:
         self,
         *,
         graph: Any,
-        metadata_store: MetadataStore,
+        metadata_store: MetadataStoreProtocol,
         logger: Any | None = None,
     ) -> None:
         """Capture the graph and metadata store backing this ops layer."""
@@ -78,7 +79,7 @@ class ThreadOps:
     async def create(self, request: ThreadCreateRequest) -> ThreadModel:
         """Create a thread and optionally seed it with initial state."""
         thread_id = str(request.thread_id or uuid4())
-        config = {"configurable": {"thread_id": thread_id}}
+        config: dict[str, JsonValue] = {"configurable": {"thread_id": thread_id}}
         row = await self._metadata_store.create_thread(
             thread_id,
             metadata=request.metadata,
@@ -242,7 +243,7 @@ class ThreadOps:
         ttl_payload = row.get("ttl")
         ttl_info = (
             ThreadTtlInfo(
-                strategy=str(ttl_payload["strategy"]),
+                strategy=ttl_payload["strategy"],
                 ttl_minutes=float(ttl_payload["ttl_minutes"]),
                 expires_at=str(ttl_payload["expires_at"]),
             )
@@ -254,8 +255,8 @@ class ThreadOps:
             created_at=row["created_at"].isoformat(),
             updated_at=row["updated_at"].isoformat(),
             state_updated_at=_to_isoformat(row["state_updated_at"]),
-            metadata=serialize_value(row["metadata"]),
-            config=serialize_value(row["config"]),
+            metadata=serialize_mapping(row["metadata"]),
+            config=serialize_mapping(row["config"]),
             status=thread_status,
             values=values,
             interrupts=interrupts,

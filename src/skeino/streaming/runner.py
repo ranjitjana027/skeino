@@ -14,7 +14,11 @@ locals of the async generator.
 from typing import Any, AsyncIterator
 
 from skeino.schemas import JsonValue, RunCreateRequest
-from skeino.serialization import normalize_input_payload, serialize_value
+from skeino.serialization import (
+    normalize_input_payload,
+    serialize_mapping,
+    serialize_value,
+)
 from skeino.streaming.incremental import stream_incremental_values
 
 
@@ -65,7 +69,7 @@ class Streamer:
                 interrupt_after=request.interrupt_after,
                 durability=request.durability,
             ):
-                yield "events", serialize_value(event)
+                yield "events", serialize_mapping(event)
             return
 
         if stream_modes == ["values"]:

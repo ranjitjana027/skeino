@@ -1,5 +1,6 @@
 """Inbound normalizers that prepare HTTP payloads for the LangGraph runtime."""
 
+from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
@@ -37,7 +38,7 @@ def normalize_command_payload(command: CommandModel | None) -> Command | None:
     )
 
 
-def coerce_stream_modes(stream_mode: str | list[str]) -> list[str]:
+def coerce_stream_modes(stream_mode: str | Sequence[str]) -> list[str]:
     """Normalize stream mode inputs into a list."""
     if isinstance(stream_mode, str):
         return [stream_mode]

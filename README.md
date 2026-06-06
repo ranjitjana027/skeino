@@ -1,5 +1,9 @@
 # skeino
 
+[![PyPI version](https://img.shields.io/pypi/v/skeino.svg)](https://pypi.org/project/skeino/)
+[![Python versions](https://img.shields.io/pypi/pyversions/skeino.svg)](https://pypi.org/project/skeino/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
 A reusable, embeddable replacement for the `langgraph dev` HTTP server.
 
 `skeino` exposes the LangGraph Studio-compatible REST surface
@@ -13,6 +17,12 @@ graph. It is built to be:
   Redis / Mongo / etc. can be added without touching `skeino` core.
 - **Two entry points** — programmatic `create_app(graphs={...})` and a
   high-level `from_langgraph_json("langgraph.json")` loader.
+
+## Install
+
+```bash
+pip install skeino
+```
 
 ## Quickstart
 
@@ -54,3 +64,12 @@ Out of scope for v1: `/store/*`, `/runs/crons`, webhooks, auth.
 ## Status
 
 Pre-release. API may change.
+
+## Contributing
+
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) for local
+setup and the required checks.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).

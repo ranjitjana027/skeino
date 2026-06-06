@@ -3,6 +3,7 @@
 from uuid import uuid4
 
 import pytest
+
 from skeino.persistence import InMemoryMetadataStore
 from skeino.schemas import ThreadSearchRequest, ThreadTtlConfig
 

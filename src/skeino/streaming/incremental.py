@@ -15,7 +15,11 @@ from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from skeino.schemas import JsonValue, RunCreateRequest
-from skeino.serialization import normalize_input_payload, serialize_value
+from skeino.serialization import (
+    normalize_input_payload,
+    serialize_mapping,
+    serialize_value,
+)
 
 
 async def stream_incremental_values(
@@ -54,8 +58,11 @@ async def stream_incremental_values(
             continue
 
         if event_name == "values":
-            last_values = serialize_value(payload)
-            previous_messages = list(last_values.get("messages", []))
+            last_values = serialize_mapping(payload)
+            raw_messages = last_values.get("messages", [])
+            previous_messages = (
+                list(raw_messages) if isinstance(raw_messages, list) else []
+            )
 
             if status_field is not None:
                 status_items = last_values.get(status_field) or []
