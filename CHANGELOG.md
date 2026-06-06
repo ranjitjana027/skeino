@@ -29,6 +29,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own initialised state; it now initialises a single saver over the shared
   connection and delegates reads to the base class, removing two savers sharing
   mutable connection state.
+- Streaming runs no longer replay already-sent output when a transient error
+  occurs mid-stream; retries are now confined to the window before the first
+  event reaches the client, preventing duplicated output and double model
+  invocations.
+- The `reject`/`rollback`/`interrupt` multitask strategies are now enforced for
+  streaming runs: the thread lock is acquired before the run row is created,
+  closing a race where concurrent streaming requests could all start and persist
+  orphan `pending` rows.
+- Client disconnects during a streaming run (`CancelledError`) are no longer
+  swallowed by the retry loop; the run is marked `interrupted` and the thread
+  lock is released.
+- A failed run's error-state persistence is now best-effort and never masks the
+  original exception or prevents the client from receiving the `error` event.
+- Token usage for synchronous runs is now read while the thread lock is held, so
+  an enqueued run can no longer report another run's totals; checkpoint-read
+  failures during usage accounting are logged at error level.
+- Run failures now log a full traceback (`exc_info`) instead of just the message.
 
 ## [0.1.0] - 2026-06-06
 
