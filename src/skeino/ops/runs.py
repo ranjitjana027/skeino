@@ -104,7 +104,11 @@ class RunOps:
             total_tokens = await self._total_run_tokens(thread_id)
         except HTTPException as exc:
             self._log_error(
-                "Run %s failed for thread %s: %s", run_id, thread_id, exc.detail
+                "Run %s failed for thread %s: %s",
+                run_id,
+                thread_id,
+                exc.detail,
+                exc=exc,
             )
             await self._mark_run_failed(run_id, thread_id, str(exc.detail))
             raise
