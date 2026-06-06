@@ -44,6 +44,7 @@ Prefix: `/threads`
 | `POST` | `/threads` | `ThreadCreateRequest` | `ThreadModel` | Create a thread (optional id, metadata, `if_exists`, `ttl`, seed `supersteps`). |
 | `POST` | `/threads/search` | `ThreadSearchRequest` | `list[ThreadModel]` | Search by ids/metadata/values/status; paginated. |
 | `GET` | `/threads/{thread_id}` | — | `ThreadModel` | Metadata plus latest values. |
+| `POST` | `/threads/{thread_id}/copy` | — | `ThreadModel` | Fork into a new thread seeded with the source's latest state (shallow; metadata stamped `forked_from`). |
 | `GET` | `/threads/{thread_id}/state` | — | `ThreadStateModel` | Latest checkpoint state. Query: `subgraphs: bool = false`. |
 | `GET` | `/threads/{thread_id}/history` | — | `list[ThreadStateModel]` | Checkpoint history. Query: `limit` (1–1000, default 10), `before`. |
 | `POST` | `/threads/{thread_id}/history` | `ThreadStateSearchRequest` | `list[ThreadStateModel]` | History via POST (richer filters). |

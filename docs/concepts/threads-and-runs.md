@@ -61,6 +61,13 @@ checkpoint with `GET /threads/{id}/state`, and walk its checkpoint history with
 Threads are searchable with `POST /threads/search`, which filters by ids,
 metadata, state values, and status, with pagination and field selection.
 
+You can **fork** a thread with `POST /threads/{id}/copy`. This creates a new,
+independent thread seeded with the source's *latest* state (its metadata is
+copied and stamped with `forked_from`), so you can branch and explore — a
+what-if continuation, an isolated debug replay — without mutating the original.
+The copy is shallow: the current state carries over, not the full checkpoint
+history.
+
 ## Run lifecycle
 
 A run is created against an existing thread:
