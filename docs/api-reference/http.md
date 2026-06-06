@@ -44,7 +44,12 @@ Prefix: `/threads`
 | `POST` | `/threads` | `ThreadCreateRequest` | `ThreadModel` | Create a thread (optional id, metadata, `if_exists`, `ttl`, seed `supersteps`). |
 | `POST` | `/threads/search` | `ThreadSearchRequest` | `list[ThreadModel]` | Search by ids/metadata/values/status; paginated. |
 | `GET` | `/threads/{thread_id}` | — | `ThreadModel` | Metadata plus latest values. |
+| `PATCH` | `/threads/{thread_id}` | `ThreadPatchRequest` | `ThreadModel` | Update thread metadata. |
+| `DELETE` | `/threads/{thread_id}` | — | `204` | Delete the thread, its runs, and its checkpoints. |
 | `GET` | `/threads/{thread_id}/state` | — | `ThreadStateModel` | Latest checkpoint state. Query: `subgraphs: bool = false`. |
+| `POST` | `/threads/{thread_id}/state` | `ThreadStateUpdateRequest` | `CheckpointConfigModel` | Write/patch state (human-in-the-loop edit); returns the new checkpoint. |
+| `GET` | `/threads/{thread_id}/state/{checkpoint_id}` | — | `ThreadStateModel` | State at a specific checkpoint (time travel). |
+| `POST` | `/threads/{thread_id}/state/checkpoint` | `CheckpointConfigModel` | `ThreadStateModel` | State at a checkpoint selected by a full config body. |
 | `GET` | `/threads/{thread_id}/history` | — | `list[ThreadStateModel]` | Checkpoint history. Query: `limit` (1–1000, default 10), `before`. |
 | `POST` | `/threads/{thread_id}/history` | `ThreadStateSearchRequest` | `list[ThreadStateModel]` | History via POST (richer filters). |
 

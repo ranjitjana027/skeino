@@ -61,6 +61,10 @@ class MetadataStoreProtocol(Protocol):
         """Return stored thread rows before graph-state enrichment."""
         ...
 
+    async def delete_thread(self, thread_id: str) -> None:
+        """Delete a thread row and its run rows."""
+        ...
+
     async def create_run(
         self,
         run_id: str,

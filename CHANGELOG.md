@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Thread mutation & time-travel endpoints: `PATCH /threads/{id}` (update
+  metadata), `DELETE /threads/{id}` (delete the thread, its runs, and its
+  checkpoints), `POST /threads/{id}/state` (human-in-the-loop state edit,
+  returning the new checkpoint), and reads at a specific checkpoint via
+  `GET /threads/{id}/state/{checkpoint_id}` and `POST /threads/{id}/state/checkpoint`.
+
 ## [0.2.0] - 2026-06-07
 
 ### Changed

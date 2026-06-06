@@ -22,12 +22,25 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+class _FakeCheckpointer:
+    """Minimal checkpointer exposing the delete hook skeino calls."""
+
+    def __init__(self, graph: FakeGraph) -> None:
+        self._graph = graph
+
+    async def adelete_thread(self, thread_id: str) -> None:
+        self._graph.state_by_thread.pop(thread_id, None)
+        self._graph.history_by_thread.pop(thread_id, None)
+
+
 class FakeGraph:
     """Minimal stand-in for ``CompiledStateGraph`` used by tests."""
 
     def __init__(self) -> None:
         self.state_by_thread: dict[str, dict[str, Any]] = {}
         self.history_by_thread: dict[str, list[SimpleNamespace]] = {}
+        self.checkpointer = _FakeCheckpointer(self)
+        self._checkpoint_seq = 0
         # --- Failure-injection hooks (default: fully cooperative) ---
         # When ``invoke_error`` is set, ``ainvoke`` raises it.
         self.invoke_error: BaseException | None = None
@@ -56,7 +69,13 @@ class FakeGraph:
         self.history_by_thread.setdefault(thread_id, []).append(
             self._snapshot(thread_id, state)
         )
-        return config
+        self._checkpoint_seq += 1
+        return {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_id": f"ckpt-{self._checkpoint_seq}",
+            }
+        }
 
     async def aget_state(
         self, config: dict[str, Any], *, subgraphs: bool = False

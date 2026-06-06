@@ -117,6 +117,15 @@ class InMemoryMetadataStore:
         rows.sort(key=lambda r: r["updated_at"], reverse=(request.sort_order != "asc"))
         return rows[request.offset : request.offset + request.limit]
 
+    async def delete_thread(self, thread_id: str) -> None:
+        """Delete a thread and its run rows."""
+        self._threads.pop(thread_id, None)
+        self._runs = {
+            run_id: row
+            for run_id, row in self._runs.items()
+            if str(row["thread_id"]) != thread_id
+        }
+
     async def create_run(
         self,
         run_id: str,
