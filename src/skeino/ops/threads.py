@@ -147,7 +147,9 @@ class ThreadOps:
             {"configurable": {"thread_id": source_thread_id}}
         )
         source_values = getattr(source_snapshot, "values", None)
-        if isinstance(source_values, dict) and source_values:
+        # LangGraph state may be a dict or a list (or other non-dict shape), so
+        # seed the copy from any non-empty state rather than dicts only.
+        if source_values:
             await self._graph.aupdate_state(new_config, source_values)
             await self._metadata_store.update_thread(
                 new_thread_id, mark_state_updated=True
