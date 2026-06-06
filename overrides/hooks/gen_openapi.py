@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -44,11 +45,23 @@ def _build_openapi() -> dict[str, Any]:
 
 
 def on_post_build(config: Any, **_kwargs: Any) -> None:
-    """Write the generated OpenAPI schema into the built site directory."""
+    """Write the generated OpenAPI schema into the built site directory.
+
+    A failure here means the API explorer would ship with no (or a stale)
+    schema. In CI we fail the build so a broken explorer can never publish; for
+    local builds we only warn, so iterating on prose doesn't require the package
+    to import cleanly.
+    """
     try:
         schema = _build_openapi()
-    except Exception as exc:  # noqa: BLE001 — surface, but don't fail the docs build
-        log.warning("skeino: could not generate OpenAPI schema (%s)", exc)
+    except Exception as exc:
+        if os.environ.get("CI"):
+            raise
+        log.warning(
+            "skeino: could not generate OpenAPI schema (%s); the API explorer "
+            "will be empty in this local build.",
+            exc,
+        )
         return
 
     out_path = Path(config["site_dir"]) / _REL_OUTPUT

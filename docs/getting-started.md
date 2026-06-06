@@ -126,10 +126,10 @@ With the server running, hit the health and info endpoints:
 
 ```bash
 curl http://localhost:8000/api/health
-# {"status":"ok","version":"1.0.0"}
+# {"status":"healthy","version":"1.0.0"}
 
 curl http://localhost:8000/info
-# {"status":"ok","name":"skeino","version":"1.0.0"}
+# {"status":"ok","name":"my_agent","version":"1.0.0"}
 ```
 
 Then create a thread and start a streaming run:

@@ -76,8 +76,8 @@ runtime.
 ## Health checks
 
 Wire your orchestrator's liveness/readiness probe to `GET /api/health`, which
-returns `{"status": "ok", "version": "..."}`. `GET /info` returns the server
-name and version for SDK clients.
+returns `{"status": "healthy", "version": "..."}`. `GET /info` returns the
+server name and version for SDK clients.
 
 ## Observability
 
