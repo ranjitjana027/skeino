@@ -40,6 +40,7 @@ _THREAD_ERROR: Final[ThreadStatus] = "error"
 _RUN_RUNNING: Final[RunStatus] = "running"
 _RUN_SUCCESS: Final[RunStatus] = "success"
 _RUN_ERROR: Final[RunStatus] = "error"
+_RUN_INTERRUPTED: Final[RunStatus] = "interrupted"
 _RUN_LIST_STATUSES: Final[frozenset[str]] = frozenset(
     {"pending", "running", "error", "success", "timeout", "interrupted"}
 )
@@ -97,25 +98,25 @@ class RunOps:
                 status_value=_THREAD_IDLE,
                 mark_state_updated=True,
             )
+            # Read token usage while we still hold the lock; otherwise an
+            # enqueued run for this thread could advance the graph state
+            # between release and the read, yielding another run's totals.
+            total_tokens = await self._total_run_tokens(thread_id)
         except HTTPException as exc:
             self._log_error(
-                "Run %s failed for thread %s: %s", run_id, thread_id, exc.detail
+                "Run %s failed for thread %s: %s",
+                run_id,
+                thread_id,
+                exc.detail,
+                exc=exc,
             )
-            await self._metadata_store.update_run_status(
-                run_id, _RUN_ERROR, error=str(exc.detail)
-            )
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_ERROR
-            )
+            await self._mark_run_failed(run_id, thread_id, str(exc.detail))
             raise
         except Exception as exc:
-            self._log_error("Run %s failed for thread %s: %s", run_id, thread_id, exc)
-            await self._metadata_store.update_run_status(
-                run_id, _RUN_ERROR, error=str(exc)
+            self._log_error(
+                "Run %s failed for thread %s: %s", run_id, thread_id, exc, exc=exc
             )
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_ERROR
-            )
+            await self._mark_run_failed(run_id, thread_id, str(exc))
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(exc),
@@ -128,7 +129,7 @@ class RunOps:
         # rate-limit quota. The streaming path reports this via the 'end' event;
         # here we attach it to the run metadata for the X-Tokens-Used header.
         if isinstance(run.metadata, dict):
-            run.metadata["total_tokens"] = await self._total_run_tokens(thread_id)
+            run.metadata["total_tokens"] = total_tokens
         return run
 
     async def create_streaming_run(
@@ -145,31 +146,30 @@ class RunOps:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="'events' stream_mode cannot be combined with other modes.",
             )
-        if (
-            request.multitask_strategy in {"reject", "rollback", "interrupt"}
-            and lock.locked()
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"Thread {thread_id} already has an active run; "
-                    f"multitask strategy {request.multitask_strategy!r} rejected."
-                ),
+        # Acquire the lock (enforcing the multitask strategy) *before* creating
+        # the run row or returning the generator. Deferring the acquire into the
+        # generator would let concurrent streaming requests all pass a stale
+        # ``lock.locked()`` check and persist orphan 'pending' rows, silently
+        # degrading reject/rollback/interrupt to enqueue. This mirrors the
+        # sync ``create_run`` path.
+        await self._lock_manager.acquire(lock, request.multitask_strategy, thread_id)
+        try:
+            run_row = await self._metadata_store.create_run(
+                run_id=str(uuid4()),
+                thread_id=thread_id,
+                assistant_id=request.assistant_id,
+                metadata=request.metadata,
+                kwargs=self._build_run_kwargs(request),
+                multitask_strategy=request.multitask_strategy,
             )
-
-        run_row = await self._metadata_store.create_run(
-            run_id=str(uuid4()),
-            thread_id=thread_id,
-            assistant_id=request.assistant_id,
-            metadata=request.metadata,
-            kwargs=self._build_run_kwargs(request),
-            multitask_strategy=request.multitask_strategy,
-        )
-        run = self._run_row_to_model(run_row)
+            run = self._run_row_to_model(run_row)
+        except BaseException:
+            lock.release()
+            raise
 
         async def event_stream() -> AsyncIterator[str]:
             event_id = 1
-            await lock.acquire()
+            emitted_data = False
             try:
                 await self._metadata_store.update_thread(
                     thread_id, status_value=_THREAD_BUSY
@@ -202,10 +202,18 @@ class RunOps:
                         ):
                             yield sse_event(event_name, payload, event_id)
                             event_id += 1
+                            emitted_data = True
                         break
-                    except BaseException as exc:
+                    except Exception as exc:
+                        # Only retry while nothing has reached the client. Graph
+                        # execution is not idempotent, so replaying a partially
+                        # streamed run would duplicate output and re-invoke the
+                        # model. ``CancelledError`` is a BaseException and is
+                        # deliberately not caught here so client disconnects
+                        # propagate to the cancellation handler below.
                         if (
                             attempt < STREAM_MAX_RETRIES - 1
+                            and not emitted_data
                             and is_retriable_stream_error(exc)
                         ):
                             backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
@@ -241,12 +249,7 @@ class RunOps:
                 self._log_warning(
                     "Streaming run %s cancelled for thread %s", run.run_id, thread_id
                 )
-                await self._metadata_store.update_run_status(
-                    str(run.run_id), "interrupted", error="Client disconnected."
-                )
-                await self._metadata_store.update_thread(
-                    thread_id, status_value=_THREAD_IDLE
-                )
+                await self._mark_run_interrupted(str(run.run_id), thread_id)
                 raise
             except Exception as exc:
                 self._log_error(
@@ -254,13 +257,11 @@ class RunOps:
                     run.run_id,
                     thread_id,
                     exc,
+                    exc=exc,
                 )
-                await self._metadata_store.update_run_status(
-                    str(run.run_id), _RUN_ERROR, error=str(exc)
-                )
-                await self._metadata_store.update_thread(
-                    thread_id, status_value=_THREAD_ERROR
-                )
+                # Persist the failure best-effort; a store outage must not stop
+                # the client from receiving the 'error' event.
+                await self._mark_run_failed(str(run.run_id), thread_id, str(exc))
                 yield sse_event(
                     "error",
                     {"detail": str(exc), "run_id": str(run.run_id)},
@@ -337,7 +338,16 @@ class RunOps:
             config = {"configurable": {"thread_id": thread_id}}
             snapshot = await self._graph.aget_state(config)
         except Exception as exc:
-            self._log_warning("Failed to read state for token usage: %s", exc)
+            # A read failure (as opposed to "no checkpointer / no state") means
+            # usage is unknown, not zero — log at error level so the silent 0
+            # reported to the quota gateway is at least observable.
+            self._log_error(
+                "Failed to read state for token usage on thread %s; "
+                "reporting 0 tokens: %s",
+                thread_id,
+                exc,
+                exc=exc,
+            )
             return 0
         values = getattr(snapshot, "values", None)
         if not isinstance(values, dict):
@@ -401,10 +411,48 @@ class RunOps:
             "durability": request.durability,
         }
 
+    async def _mark_run_failed(self, run_id: str, thread_id: str, error: str) -> None:
+        """Persist error state for a failed run; best-effort, never raises.
+
+        The store outage that fails these writes is often the same one that
+        failed the run, so they must not mask the original exception or block
+        the client's 'error' event.
+        """
+        try:
+            await self._metadata_store.update_run_status(
+                run_id, _RUN_ERROR, error=error
+            )
+            await self._metadata_store.update_thread(
+                thread_id, status_value=_THREAD_ERROR
+            )
+        except Exception as exc:
+            self._log_error(
+                "Failed to persist error state for run %s: %s", run_id, exc, exc=exc
+            )
+
+    async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> None:
+        """Persist client-disconnect state; best-effort, never raises."""
+        try:
+            await self._metadata_store.update_run_status(
+                run_id, _RUN_INTERRUPTED, error="Client disconnected."
+            )
+            await self._metadata_store.update_thread(
+                thread_id, status_value=_THREAD_IDLE
+            )
+        except Exception as exc:
+            self._log_error(
+                "Failed to persist interrupted state for run %s: %s",
+                run_id,
+                exc,
+                exc=exc,
+            )
+
     def _log_warning(self, msg: str, *args: Any) -> None:
         if self._logger is not None:
             self._logger.warning(msg, *args)
 
-    def _log_error(self, msg: str, *args: Any) -> None:
+    def _log_error(
+        self, msg: str, *args: Any, exc: BaseException | None = None
+    ) -> None:
         if self._logger is not None:
-            self._logger.error(msg, *args)
+            self._logger.error(msg, *args, exc_info=exc)

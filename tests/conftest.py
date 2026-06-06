@@ -28,6 +28,16 @@ class FakeGraph:
     def __init__(self) -> None:
         self.state_by_thread: dict[str, dict[str, Any]] = {}
         self.history_by_thread: dict[str, list[SimpleNamespace]] = {}
+        # --- Failure-injection hooks (default: fully cooperative) ---
+        # When ``invoke_error`` is set, ``ainvoke`` raises it.
+        self.invoke_error: BaseException | None = None
+        # When ``stream_error`` is set, ``astream`` raises it after emitting
+        # ``stream_error_after`` events. ``stream_fail_times`` limits failure to
+        # the first N attempts (0 = every attempt), enabling retry scenarios.
+        self.stream_error: BaseException | None = None
+        self.stream_error_after: int = 0
+        self.stream_fail_times: int = 0
+        self.stream_attempts: int = 0
 
     async def aupdate_state(
         self,
@@ -68,6 +78,8 @@ class FakeGraph:
         durability: str | None = None,
     ) -> dict[str, Any]:
         del context, stream_mode, interrupt_before, interrupt_after, durability
+        if self.invoke_error is not None:
+            raise self.invoke_error
         thread_id = str(config["configurable"]["thread_id"])
         state = self.state_by_thread.setdefault(thread_id, {})
         if isinstance(input_value, dict) and "messages" in input_value:
@@ -103,17 +115,35 @@ class FakeGraph:
         if isinstance(input_value, dict) and "messages" in input_value:
             messages = list(input_value["messages"])
         final_messages = messages + [{"type": "ai", "content": "streamed"}]
-        state["messages"] = final_messages
         modes = (
             [stream_mode]
             if isinstance(stream_mode, str)
             else list(stream_mode or ["values"])
         )
+        events: list[tuple[str, dict[str, Any]]] = []
         for mode in modes:
             if mode == "updates":
-                yield ("updates", {"messages": messages})
+                events.append(("updates", {"messages": messages}))
             if mode == "values":
-                yield ("values", {"messages": final_messages})
+                events.append(("values", {"messages": final_messages}))
+
+        self.stream_attempts += 1
+        pending_error = self.stream_error
+        if pending_error is not None and (
+            self.stream_fail_times == 0
+            or self.stream_attempts <= self.stream_fail_times
+        ):
+            emitted = 0
+            for event in events:
+                if emitted >= self.stream_error_after:
+                    raise pending_error
+                yield event
+                emitted += 1
+            raise pending_error
+
+        for event in events:
+            yield event
+        state["messages"] = final_messages
         self.history_by_thread.setdefault(thread_id, []).append(
             self._snapshot(thread_id, state)
         )
