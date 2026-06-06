@@ -41,9 +41,6 @@ _RUN_RUNNING: Final[RunStatus] = "running"
 _RUN_SUCCESS: Final[RunStatus] = "success"
 _RUN_ERROR: Final[RunStatus] = "error"
 _RUN_INTERRUPTED: Final[RunStatus] = "interrupted"
-_RUN_LIST_STATUSES: Final[frozenset[str]] = frozenset(
-    {"pending", "running", "error", "success", "timeout", "interrupted"}
-)
 
 
 class RunOps:
@@ -279,15 +276,15 @@ class RunOps:
         *,
         limit: int,
         offset: int,
-        status_value: str | None,
+        status_value: RunStatus | None,
     ) -> list[RunModel]:
-        """List run metadata rows for a thread."""
+        """List run metadata rows for a thread.
+
+        ``status_value`` is validated against :data:`RunStatus` at the API edge
+        (FastAPI parses the query param into the Literal), so no membership
+        check is needed here.
+        """
         await self._thread_ops.ensure_exists(thread_id)
-        if status_value is not None and status_value not in _RUN_LIST_STATUSES:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unsupported run status filter: {status_value}",
-            )
         rows = await self._metadata_store.list_run_rows(
             thread_id,
             limit=limit,

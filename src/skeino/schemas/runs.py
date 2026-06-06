@@ -10,6 +10,7 @@ from skeino.schemas.common import (
     CheckpointConfigModel,
     JsonValue,
     MultitaskStrategy,
+    RunIfNotExists,
     RunStatus,
     StreamMode,
 )
@@ -44,7 +45,7 @@ class RunCreateRequest(BaseModel):
     on_disconnect: Literal["cancel", "continue"] = "continue"
     feedback_keys: list[str] = Field(default_factory=list)
     multitask_strategy: MultitaskStrategy = "enqueue"
-    if_not_exists: Literal["create", "reject"] = "reject"
+    if_not_exists: RunIfNotExists = "reject"
     after_seconds: float | None = None
     checkpoint_during: bool = False
     durability: Literal["sync", "async", "exit"] = "exit"

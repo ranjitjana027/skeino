@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The `status` filter on `GET /threads/{id}/runs` is now typed as the `RunStatus`
+  literal, so invalid values are rejected at the API edge with a 422 instead of
+  by a hand-maintained membership check.
+
 ### Fixed
 
 - Assistant lookups no longer resolve an arbitrary valid UUID to the singleton
@@ -46,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an enqueued run can no longer report another run's totals; checkpoint-read
   failures during usage accounting are logged at error level.
 - Run failures now log a full traceback (`exc_info`) instead of just the message.
+- Threaded the `ThreadIfExists`/`RunIfNotExists`/`RunStatus` literal types through
+  the metadata-store protocol and both implementations instead of widening them
+  to bare `str` at the boundary, so mypy now verifies these closed value sets end
+  to end. Removed the duplicated `_RUN_LIST_STATUSES` shadow constant.
 
 ## [0.1.0] - 2026-06-06
 
