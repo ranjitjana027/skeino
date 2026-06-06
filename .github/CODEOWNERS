@@ -1,0 +1,10 @@
+# Code owners are automatically requested for review on pull requests.
+# See https://docs.github.com/articles/about-code-owners
+
+# Default owner for everything in the repo.
+*       @ranjitjana027
+
+# CI/CD, release, and security-sensitive configuration.
+/.github/        @ranjitjana027
+/pyproject.toml  @ranjitjana027
+/poetry.lock     @ranjitjana027
