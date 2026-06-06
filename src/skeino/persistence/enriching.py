@@ -18,10 +18,17 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
     """Thin wrapper that enriches checkpoint metadata with run_id from config."""
 
     def __init__(self, inner: AsyncPostgresSaver) -> None:
-        """Wrap an existing ``AsyncPostgresSaver`` and share its connection state."""
+        """Initialise a saver over ``inner``'s connection and serde.
+
+        We construct a fully-functional ``AsyncPostgresSaver`` over the shared
+        connection rather than copying ``inner.__dict__`` onto ``self``. The
+        previous approach clobbered everything the base ``__init__`` set up and
+        left two savers sharing mutable connection state with no clear owner;
+        any inherited method not overridden here ran against the copied state
+        instead of the inner saver. Only the write path is overridden — every
+        read uses the inherited implementation against the same connection.
+        """
         super().__init__(inner.conn, serde=inner.serde)
-        self.__dict__.update(inner.__dict__)
-        self._inner = inner
 
     @staticmethod
     def _enrich(metadata: Any, config: Any) -> Any:
@@ -50,7 +57,7 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
         self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
     ) -> Any:
         """Persist a checkpoint, enriching its metadata with ``run_id`` first."""
-        return await self._inner.aput(
+        return await super().aput(
             config, checkpoint, self._enrich(metadata, config), new_versions
         )
 
@@ -58,6 +65,6 @@ class RunEnrichingCheckpointer(AsyncPostgresSaver):
         self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
     ) -> Any:
         """Persist a checkpoint synchronously, enriching its metadata with ``run_id``."""
-        return self._inner.put(
+        return super().put(
             config, checkpoint, self._enrich(metadata, config), new_versions
         )
