@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "skeino"
-version = "0.3.0"
+version = "1.0.0"
 description = "Reusable, embeddable replacement for the langgraph dev HTTP server: threads, runs, streaming, and assistants over any LangGraph graph."
 authors = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
 maintainers = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
