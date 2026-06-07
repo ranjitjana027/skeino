@@ -63,13 +63,12 @@ checkpoints by id, and a deletable checkpointer.
   behaviour, assert the leak does NOT happen.
 - Cover the unhappy paths: 404 (missing), 409 (conflict), 422 (validation).
 
-## 4. Changelog, version & docs
+## 4. Changelog & docs
 
 - Add a **changelog fragment** `changelog.d/<id>.<type>.md` (type ∈
   added/changed/fixed/…) — one file per change, not a `CHANGELOG.md` edit. See
-  `changelog.d/README.md`.
-- **Bump `version` in `pyproject.toml`**: minor for a new endpoint/feature,
-  patch for a fix, major for a breaking change. (`__version__` derives from it.)
+  `changelog.d/README.md`. The version is set at release time by `cut-release`,
+  not per PR.
 - `docs/api-reference/http.md` — add the route to the relevant table.
 - `docs/concepts/*.md` — a sentence in the matching concept page.
 
