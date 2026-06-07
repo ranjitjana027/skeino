@@ -30,6 +30,7 @@ from skeino.persistence import (
     InMemoryMetadataStore,
     MetadataStore,
     MetadataStoreProtocol,
+    SqliteMetadataStore,
     open_checkpointer,
 )
 from skeino.registry import GraphRegistry
@@ -54,6 +55,60 @@ async def _materialise_graph(
     if isinstance(result, Awaitable):
         return await result
     return result
+
+
+_MEMORY_SCHEMES: frozenset[str] = frozenset({"memory"})
+
+
+def _resolve_checkpointer_target(
+    settings: SkeinoSettings,
+) -> tuple[str | None, str | None] | None:
+    """Return ``(uri, scheme)`` for the checkpointer, or None when none is needed.
+
+    Precedence: ``postgres_uri`` → ``sqlite_path`` → an explicit
+    ``checkpointer_scheme`` (e.g. a custom/registered backend or ``memory``).
+    """
+    if settings.postgres_uri:
+        return settings.postgres_uri, settings.checkpointer_scheme
+    if settings.sqlite_path:
+        return settings.sqlite_path, settings.checkpointer_scheme or "sqlite"
+    if settings.checkpointer_scheme:
+        return None, settings.checkpointer_scheme
+    return None
+
+
+def _resolve_metadata_store(settings: SkeinoSettings) -> MetadataStoreProtocol:
+    """Pick the metadata store backend (Postgres → SQLite → in-memory)."""
+    if settings.postgres_uri:
+        return MetadataStore(settings.postgres_uri)
+    if settings.sqlite_path:
+        return SqliteMetadataStore(settings.sqlite_path)
+    return InMemoryMetadataStore()
+
+
+def _check_metadata_durability(settings: SkeinoSettings) -> None:
+    """Fail loudly when a durable checkpointer would pair with ephemeral metadata.
+
+    A durable graph state alongside an in-memory thread/run list is a confusing
+    split-brain (state persists, the run list evaporates on restart). This only
+    arises with an explicit durable ``checkpointer_scheme`` and no
+    ``postgres_uri``/``sqlite_path``; ``allow_ephemeral_metadata`` opts out.
+    """
+    scheme = settings.checkpointer_scheme
+    durable_checkpointer = scheme is not None and scheme.lower() not in _MEMORY_SCHEMES
+    durable_metadata = bool(settings.postgres_uri or settings.sqlite_path)
+    if (
+        durable_checkpointer
+        and not durable_metadata
+        and not (settings.allow_ephemeral_metadata)
+    ):
+        raise ValueError(
+            f"checkpointer_scheme={scheme!r} configures a durable checkpointer, "
+            "but no durable metadata store is set (no postgres_uri / sqlite_path) "
+            "— thread/run metadata would be in-memory and lost on restart. Set "
+            "postgres_uri or sqlite_path, or pass allow_ephemeral_metadata=True "
+            "to accept ephemeral metadata."
+        )
 
 
 def _resolve_default_id(
@@ -89,13 +144,16 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
+        _check_metadata_durability(settings)
         async with AsyncExitStack() as stack:
             checkpointer: BaseCheckpointSaver | None = None
-            if settings.postgres_uri or settings.checkpointer_scheme:
+            target = _resolve_checkpointer_target(settings)
+            if target is not None:
+                uri, scheme = target
                 checkpointer = await stack.enter_async_context(
                     open_checkpointer(
-                        settings.postgres_uri,
-                        scheme=settings.checkpointer_scheme,
+                        uri,
+                        scheme=scheme,
                         options=dict(settings.checkpointer_options),
                     )
                 )
@@ -106,16 +164,17 @@ def create_app(
             registry = GraphRegistry(compiled, default=default_id)
             default_graph = registry.default_graph
 
-            metadata_store: MetadataStoreProtocol
-            if settings.postgres_uri:
-                metadata_store = MetadataStore(settings.postgres_uri)
-            else:
-                metadata_store = InMemoryMetadataStore()
+            metadata_store: MetadataStoreProtocol = _resolve_metadata_store(settings)
+            if isinstance(metadata_store, InMemoryMetadataStore):
                 logger.info(
-                    "POSTGRES_URI not set — using in-memory metadata store "
-                    "(thread/run metadata will not persist across restarts)."
+                    "Using in-memory metadata store — thread/run metadata will "
+                    "not persist across restarts. Set postgres_uri or sqlite_path "
+                    "for durable metadata."
                 )
             await metadata_store.setup()
+            aclose = getattr(metadata_store, "aclose", None)
+            if aclose is not None:
+                stack.push_async_callback(aclose)
 
             streamer = Streamer(
                 default_graph,

@@ -34,9 +34,11 @@ app = create_app(
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `postgres_uri` | `str \| None` | `None` | Postgres connection string. When set, enables the Postgres checkpointer and metadata store; when absent, both are in-memory. |
-| `checkpointer_scheme` | `str \| None` | `None` | Force a checkpointer scheme. Derived from `postgres_uri` (or `memory`) when omitted. |
+| `postgres_uri` | `str \| None` | `None` | Postgres connection string. When set, enables the Postgres checkpointer and metadata store; absent (and no `sqlite_path`) → both in-memory. |
+| `sqlite_path` | `str \| None` | `None` | SQLite path or `:memory:`. When set (and no `postgres_uri`), both the checkpointer and metadata store use SQLite — a serverless durable option. Requires the `skeino[sqlite]` extra. |
+| `checkpointer_scheme` | `str \| None` | `None` | Force a checkpointer scheme (`postgres`/`sqlite`/`redis`/`memory`/custom). Derived from `postgres_uri`/`sqlite_path` (or `memory`) when omitted. |
 | `checkpointer_options` | `dict[str, object]` | `{}` | Extra options passed to the checkpointer builder (e.g. `{"setup_schema": False}`). |
+| `allow_ephemeral_metadata` | `bool` | `False` | Permit a durable checkpointer to run with the in-memory metadata store. Off by default so the split-brain fails loudly at startup. |
 
 #### Assistant identity
 

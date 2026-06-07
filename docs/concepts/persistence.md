@@ -6,8 +6,9 @@ skeino persists two distinct kinds of data, through two independent mechanisms:
 - **Thread & run metadata** — through a **metadata store**.
 
 Both are selected from your [`SkeinoSettings`](configuration.md). With a
-`postgres_uri`, both use Postgres; without one, both fall back to ephemeral
-in-memory implementations.
+`postgres_uri`, both use Postgres; with a `sqlite_path` (and no `postgres_uri`),
+both use SQLite — a serverless durable option; without either, both fall back to
+ephemeral in-memory implementations.
 
 ## Checkpointers
 
@@ -20,16 +21,23 @@ builder or uses it to read state for the API.
 Checkpointers are looked up by **URI scheme** through a small decorator-based
 registry. Two ship out of the box:
 
-| Scheme(s) | Implementation | Persists? |
-| --- | --- | --- |
-| `postgres`, `postgresql` | `AsyncPostgresSaver` (wrapped — see below) | Yes |
-| `memory` | LangGraph `MemorySaver` | No (in-process) |
+| Scheme(s) | Implementation | Persists? | Install |
+| --- | --- | --- | --- |
+| `postgres`, `postgresql` | `AsyncPostgresSaver` (wrapped — see below) | Yes | bundled |
+| `sqlite`, `sqlite3` | `AsyncSqliteSaver` | Yes (file) | `skeino[sqlite]` |
+| `redis` | `AsyncRedisSaver` | Yes | `pip install langgraph-checkpoint-redis` ¹ |
+| `memory` | LangGraph `MemorySaver` | No (in-process) | bundled |
+
+¹ Redis isn't a managed skeino extra (`langgraph-checkpoint-redis` caps Python at
+`<3.14`); install it yourself. The builder imports it lazily and raises a clear
+error if it's missing.
 
 Scheme resolution at startup:
 
 1. `SkeinoSettings.checkpointer_scheme` if set, else
-2. the scheme parsed from `postgres_uri`, else
-3. `memory`.
+2. `sqlite` when `sqlite_path` is set, else
+3. the scheme parsed from `postgres_uri`, else
+4. `memory`.
 
 ### Run-stamped checkpoints
 
@@ -80,24 +88,37 @@ the same protocol:
   two tables on startup, `app_threads` and `app_runs` (the latter referencing the
   former with `ON DELETE CASCADE`), and opens a fresh async connection per
   operation.
+- **`SqliteMetadataStore`** (SQLite) — used when `sqlite_path` is set (and no
+  `postgres_uri`). Same two tables over `aiosqlite` (a single shared connection),
+  for a durable, serverless deployment. Requires the `skeino[sqlite]` extra.
 - **`InMemoryMetadataStore`** — used otherwise. State lives in process and is
   lost on restart; skeino logs a warning so this isn't a silent surprise.
 
-Any object implementing the metadata-store protocol can be supplied for advanced
-use, but the two built-ins cover the common cases.
+The metadata store always follows the same backend as durable persistence: set
+`postgres_uri` **or** `sqlite_path` and both the checkpointer and metadata store
+use it. Any object implementing the metadata-store protocol can be supplied for
+advanced use.
+
+!!! warning "No split-brain"
+    If you configure a *durable* `checkpointer_scheme` (e.g. a custom backend)
+    without a `postgres_uri`/`sqlite_path`, the metadata store would be in-memory
+    while graph state persists — the thread/run list would vanish on restart
+    while state survives. skeino **fails loudly at startup** in that case; set a
+    durable metadata backend or pass `allow_ephemeral_metadata=True` to opt in.
 
 ## Choosing a setup
 
 | You want… | Use |
 | --- | --- |
-| Quick local dev, tests, throwaway demos | Default (in-memory) — no `postgres_uri` |
-| State that survives restarts / multiple workers sharing a DB | `postgres_uri="postgresql://…"` |
-| A different backend (Redis, Mongo, …) | A [custom checkpointer](../guides/custom-checkpointer.md) |
+| Quick local dev, tests, throwaway demos | Default (in-memory) — no `postgres_uri`/`sqlite_path` |
+| Durable, serverless (single node, a file) | `sqlite_path="/data/skeino.db"` (`skeino[sqlite]`) |
+| State shared across workers / a managed DB | `postgres_uri="postgresql://…"` |
+| A different backend (Redis, Mongo, …) | A [custom checkpointer](../guides/custom-checkpointer.md) + a durable metadata store |
 
 !!! warning "In-memory is not for production"
     The in-memory checkpointer and metadata store keep everything in the
     process. They're ideal for development and tests, but all threads, runs, and
-    state vanish on restart and are not shared across workers. Use Postgres for
-    anything durable.
+    state vanish on restart and are not shared across workers. Use Postgres or
+    SQLite for anything durable.
 
 See [Set up Postgres persistence](../guides/postgres.md) for a concrete setup.

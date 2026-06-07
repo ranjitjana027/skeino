@@ -41,6 +41,16 @@ langchain-core = "*"
 psycopg = { extras = ["binary", "pool"], version = "^3.3.3" }
 python-dotenv = ">=1.0.1"
 uvicorn = ">=0.41,<0.50"
+# Optional SQLite backend — installed via the `skeino[sqlite]` extra and
+# imported lazily so it stays optional. (Redis is supported via a lazy builder
+# too, but is NOT a managed extra: langgraph-checkpoint-redis caps Python at
+# <3.14, narrower than skeino's range, so install it yourself —
+# `pip install langgraph-checkpoint-redis`.)
+aiosqlite = { version = ">=0.20.0", optional = true }
+langgraph-checkpoint-sqlite = { version = ">=2.0.0", optional = true }
+
+[tool.poetry.extras]
+sqlite = ["aiosqlite", "langgraph-checkpoint-sqlite"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=9.0.0"
@@ -105,6 +115,12 @@ warn_unused_ignores = true
 warn_no_return = true
 warn_unreachable = true
 strict_equality = true
+
+[[tool.mypy.overrides]]
+# langgraph-checkpoint-redis is not a managed dependency (it caps Python at
+# <3.14); the redis checkpointer builder imports it lazily.
+module = ["langgraph.checkpoint.redis.*"]
+ignore_missing_imports = true
 
 [tool.bandit]
 exclude_dirs = ["tests"]

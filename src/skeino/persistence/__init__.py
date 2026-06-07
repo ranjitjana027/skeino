@@ -9,6 +9,7 @@ from skeino.persistence.checkpointer import (
 from skeino.persistence.enriching import RunEnrichingCheckpointer
 from skeino.persistence.in_memory_store import InMemoryMetadataStore
 from skeino.persistence.metadata_store import MetadataStore
+from skeino.persistence.sqlite_store import SqliteMetadataStore
 
 __all__ = [
     "CheckpointerSpec",
@@ -16,6 +17,7 @@ __all__ = [
     "MetadataStore",
     "MetadataStoreProtocol",
     "RunEnrichingCheckpointer",
+    "SqliteMetadataStore",
     "open_checkpointer",
     "register_checkpointer",
 ]

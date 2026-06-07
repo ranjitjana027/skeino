@@ -130,3 +130,73 @@ async def _build_memory(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
     """Build an in-process MemorySaver. URI is ignored."""
     del spec
     yield MemorySaver()
+
+
+def _sqlite_conn_string(uri: str | None) -> str:
+    """Normalise a sqlite URI/path to what AsyncSqliteSaver expects."""
+    if not uri:
+        return ":memory:"
+    for prefix in ("sqlite:///", "sqlite://"):
+        if uri.startswith(prefix):
+            return uri[len(prefix) :] or ":memory:"
+    return uri
+
+
+@register_checkpointer("sqlite", "sqlite3")
+@asynccontextmanager
+async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async SQLite checkpointer (requires the ``skeino[sqlite]`` extra)."""
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'sqlite' checkpointer requires the skeino[sqlite] extra "
+            "(pip install 'skeino[sqlite]')."
+        ) from exc
+
+    conn_string = _sqlite_conn_string(spec.uri)
+    setup_schema = bool(spec.options.get("setup_schema", True))
+    async with AsyncExitStack() as stack:
+        saver = await stack.enter_async_context(
+            AsyncSqliteSaver.from_conn_string(conn_string)
+        )
+        if setup_schema and hasattr(saver, "setup"):
+            result = saver.setup()
+            if inspect.isawaitable(result):
+                await result
+        yield saver
+
+
+@register_checkpointer("redis")
+@asynccontextmanager
+async def _build_redis(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async Redis checkpointer.
+
+    Requires ``langgraph-checkpoint-redis``, which is not a managed skeino extra
+    (it caps Python at <3.14) — install it yourself:
+    ``pip install langgraph-checkpoint-redis``.
+    """
+    if not spec.uri:
+        raise ValueError("Redis checkpointer requires a connection URI.")
+    try:
+        from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'redis' checkpointer requires langgraph-checkpoint-redis "
+            "(pip install langgraph-checkpoint-redis)."
+        ) from exc
+
+    setup_schema = bool(spec.options.get("setup_schema", True))
+    async with AsyncExitStack() as stack:
+        saver = await stack.enter_async_context(
+            AsyncRedisSaver.from_conn_string(spec.uri)
+        )
+        if setup_schema:
+            for setup_name in ("asetup", "setup"):
+                setup_fn = getattr(saver, setup_name, None)
+                if setup_fn is not None:
+                    result = setup_fn()
+                    if inspect.isawaitable(result):
+                        await result
+                    break
+        yield saver

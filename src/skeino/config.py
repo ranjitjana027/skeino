@@ -26,12 +26,24 @@ class SkeinoSettings(BaseModel):
 
     # Persistence
     postgres_uri: str | None = None
+    sqlite_path: str | None = Field(
+        default=None,
+        description="SQLite path (e.g. '/data/skeino.db' or ':memory:'). When set "
+        "(and postgres_uri is not), both the checkpointer and the metadata store "
+        "use SQLite — a serverless durable option. Requires the skeino[sqlite] extra.",
+    )
     checkpointer_scheme: str | None = Field(
         default=None,
         description="Override the checkpointer scheme. Derived from postgres_uri "
         "(or 'memory' when no URI is set) when omitted.",
     )
     checkpointer_options: dict[str, object] = Field(default_factory=dict)
+    allow_ephemeral_metadata: bool = Field(
+        default=False,
+        description="Permit a durable checkpointer to run with the in-memory "
+        "metadata store. Off by default so the split-brain (durable graph state, "
+        "ephemeral thread/run list) fails loudly at startup instead of silently.",
+    )
 
     # Assistant identity
     default_assistant_id: str | None = Field(
