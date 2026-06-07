@@ -46,6 +46,7 @@ Prefix: `/threads`
 | `GET` | `/threads/{thread_id}` | — | `ThreadModel` | Metadata plus latest values. |
 | `PATCH` | `/threads/{thread_id}` | `ThreadPatchRequest` | `ThreadModel` | Update thread metadata. |
 | `DELETE` | `/threads/{thread_id}` | — | `204` | Delete the thread, its runs, and its checkpoints. |
+| `POST` | `/threads/{thread_id}/copy` | — | `ThreadModel` | Fork into a new thread seeded with the source's latest state (shallow; metadata stamped `forked_from`). |
 | `GET` | `/threads/{thread_id}/state` | — | `ThreadStateModel` | Latest checkpoint state. Query: `subgraphs: bool = false`. |
 | `POST` | `/threads/{thread_id}/state` | `ThreadStateUpdateRequest` | `CheckpointConfigModel` | Write/patch state (human-in-the-loop edit); returns the new checkpoint. |
 | `GET` | `/threads/{thread_id}/state/{checkpoint_id}` | — | `ThreadStateModel` | State at a specific checkpoint (time travel). |
