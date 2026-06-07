@@ -47,14 +47,9 @@ v1 routes a **single graph**.
 - Behavioural tests added/updated (see below).
 - A changelog **fragment** for any user-facing change: `changelog.d/<id>.<type>.md`
   (type ∈ added/changed/deprecated/removed/fixed/security). Do **not** edit
-  `CHANGELOG.md` directly — see `changelog.d/README.md`.
-- A **version bump** in `pyproject.toml` for bug-fix or feature PRs, following
-  semver: **patch** for a bug fix, **minor** for a new feature, **major** for a
-  breaking change. (Docs/chore/CI-only PRs don't bump.) `__version__` derives
-  from the package metadata, so only `pyproject.toml` changes. Same-type
-  concurrent PRs that bump to the same version merge cleanly (identical line);
-  resolve cross-type collisions to the higher version. The release just tags the
-  accumulated version and collates fragments.
+  `CHANGELOG.md` directly — see `changelog.d/README.md`. The version is **not**
+  bumped per PR — `cut-release` decides and sets it at release time from the
+  accumulated fragments (`__version__` derives from `pyproject.toml`).
 - Docs updated where relevant: `docs/api-reference/http.md` (endpoint table) and
   the matching `docs/concepts/*.md`.
 - All five checks green. Code fully typed (mypy is strict).

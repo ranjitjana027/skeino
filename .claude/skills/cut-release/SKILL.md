@@ -15,18 +15,16 @@ itself is just a version bump + changelog collation merged to `main`, then a tag
 
 ## 1. Decide the version (semver)
 
-Feature/fix PRs bump `pyproject.toml`'s `version` themselves (patch=fix,
-minor=feature, major=breaking), so **`main` usually already carries the target
-release version** — confirm it matches the pending `changelog.d/` fragments
-(`poetry run towncrier build --draft --version 0.0.0` previews them):
+The version is **not** bumped per PR — decide it here at release time from the
+pending `changelog.d/` fragments (`poetry run towncrier build --draft --version
+0.0.0` previews them), bumping from `main`'s current `pyproject.toml` version:
 
-- Any `added`/`changed`/`removed` fragment → at least **minor** (major if the
-  fragment is breaking / a `removed`).
+- Any breaking change / a `removed` fragment → **major**.
+- Any `added`/`changed` fragment → **minor**.
 - Only `fixed`/docs/chore fragments → **patch**.
 
-If `main`'s version already reflects this, reuse it; otherwise bump to it. If
-unsure between two, ask the user. Confirm whether they want a real PyPI publish
-(default yes) or a dry run.
+If unsure between two, ask the user. Confirm whether they want a real PyPI
+publish (default yes) or a dry run.
 
 ## 2. Branch and bump
 

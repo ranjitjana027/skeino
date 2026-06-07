@@ -18,7 +18,6 @@
 - [ ] `poetry run pytest` passes
 - [ ] Added/updated tests for the change
 - [ ] Added a changelog fragment in `changelog.d/` (not a direct `CHANGELOG.md` edit)
-- [ ] Bumped `version` in `pyproject.toml` (patch = bug fix, minor = feature, major = breaking) — bug-fix/feature PRs only
 - [ ] Updated docs/README where relevant
 
 ## Notes for reviewers
