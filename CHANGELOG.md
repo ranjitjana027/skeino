@@ -10,6 +10,26 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [1.0.0] - 2026-06-07
+
+### Added
+
+- Pluggable, optional database backends selected by `checkpointer_scheme`: **SQLite** (`skeino[sqlite]`), **PostgreSQL** (`skeino[postgres]`), and **MongoDB** (`skeino[mongodb]`) — each with a native durable metadata store (`SqliteMetadataStore`, `MetadataStore`, `MongoMetadataStore`) — plus a lazy `redis` checkpointer builder. All DB drivers are imported lazily, so the default install ships only the in-memory backend. ([#25](https://github.com/ranjitjana027/skeino/issues/25))
+
+### Changed
+
+- **Breaking:** persistence is now **scheme-authoritative**. `checkpointer_scheme` (default `"memory"`) alone selects the backend for *both* the checkpointer and the metadata store; the new `checkpointer_uri` is only the connection string for that scheme. A URI without a matching scheme is ignored (e.g. `checkpointer_scheme="memory"` with a Postgres URI still uses in-memory). `langgraph.json`'s `store.uri` now maps to `checkpointer_uri` with the scheme derived from the URI prefix. ([#25](https://github.com/ranjitjana027/skeino/issues/25))
+- Adopted [towncrier](https://towncrier.readthedocs.io/) changelog fragments (`changelog.d/`): contributors now add a per-change fragment instead of editing `CHANGELOG.md`, so concurrent PRs no longer conflict on the changelog. ([#27](https://github.com/ranjitjana027/skeino/issues/27))
+
+### Removed
+
+- **Breaking:** removed the `postgres_uri` and `sqlite_path` settings (which doubled as backend selectors) in favour of `checkpointer_scheme` + `checkpointer_uri`. PostgreSQL is no longer a hard dependency — install `skeino[postgres]` for it. ([#25](https://github.com/ranjitjana027/skeino/issues/25))
+
+### Fixed
+
+- `skeino.__version__` is now derived from the installed package metadata instead of a hard-coded literal that drifted out of sync with `pyproject.toml` (it had been stuck at `0.1.0`). ([#35](https://github.com/ranjitjana027/skeino/issues/35))
+
+
 ## [0.3.0] - 2026-06-07
 
 ### Added
@@ -90,7 +110,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ranjitjana027/skeino/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/ranjitjana027/skeino/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ranjitjana027/skeino/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ranjitjana027/skeino/releases/tag/v0.1.0
