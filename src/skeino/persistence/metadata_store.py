@@ -210,6 +210,18 @@ class MetadataStore:
                 await cursor.execute(query, values)
             await conn.commit()
 
+    async def delete_thread(self, thread_id: str) -> None:
+        """Delete a thread row and its run rows."""
+        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM app_runs WHERE thread_id = %s", (thread_id,)
+                )
+                await cursor.execute(
+                    "DELETE FROM app_threads WHERE thread_id = %s", (thread_id,)
+                )
+            await conn.commit()
+
     async def search_thread_rows(
         self,
         request: ThreadSearchRequest,

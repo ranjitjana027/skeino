@@ -53,6 +53,24 @@ class ThreadCreateRequest(BaseModel):
     supersteps: list[ThreadSuperstep] = Field(default_factory=list)
 
 
+class ThreadPatchRequest(BaseModel):
+    """Mutable fields updatable on an existing thread.
+
+    ``metadata`` is optional so an empty body is a no-op; send
+    ``{"metadata": {}}`` to intentionally clear a thread's metadata.
+    """
+
+    metadata: dict[str, JsonValue] | None = None
+
+
+class ThreadStateUpdateRequest(BaseModel):
+    """Manually write/patch a thread's state (human-in-the-loop edit)."""
+
+    values: dict[str, JsonValue] | list[JsonValue] | None = None
+    as_node: str | None = None
+    checkpoint: CheckpointConfigModel | None = None
+
+
 class ThreadModel(BaseModel):
     """LangGraph-compatible thread representation."""
 

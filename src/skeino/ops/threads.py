@@ -13,8 +13,10 @@ from skeino.schemas import (
     RunIfNotExists,
     ThreadCreateRequest,
     ThreadModel,
+    ThreadPatchRequest,
     ThreadSearchRequest,
     ThreadStateModel,
+    ThreadStateUpdateRequest,
     ThreadStatus,
     ThreadTtlInfo,
 )
@@ -111,6 +113,49 @@ class ThreadOps:
         row = await self.require_row(thread_id)
         return await self.build_model_from_row(row)
 
+    async def update(self, thread_id: str, request: ThreadPatchRequest) -> ThreadModel:
+        """Update a thread's mutable metadata and return the updated record."""
+        await self.ensure_exists(thread_id)
+        await self._metadata_store.update_thread(thread_id, metadata=request.metadata)
+        return await self.build_model_from_row(await self.require_row(thread_id))
+
+    async def delete(self, thread_id: str) -> None:
+        """Delete a thread, its run rows, and its checkpoint history."""
+        await self.ensure_exists(thread_id)
+        checkpointer = getattr(self._graph, "checkpointer", None)
+        delete_checkpoints = getattr(checkpointer, "adelete_thread", None)
+        if delete_checkpoints is not None:
+            await delete_checkpoints(thread_id)
+        await self._metadata_store.delete_thread(thread_id)
+
+    async def update_state(
+        self, thread_id: str, request: ThreadStateUpdateRequest
+    ) -> CheckpointConfigModel:
+        """Write/patch thread state (human-in-the-loop edit).
+
+        Applies ``values`` as an update through the graph (optionally as a
+        specific node and/or from a specific checkpoint) and returns the
+        checkpoint config produced by the write.
+        """
+        await self.ensure_exists(thread_id)
+        config = build_thread_config(thread_id, {}, request.checkpoint)
+        # Explicit None check: an empty list payload (`[]`) must stay a list,
+        # not be coerced to `{}` by truthiness.
+        values = request.values if request.values is not None else {}
+        new_config = await self._graph.aupdate_state(
+            config,
+            normalize_input_payload(values),
+            as_node=request.as_node,
+        )
+        await self._metadata_store.update_thread(thread_id, mark_state_updated=True)
+        configurable = (new_config or {}).get("configurable", {})
+        return CheckpointConfigModel(
+            thread_id=str(configurable.get("thread_id", thread_id)),
+            checkpoint_ns=configurable.get("checkpoint_ns"),
+            checkpoint_id=configurable.get("checkpoint_id"),
+            checkpoint_map=configurable.get("checkpoint_map"),
+        )
+
     async def copy(self, source_thread_id: str) -> ThreadModel:
         """Fork a thread into an independent copy seeded with its latest state.
 
@@ -172,11 +217,19 @@ class ThreadOps:
         return results
 
     async def get_state(
-        self, thread_id: str, *, subgraphs: bool = False
+        self,
+        thread_id: str,
+        *,
+        subgraphs: bool = False,
+        checkpoint: CheckpointConfigModel | None = None,
     ) -> ThreadStateModel:
-        """Return the latest checkpoint state for a thread."""
+        """Return thread state — the latest checkpoint, or a specific one.
+
+        When ``checkpoint`` is provided, state is read at that checkpoint
+        (time travel); otherwise the latest checkpoint is returned.
+        """
         await self.ensure_exists(thread_id)
-        config = {"configurable": {"thread_id": thread_id}}
+        config = build_thread_config(thread_id, {}, checkpoint)
         snapshot = await self._graph.aget_state(config, subgraphs=subgraphs)
         return serialize_state_snapshot(snapshot)
 

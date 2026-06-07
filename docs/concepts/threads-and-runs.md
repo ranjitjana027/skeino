@@ -56,7 +56,15 @@ A thread is created with `POST /threads`. The request can:
 Thread status is one of `idle`, `busy`, `interrupted`, or `error`. You can read
 a thread's metadata-plus-latest-values with `GET /threads/{id}`, its full latest
 checkpoint with `GET /threads/{id}/state`, and walk its checkpoint history with
-`GET`/`POST /threads/{id}/history`.
+`GET`/`POST /threads/{id}/history`. To read state at a specific point in time,
+use `GET /threads/{id}/state/{checkpoint_id}` (or the `POST .../state/checkpoint`
+variant with a full config body).
+
+You can update a thread's metadata with `PATCH /threads/{id}`, delete it (along
+with its runs and checkpoints) with `DELETE /threads/{id}`, and **edit its state**
+directly with `POST /threads/{id}/state` — a human-in-the-loop write that applies
+`values` (optionally `as_node`, and from a specific `checkpoint`) and returns the
+new checkpoint config.
 
 Threads are searchable with `POST /threads/search`, which filters by ids,
 metadata, state values, and status, with pagination and field selection.
