@@ -73,16 +73,19 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+_POSTGRES_EXTRA_HINT: Final[str] = (
+    "The 'postgres' metadata store requires the skeino[postgres] extra "
+    "(pip install 'skeino[postgres]')."
+)
+
+
 def _pg() -> tuple[Any, Any]:
     """Lazily import psycopg (optional dependency: skeino[postgres])."""
     try:
         import psycopg
         from psycopg.rows import dict_row
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "The 'postgres' metadata store requires the skeino[postgres] extra "
-            "(pip install 'skeino[postgres]')."
-        ) from exc
+        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
     return psycopg, dict_row
 
 
@@ -90,8 +93,10 @@ def _to_jsonb(payload: dict[str, JsonValue] | None) -> Any:
     """Wrap a JSON-serializable dictionary for psycopg JSONB parameters."""
     if payload is None:
         return None
-    from psycopg.types.json import Jsonb
-
+    try:
+        from psycopg.types.json import Jsonb
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
     return Jsonb(payload)
 
 

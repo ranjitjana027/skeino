@@ -189,10 +189,13 @@ def create_app(
                     "not persist across restarts. Use a durable scheme "
                     "(postgres/sqlite/mongodb) with checkpointer_uri to persist."
                 )
-            await metadata_store.setup()
+            # Register cleanup BEFORE setup() so a setup failure that has already
+            # opened resources (sqlite connection, motor client) is still closed
+            # by the exit stack. aclose() is a no-op when nothing was opened.
             aclose = getattr(metadata_store, "aclose", None)
             if aclose is not None:
                 stack.push_async_callback(aclose)
+            await metadata_store.setup()
 
             streamer = Streamer(
                 default_graph,
