@@ -41,25 +41,20 @@ Key points:
 
 ## Selecting it
 
-Once registered (i.e. the module defining the builder is imported), point skeino
-at the scheme. Either let the URI drive selection:
+Once registered (i.e. the module defining the builder is imported), select the
+scheme — the **scheme** decides the backend, and `checkpointer_uri` is its
+connection string:
 
 ```python
 from skeino import create_app, SkeinoSettings
 
 app = create_app(
     graphs={"my_agent": build_graph},
-    settings=SkeinoSettings(postgres_uri="redis://localhost:6379/0"),
-)
-```
-
-…or set the scheme explicitly (useful when the URI scheme is ambiguous or you
-want options without a URI):
-
-```python
-SkeinoSettings(
-    checkpointer_scheme="redis",
-    checkpointer_options={"setup_schema": False, "ttl": 3600},
+    settings=SkeinoSettings(
+        checkpointer_scheme="redis",
+        checkpointer_uri="redis://localhost:6379/0",
+        checkpointer_options={"setup_schema": False, "ttl": 3600},
+    ),
 )
 ```
 
@@ -69,23 +64,20 @@ SkeinoSettings(
     `create_app` resolves the checkpointer. Importing it in the same module that
     calls `create_app` (or your package's `__init__`) is enough.
 
-## Resolution order
+## Resolution
 
-skeino picks the scheme as:
-
-1. `SkeinoSettings.checkpointer_scheme`, else
-2. the scheme parsed from `postgres_uri`, else
-3. `memory`.
-
-If no builder is registered for the resolved scheme, skeino raises a `ValueError`
-listing the known schemes — so a typo'd scheme fails loudly at startup rather
-than silently falling back.
+`SkeinoSettings.checkpointer_scheme` selects the backend directly (default
+`memory`); `checkpointer_uri` is just its connection string. If no builder is
+registered for the scheme, skeino raises a `ValueError` listing the known
+schemes — so a typo'd scheme fails loudly at startup rather than silently
+falling back.
 
 ## A note on metadata persistence
 
 The registry covers the **checkpointer** (graph state). Thread/run **metadata**
-uses a separate store, which is Postgres when `postgres_uri` is set and in-memory
-otherwise. If your custom backend isn't Postgres, metadata will be in-memory
-unless you also supply a metadata store that implements
-[`MetadataStoreProtocol`][skeino.persistence.MetadataStoreProtocol]. See
+uses a separate store that follows the same scheme — native for
+`postgres`/`sqlite`/`mongodb`, in-memory otherwise. A durable custom checkpointer
+without a native metadata store trips the startup **fail-loud** guard unless you
+supply your own [`MetadataStoreProtocol`][skeino.persistence.MetadataStoreProtocol]
+or set `allow_ephemeral_metadata=True`. See
 [Persistence & checkpointers](../concepts/persistence.md).

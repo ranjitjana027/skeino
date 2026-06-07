@@ -30,6 +30,8 @@ from skeino.persistence import (
     InMemoryMetadataStore,
     MetadataStore,
     MetadataStoreProtocol,
+    MongoMetadataStore,
+    SqliteMetadataStore,
     open_checkpointer,
 )
 from skeino.registry import GraphRegistry
@@ -54,6 +56,77 @@ async def _materialise_graph(
     if isinstance(result, Awaitable):
         return await result
     return result
+
+
+_MEMORY_SCHEMES: frozenset[str] = frozenset({"memory", ""})
+_SQLITE_SCHEMES: frozenset[str] = frozenset({"sqlite", "sqlite3"})
+
+# Schemes whose metadata store has a native implementation. Other durable
+# checkpointers (redis, custom) have no native metadata store and trip the
+# fail-loud guard unless allow_ephemeral_metadata is set.
+_NATIVE_METADATA_STORES: dict[str, Callable[[str], MetadataStoreProtocol]] = {
+    "postgres": MetadataStore,
+    "postgresql": MetadataStore,
+    "sqlite": SqliteMetadataStore,
+    "sqlite3": SqliteMetadataStore,
+    "mongodb": MongoMetadataStore,
+    "mongo": MongoMetadataStore,
+}
+
+
+def _scheme(settings: SkeinoSettings) -> str:
+    return (settings.checkpointer_scheme or "memory").lower()
+
+
+def _resolve_metadata_store(settings: SkeinoSettings) -> MetadataStoreProtocol:
+    """Pick the metadata store from the scheme (native for pg/sqlite/mongo).
+
+    SQLite defaults to ``:memory:`` when no URI is given — mirroring the SQLite
+    checkpointer builder — so the checkpointer and metadata store never split.
+    Postgres/Mongo require a URI (the checkpointer builder raises otherwise).
+    """
+    scheme = _scheme(settings)
+    factory = _NATIVE_METADATA_STORES.get(scheme)
+    if factory is None:
+        return InMemoryMetadataStore()
+    uri = settings.checkpointer_uri
+    if uri is None and scheme in _SQLITE_SCHEMES:
+        uri = ":memory:"
+    if uri is None:
+        # postgres/mongo need a URI. The checkpointer builder normally raises
+        # first; raise here too so a durable scheme never silently downgrades to
+        # ephemeral metadata regardless of call order.
+        raise ValueError(
+            f"checkpointer_scheme={settings.checkpointer_scheme!r} requires "
+            "checkpointer_uri to be set."
+        )
+    return factory(uri)
+
+
+def _check_metadata_durability(settings: SkeinoSettings) -> None:
+    """Fail loudly when a durable checkpointer would pair with ephemeral metadata.
+
+    Durable graph state alongside an in-memory thread/run list is a confusing
+    split-brain (state persists, the run list evaporates on restart). This
+    arises for a durable scheme with **no native metadata store** (e.g. ``redis``
+    or a custom checkpointer); ``allow_ephemeral_metadata`` opts out. (A missing
+    URI for postgres/mongo is caught separately by the checkpointer builder.)
+    """
+    scheme = _scheme(settings)
+    durable_checkpointer = scheme not in _MEMORY_SCHEMES
+    has_native_metadata = scheme in _NATIVE_METADATA_STORES
+    if (
+        durable_checkpointer
+        and not has_native_metadata
+        and not settings.allow_ephemeral_metadata
+    ):
+        raise ValueError(
+            f"checkpointer_scheme={settings.checkpointer_scheme!r} is a durable "
+            "checkpointer with no native metadata store — thread/run metadata "
+            "would be in-memory and lost on restart. Use a scheme with a native "
+            "metadata store (postgres/sqlite/mongodb), "
+            "or pass allow_ephemeral_metadata=True to accept ephemeral metadata."
+        )
 
 
 def _resolve_default_id(
@@ -89,16 +162,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
+        _check_metadata_durability(settings)
         async with AsyncExitStack() as stack:
-            checkpointer: BaseCheckpointSaver | None = None
-            if settings.postgres_uri or settings.checkpointer_scheme:
-                checkpointer = await stack.enter_async_context(
-                    open_checkpointer(
-                        settings.postgres_uri,
-                        scheme=settings.checkpointer_scheme,
-                        options=dict(settings.checkpointer_options),
-                    )
+            # The scheme alone selects the backend (default "memory"); the URI is
+            # a connection detail. A URI without a matching scheme is ignored
+            # (memory). Durable schemes that need a URI (postgres/mongodb/redis)
+            # raise here if it's missing; sqlite defaults to ":memory:".
+            checkpointer = await stack.enter_async_context(
+                open_checkpointer(
+                    settings.checkpointer_uri,
+                    scheme=_scheme(settings),
+                    options=dict(settings.checkpointer_options),
                 )
+            )
 
             compiled: dict[str, CompiledStateGraph] = {}
             for name, entry in graphs.items():
@@ -106,15 +182,19 @@ def create_app(
             registry = GraphRegistry(compiled, default=default_id)
             default_graph = registry.default_graph
 
-            metadata_store: MetadataStoreProtocol
-            if settings.postgres_uri:
-                metadata_store = MetadataStore(settings.postgres_uri)
-            else:
-                metadata_store = InMemoryMetadataStore()
+            metadata_store: MetadataStoreProtocol = _resolve_metadata_store(settings)
+            if isinstance(metadata_store, InMemoryMetadataStore):
                 logger.info(
-                    "POSTGRES_URI not set — using in-memory metadata store "
-                    "(thread/run metadata will not persist across restarts)."
+                    "Using in-memory metadata store — thread/run metadata will "
+                    "not persist across restarts. Use a durable scheme "
+                    "(postgres/sqlite/mongodb) with checkpointer_uri to persist."
                 )
+            # Register cleanup BEFORE setup() so a setup failure that has already
+            # opened resources (sqlite connection, motor client) is still closed
+            # by the exit stack. aclose() is a no-op when nothing was opened.
+            aclose = getattr(metadata_store, "aclose", None)
+            if aclose is not None:
+                stack.push_async_callback(aclose)
             await metadata_store.setup()
 
             streamer = Streamer(

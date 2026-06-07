@@ -1,22 +1,26 @@
 """Pluggable checkpointer resolution for the skeino runtime.
 
-Built-in schemes:
+The backend is chosen by **scheme** (``SkeinoSettings.checkpointer_scheme``,
+default ``memory``); the URI is only a connection string. Built-in schemes —
+the database ones import their driver lazily and need the matching extra:
 
-* ``postgres`` / ``postgresql`` — async PostgreSQL saver from
-  ``langgraph_checkpoint_postgres``, wrapped with
-  :class:`RunEnrichingCheckpointer` so LangGraph Studio groups checkpoints
-  by run.
-* ``memory`` — in-process saver from ``langgraph.checkpoint.memory``.
-  Used when no URI is configured.
+* ``memory`` (default) — in-process ``MemorySaver`` (bundled).
+* ``postgres`` / ``postgresql`` — async PostgreSQL saver, wrapped via
+  :func:`skeino.persistence.enriching.build_run_enriching_checkpointer` so
+  LangGraph Studio groups checkpoints by run. Extra: ``skeino[postgres]``.
+* ``sqlite`` / ``sqlite3`` — ``AsyncSqliteSaver``. Extra: ``skeino[sqlite]``.
+* ``mongodb`` / ``mongo`` — ``MongoDBSaver``. Extra: ``skeino[mongodb]``.
+* ``redis`` — ``AsyncRedisSaver`` (install ``langgraph-checkpoint-redis``
+  yourself; it isn't a managed extra).
 
-Additional backends (Redis, MongoDB, etc.) can plug themselves in:
+Additional backends can plug themselves in under a new scheme:
 
 .. code-block:: python
 
     from skeino.persistence import register_checkpointer
 
-    @register_checkpointer("redis")
-    def _build_redis(spec: CheckpointerSpec) -> AsyncContextManager[BaseCheckpointSaver]:
+    @register_checkpointer("mydb")
+    def _build_mydb(spec: CheckpointerSpec) -> AsyncContextManager[BaseCheckpointSaver]:
         ...
 
 Each builder is an async context manager so connection lifetimes follow
@@ -30,9 +34,8 @@ from typing import Any, AsyncContextManager, AsyncIterator, Callable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from skeino.persistence.enriching import RunEnrichingCheckpointer
+from skeino.persistence.enriching import build_run_enriching_checkpointer
 
 CheckpointerBuilder = Callable[
     ["CheckpointerSpec"], AsyncContextManager[BaseCheckpointSaver]
@@ -109,11 +112,22 @@ async def open_checkpointer(
 @register_checkpointer("postgres", "postgresql")
 @asynccontextmanager
 async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
-    """Build an enrichment-wrapped async PostgreSQL checkpointer."""
+    """Build an enrichment-wrapped async PostgreSQL checkpointer.
+
+    Requires the ``skeino[postgres]`` extra (psycopg + langgraph-checkpoint-
+    postgres), imported lazily so postgres stays optional.
+    """
     if not spec.uri:
         raise ValueError("Postgres checkpointer requires a connection URI.")
-    setup_schema = bool(spec.options.get("setup_schema", True))
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'postgres' checkpointer requires the skeino[postgres] extra "
+            "(pip install 'skeino[postgres]')."
+        ) from exc
 
+    setup_schema = bool(spec.options.get("setup_schema", True))
     async with AsyncExitStack() as stack:
         saver_cm = AsyncPostgresSaver.from_conn_string(spec.uri)
         inner = await stack.enter_async_context(saver_cm)
@@ -121,7 +135,37 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
             result = inner.setup()
             if inspect.isawaitable(result):
                 await result
-        yield RunEnrichingCheckpointer(inner)
+        yield build_run_enriching_checkpointer(inner)
+
+
+@register_checkpointer("mongodb", "mongo")
+@asynccontextmanager
+async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async MongoDB checkpointer (requires the ``skeino[mongodb]`` extra)."""
+    if not spec.uri:
+        raise ValueError("MongoDB checkpointer requires a connection URI.")
+    try:
+        from langgraph.checkpoint.mongodb import MongoDBSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'mongodb' checkpointer requires the skeino[mongodb] extra "
+            "(pip install 'skeino[mongodb]')."
+        ) from exc
+
+    # MongoDBSaver.from_conn_string is a *sync* context manager (backed by a
+    # synchronous pymongo client) that exposes the async checkpoint methods
+    # skeino uses; its sync __exit__ runs on the event loop at shutdown.
+    setup_schema = bool(spec.options.get("setup_schema", True))
+    with MongoDBSaver.from_conn_string(spec.uri) as saver:
+        if setup_schema:
+            for setup_name in ("asetup", "setup"):
+                setup_fn = getattr(saver, setup_name, None)
+                if setup_fn is not None:
+                    result = setup_fn()
+                    if inspect.isawaitable(result):
+                        await result
+                    break
+        yield saver
 
 
 @register_checkpointer("memory")
@@ -130,3 +174,73 @@ async def _build_memory(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
     """Build an in-process MemorySaver. URI is ignored."""
     del spec
     yield MemorySaver()
+
+
+def _sqlite_conn_string(uri: str | None) -> str:
+    """Normalise a sqlite URI/path to what AsyncSqliteSaver expects."""
+    if not uri:
+        return ":memory:"
+    for prefix in ("sqlite:///", "sqlite://"):
+        if uri.startswith(prefix):
+            return uri[len(prefix) :] or ":memory:"
+    return uri
+
+
+@register_checkpointer("sqlite", "sqlite3")
+@asynccontextmanager
+async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async SQLite checkpointer (requires the ``skeino[sqlite]`` extra)."""
+    try:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'sqlite' checkpointer requires the skeino[sqlite] extra "
+            "(pip install 'skeino[sqlite]')."
+        ) from exc
+
+    conn_string = _sqlite_conn_string(spec.uri)
+    setup_schema = bool(spec.options.get("setup_schema", True))
+    async with AsyncExitStack() as stack:
+        saver = await stack.enter_async_context(
+            AsyncSqliteSaver.from_conn_string(conn_string)
+        )
+        if setup_schema and hasattr(saver, "setup"):
+            result = saver.setup()
+            if inspect.isawaitable(result):
+                await result
+        yield saver
+
+
+@register_checkpointer("redis")
+@asynccontextmanager
+async def _build_redis(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async Redis checkpointer.
+
+    Requires ``langgraph-checkpoint-redis``, which is not a managed skeino extra
+    (it caps Python at <3.14) — install it yourself:
+    ``pip install langgraph-checkpoint-redis``.
+    """
+    if not spec.uri:
+        raise ValueError("Redis checkpointer requires a connection URI.")
+    try:
+        from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'redis' checkpointer requires langgraph-checkpoint-redis "
+            "(pip install langgraph-checkpoint-redis)."
+        ) from exc
+
+    setup_schema = bool(spec.options.get("setup_schema", True))
+    async with AsyncExitStack() as stack:
+        saver = await stack.enter_async_context(
+            AsyncRedisSaver.from_conn_string(spec.uri)
+        )
+        if setup_schema:
+            for setup_name in ("asetup", "setup"):
+                setup_fn = getattr(saver, setup_name, None)
+                if setup_fn is not None:
+                    result = setup_fn()
+                    if inspect.isawaitable(result):
+                        await result
+                    break
+        yield saver

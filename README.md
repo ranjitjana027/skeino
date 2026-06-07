@@ -36,7 +36,10 @@ from my_project.graph import graph
 
 app = create_app(
     graphs={"my_agent": graph},
-    settings=SkeinoSettings(postgres_uri="postgresql://..."),
+    settings=SkeinoSettings(
+        checkpointer_scheme="postgres",  # pip install 'skeino[postgres]'
+        checkpointer_uri="postgresql://...",
+    ),
 )
 ```
 

@@ -8,9 +8,10 @@ This is the high-level entry point that mirrors how ``langgraph dev`` boots:
 4. Build a :class:`SkeinoSettings` from the env / manifest.
 5. Hand off to :func:`skeino.create_app`.
 
-v1 consumes ``store.uri`` (as the Postgres URI) and ``http.cors``; it ignores
-``http.app``, ``auth``, and ``ui``, logging a warning when those are present.
-``graphs[name]`` may resolve to either a precompiled
+v1 consumes ``store.uri`` (mapped to ``checkpointer_uri``, with the scheme
+derived from the URI prefix as a loader convenience) and ``http.cors``; it
+ignores ``http.app``, ``auth``, and ``ui``, logging a warning when those are
+present. ``graphs[name]`` may resolve to either a precompiled
 ``CompiledStateGraph`` (used as-is) or a callable
 ``(checkpointer) -> CompiledStateGraph`` (called by skeino with its resolved
 checkpointer).
@@ -49,6 +50,23 @@ def _expanded_str(value: Any) -> str | None:
     if isinstance(value, str):
         return _expand_env(value)
     return None
+
+
+def _scheme_from_uri(uri: str) -> str:
+    """Derive a checkpointer scheme from a store URI prefix (loader convenience)."""
+    head = uri.split("://", 1)[0].lower() if "://" in uri else ""
+    if head in {"postgres", "postgresql"}:
+        return "postgres"
+    if head in {"mongodb", "mongodb+srv"}:
+        return "mongodb"
+    if head in {"sqlite", "sqlite3"}:
+        return "sqlite"
+    if head == "redis":
+        return "redis"
+    if head:
+        return head
+    # No scheme prefix → treat a bare path as SQLite.
+    return "sqlite"
 
 
 def _load_module(path: Path) -> Any:
@@ -128,7 +146,10 @@ def _settings_from_manifest(
     if isinstance(store_section, dict):
         store_uri = _expanded_str(store_section.get("uri"))
         if store_uri:
-            base_kwargs["postgres_uri"] = store_uri
+            base_kwargs["checkpointer_uri"] = store_uri
+            # langgraph.json has no explicit scheme; derive it from the URI prefix
+            # as a loader convenience (the programmatic API stays scheme-driven).
+            base_kwargs["checkpointer_scheme"] = _scheme_from_uri(store_uri)
 
     # If the caller passed overrides, they win field-by-field for any explicit
     # value. Use model_dump(exclude_unset=True) so we don't clobber manifest

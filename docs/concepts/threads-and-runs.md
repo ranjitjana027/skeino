@@ -38,8 +38,8 @@ State is deliberately split across two backends:
 | Thread & run rows (metadata, status, config, kwargs) | **metadata store** | Postgres (`app_threads`, `app_runs` tables) or in-memory |
 | Graph state / checkpoints | **checkpointer** | Postgres saver or in-memory `MemorySaver` |
 
-When you set a `postgres_uri`, both halves use Postgres; otherwise both fall
-back to in-memory (ephemeral) implementations. See
+A single `checkpointer_scheme` selects both halves (e.g. `postgres` uses
+Postgres for both); the default `memory` keeps both in-memory (ephemeral). See
 [Persistence & checkpointers](persistence.md) for the details.
 
 ## Thread lifecycle

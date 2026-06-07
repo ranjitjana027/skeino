@@ -4,6 +4,8 @@ By default skeino keeps everything in memory, which is great for development but
 loses all threads, runs, and state on restart. Point it at PostgreSQL to get
 durable, shareable persistence.
 
+Install the extra: `pip install 'skeino[postgres]'`.
+
 ## 1. Provision a database
 
 Any reachable PostgreSQL instance works. For local development:
@@ -21,8 +23,8 @@ createdb -h localhost -U postgres skeino
 
 ## 2. Point skeino at it
 
-Set `postgres_uri` on your settings. That single field switches **both** the
-checkpointer and the metadata store to Postgres:
+Set `checkpointer_scheme="postgres"` and a `checkpointer_uri`. The scheme
+switches **both** the checkpointer and the metadata store to Postgres:
 
 ```python title="app.py"
 from skeino import create_app, SkeinoSettings
@@ -31,7 +33,8 @@ from my_project.graph import graph
 app = create_app(
     graphs={"my_agent": graph},
     settings=SkeinoSettings(
-        postgres_uri="postgresql://postgres:postgres@localhost:5432/skeino",
+        checkpointer_scheme="postgres",
+        checkpointer_uri="postgresql://postgres:postgres@localhost:5432/skeino",
     ),
 )
 ```
@@ -77,7 +80,10 @@ async def build_graph(checkpointer):
 
 app = create_app(
     graphs={"my_agent": build_graph},
-    settings=SkeinoSettings(postgres_uri="postgresql://localhost/skeino"),
+    settings=SkeinoSettings(
+        checkpointer_scheme="postgres",
+        checkpointer_uri="postgresql://localhost/skeino",
+    ),
 )
 ```
 

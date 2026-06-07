@@ -1,13 +1,12 @@
-"""Unit tests for RunEnrichingCheckpointer._enrich metadata rules.
+"""Unit tests for the checkpoint-metadata enrichment rules.
 
-``_enrich`` is a pure staticmethod, so it is tested directly without a live
-Postgres connection. It drives how LangGraph Studio groups checkpoints into a
-run, so the exclusion and precedence rules below are behaviourally important.
+``enrich_metadata`` is a plain function, tested directly without a live Postgres
+connection (the Postgres saver subclass that uses it is built lazily). It drives
+how LangGraph Studio groups checkpoints into a run, so the exclusion and
+precedence rules below are behaviourally important.
 """
 
-from skeino.persistence.enriching import RunEnrichingCheckpointer
-
-_enrich = RunEnrichingCheckpointer._enrich
+from skeino.persistence.enriching import enrich_metadata as _enrich
 
 
 def test_excludes_checkpoint_internal_and_dunder_keys() -> None:

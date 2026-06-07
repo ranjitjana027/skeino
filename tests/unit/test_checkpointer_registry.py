@@ -24,7 +24,7 @@ async def test_explicit_memory_scheme() -> None:
 @pytest.mark.asyncio
 async def test_unknown_scheme_raises() -> None:
     with pytest.raises(ValueError, match="No checkpointer registered"):
-        async with open_checkpointer(uri="redis://localhost"):
+        async with open_checkpointer(uri="cassandra://localhost"):
             pass
 
 

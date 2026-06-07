@@ -19,12 +19,16 @@ from pydantic_settings import BaseSettings
 from skeino import SkeinoSettings, create_app
 
 class Env(BaseSettings):
-    postgres_uri: str | None = None
+    checkpointer_scheme: str = "memory"
+    checkpointer_uri: str | None = None
 
-env = Env()  # reads POSTGRES_URI from the environment
+env = Env()  # reads CHECKPOINTER_SCHEME / CHECKPOINTER_URI from the environment
 app = create_app(
     graphs={"my_agent": graph},
-    settings=SkeinoSettings(postgres_uri=env.postgres_uri),
+    settings=SkeinoSettings(
+        checkpointer_scheme=env.checkpointer_scheme,
+        checkpointer_uri=env.checkpointer_uri,
+    ),
 )
 ```
 
@@ -34,9 +38,10 @@ app = create_app(
 
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
-| `postgres_uri` | `str \| None` | `None` | Postgres connection string. When set, enables the Postgres checkpointer and metadata store; when absent, both are in-memory. |
-| `checkpointer_scheme` | `str \| None` | `None` | Force a checkpointer scheme. Derived from `postgres_uri` (or `memory`) when omitted. |
+| `checkpointer_scheme` | `str` | `"memory"` | **Selects the persistence backend** (`memory`/`postgres`/`sqlite`/`mongodb`/`redis`/custom). The scheme alone decides it — both the checkpointer and (where native) the metadata store follow it. DB backends are optional extras. |
+| `checkpointer_uri` | `str \| None` | `None` | Connection string/path for the selected scheme (`postgresql://…`, a SQLite path or `:memory:`, `mongodb://…`). Ignored for `memory`. A URI without a matching scheme is **not** a selector. |
 | `checkpointer_options` | `dict[str, object]` | `{}` | Extra options passed to the checkpointer builder (e.g. `{"setup_schema": False}`). |
+| `allow_ephemeral_metadata` | `bool` | `False` | Permit a durable scheme with no native metadata store (e.g. `redis`/custom) to run with the in-memory metadata store. Off by default so the split-brain fails loudly at startup. |
 
 #### Assistant identity
 
@@ -109,7 +114,7 @@ override the manifest-derived values — useful for graph-specific options like
 | `env` | Path to a `.env` file, loaded before graph resolution and variable expansion. |
 | `graphs` | Map of assistant id → `path:attribute` target. The attribute must be a `CompiledStateGraph` **or** a `(checkpointer) -> CompiledStateGraph` builder. |
 | `http.cors` | Maps to `cors_origins` / `cors_methods` / `cors_headers`. |
-| `store.uri` | Maps to `postgres_uri`. Supports `${VAR}` expansion. |
+| `store.uri` | Maps to `checkpointer_uri`, with `checkpointer_scheme` derived from the URI prefix (a loader convenience; the programmatic API stays scheme-driven). Supports `${VAR}` expansion. |
 
 ### Resolution rules
 

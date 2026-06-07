@@ -24,14 +24,31 @@ class SkeinoSettings(BaseModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True, frozen=True)
 
-    # Persistence
-    postgres_uri: str | None = None
-    checkpointer_scheme: str | None = Field(
+    # Persistence — the SCHEME selects the backend (default "memory"); URIs are
+    # connection details, never selectors. A URI without a matching scheme is
+    # ignored (e.g. scheme="memory" + a postgres URI still uses in-memory).
+    checkpointer_scheme: str = Field(
+        default="memory",
+        description="Persistence backend: 'memory' (default), 'postgres', "
+        "'sqlite', 'mongodb', 'redis', or a custom registered scheme. The scheme "
+        "alone decides the backend; both the checkpointer and (where a native "
+        "implementation exists) the metadata store follow it.",
+    )
+    checkpointer_uri: str | None = Field(
         default=None,
-        description="Override the checkpointer scheme. Derived from postgres_uri "
-        "(or 'memory' when no URI is set) when omitted.",
+        description="Connection string/path for the selected scheme — e.g. "
+        "'postgresql://…', a SQLite path or ':memory:', or 'mongodb://…'. "
+        "Ignored for the 'memory' scheme. DB backends are optional extras "
+        "(skeino[postgres] / skeino[sqlite] / skeino[mongodb]).",
     )
     checkpointer_options: dict[str, object] = Field(default_factory=dict)
+    allow_ephemeral_metadata: bool = Field(
+        default=False,
+        description="Permit a durable checkpointer to run with the in-memory "
+        "metadata store (for schemes without a native metadata backend, e.g. "
+        "redis or a custom checkpointer). Off by default so the split-brain "
+        "(durable graph state, ephemeral thread/run list) fails loudly at startup.",
+    )
 
     # Assistant identity
     default_assistant_id: str | None = Field(

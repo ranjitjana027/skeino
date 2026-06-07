@@ -15,7 +15,10 @@ from my_project.graph import graph
 
 skeino_app = create_app(
     graphs={"my_agent": graph},
-    settings=SkeinoSettings(postgres_uri="postgresql://localhost/skeino"),
+    settings=SkeinoSettings(
+        checkpointer_scheme="postgres",
+        checkpointer_uri="postgresql://localhost/skeino",
+    ),
 )
 
 root = FastAPI()
