@@ -100,3 +100,26 @@ Confirm the latest version matches and both wheel + sdist are present.
 The tag alone doesn't create a GitHub *Release* page. Offer to run
 `gh release create vX.Y.Z --notes-from-tag` (or notes from the changelog
 section).
+
+## 8. Sync the consumer skill in the marketplace
+
+skeino has a **consumer-facing skill** in the `ranjitjana027/skills` marketplace
+(`skills/skeino/SKILL.md`, plugin `skeino` in `.claude-plugin/marketplace.json`)
+that documents the public surface for agents helping users *use* skeino. If this
+release changed anything user-visible — settings, endpoints, install/extras,
+defaults, or scope — update that skill so it doesn't drift.
+
+```bash
+gh repo clone ranjitjana027/skills /tmp/skills-repo
+cd /tmp/skills-repo
+# Update on the open skeino-skill PR branch if one exists, else branch off main:
+git checkout add-skeino-skill 2>/dev/null || git checkout -b chore/skeino-vX.Y.Z main
+# edit skills/skeino/SKILL.md to match this release (settings table, endpoints,
+# install extras, the "Targets skeino X.Y.Z+" note, v1 scope/gotchas), then:
+python3 -c "import json;json.load(open('.claude-plugin/marketplace.json'))"  # validate
+git commit -am "Update skeino skill for vX.Y.Z" && git push
+```
+
+Open/refresh the PR (or comment on the existing one) so the marketplace stays in
+lockstep with the released surface. Cross-check against `README.md`,
+`docs/concepts/configuration.md`, and `docs/concepts/persistence.md`.
