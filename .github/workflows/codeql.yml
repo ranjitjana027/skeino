@@ -3,10 +3,23 @@ name: CodeQL
 on:
   push:
     branches: [main]
+    paths: &code-paths
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/codeql.yml"
   pull_request:
     branches: [main]
+    paths: *code-paths
   schedule:
+    # Weekly full scan regardless of paths, as a safety net.
     - cron: "27 3 * * 1"
+
+# Cancel superseded in-progress PR runs (main runs still finish).
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   analyze:
