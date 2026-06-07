@@ -5,18 +5,16 @@ not the higher-level API concepts like ``status``, ``ttl``, or the relationship
 between a run and its parent thread. ``MetadataStore`` owns those two tables
 (``app_threads``, ``app_runs``) and exposes the CRUD surface the runtime needs.
 
-Connection management is intentionally simple: each operation opens a fresh
-``psycopg.AsyncConnection``. A pool can be layered in later without changing
-this module's public API.
+Postgres (psycopg) is an optional dependency (``skeino[postgres]``); it is
+imported lazily so importing this module never requires it. Connection
+management is intentionally simple: each operation opens a fresh
+``psycopg.AsyncConnection``.
 """
 
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-import psycopg
 from fastapi import HTTPException, status
-from psycopg.rows import dict_row
-from psycopg.types.json import Jsonb
 
 from skeino.schemas import (
     JsonValue,
@@ -75,10 +73,25 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def _to_jsonb(payload: dict[str, JsonValue] | None) -> Jsonb | None:
+def _pg() -> tuple[Any, Any]:
+    """Lazily import psycopg (optional dependency: skeino[postgres])."""
+    try:
+        import psycopg
+        from psycopg.rows import dict_row
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'postgres' metadata store requires the skeino[postgres] extra "
+            "(pip install 'skeino[postgres]')."
+        ) from exc
+    return psycopg, dict_row
+
+
+def _to_jsonb(payload: dict[str, JsonValue] | None) -> Any:
     """Wrap a JSON-serializable dictionary for psycopg JSONB parameters."""
     if payload is None:
         return None
+    from psycopg.types.json import Jsonb
+
     return Jsonb(payload)
 
 
@@ -91,6 +104,7 @@ class MetadataStore:
 
     async def setup(self) -> None:
         """Create the metadata tables if they do not already exist."""
+        psycopg, _ = _pg()
         async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(_CREATE_THREADS_TABLE_SQL)
@@ -100,6 +114,7 @@ class MetadataStore:
 
     async def fetch_thread_row(self, thread_id: str) -> dict[str, Any] | None:
         """Return the stored metadata row for a thread."""
+        psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:
@@ -113,7 +128,8 @@ class MetadataStore:
                     """,
                     (thread_id,),
                 )
-                return await cursor.fetchone()
+                row: dict[str, Any] | None = await cursor.fetchone()
+                return row
 
     async def create_thread(
         self,
@@ -125,6 +141,7 @@ class MetadataStore:
         if_exists: ThreadIfExists,
     ) -> dict[str, Any]:
         """Insert a thread row and return the stored record."""
+        psycopg, dict_row = _pg()
         ttl_payload = self._build_ttl_payload(ttl)
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
@@ -161,7 +178,7 @@ class MetadataStore:
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"Thread {thread_id} already exists.",
                     ) from exc
-                created_row = await cursor.fetchone()
+                created_row: dict[str, Any] | None = await cursor.fetchone()
             await conn.commit()
         if created_row is None:
             raise HTTPException(
@@ -198,6 +215,7 @@ class MetadataStore:
             return
 
         values.append(thread_id)
+        psycopg, _ = _pg()
         # nosec B608: `assignments` holds only hardcoded "column = %s"/NOW()
         # fragments built above; every user value is bound via %s parameters.
         query = f"""
@@ -212,6 +230,7 @@ class MetadataStore:
 
     async def delete_thread(self, thread_id: str) -> None:
         """Delete a thread row and its run rows."""
+        psycopg, _ = _pg()
         async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -257,6 +276,7 @@ class MetadataStore:
             OFFSET %s
         """  # nosec B608
         values.extend([request.limit, request.offset])
+        psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:
@@ -275,6 +295,7 @@ class MetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> dict[str, Any]:
         """Insert a run row and return it."""
+        psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:
@@ -298,7 +319,7 @@ class MetadataStore:
                         multitask_strategy,
                     ),
                 )
-                run_row = await cursor.fetchone()
+                run_row: dict[str, Any] | None = await cursor.fetchone()
             await conn.commit()
         if run_row is None:
             raise HTTPException(
@@ -315,6 +336,7 @@ class MetadataStore:
         error: str | None = None,
     ) -> None:
         """Update the persisted run status."""
+        psycopg, _ = _pg()
         async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -329,6 +351,7 @@ class MetadataStore:
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> dict[str, Any] | None:
         """Return a single run row for a thread."""
+        psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:
@@ -342,7 +365,8 @@ class MetadataStore:
                     """,
                     (thread_id, run_id),
                 )
-                return await cursor.fetchone()
+                row: dict[str, Any] | None = await cursor.fetchone()
+                return row
 
     async def list_run_rows(
         self,
@@ -371,6 +395,7 @@ class MetadataStore:
             OFFSET %s
         """  # nosec B608
         values.extend([limit, offset])
+        psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:

@@ -68,7 +68,10 @@ async def build_graph(checkpointer):
 
 app = create_app(
     graphs={"my_agent": build_graph},
-    settings=SkeinoSettings(postgres_uri="postgresql://localhost/skeino"),
+    settings=SkeinoSettings(
+        checkpointer_scheme="postgres",  # pip install 'skeino[postgres]'
+        checkpointer_uri="postgresql://localhost/skeino",
+    ),
 )
 ```
 

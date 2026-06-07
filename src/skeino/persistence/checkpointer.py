@@ -30,9 +30,8 @@ from typing import Any, AsyncContextManager, AsyncIterator, Callable
 
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
-from skeino.persistence.enriching import RunEnrichingCheckpointer
+from skeino.persistence.enriching import build_run_enriching_checkpointer
 
 CheckpointerBuilder = Callable[
     ["CheckpointerSpec"], AsyncContextManager[BaseCheckpointSaver]
@@ -109,11 +108,22 @@ async def open_checkpointer(
 @register_checkpointer("postgres", "postgresql")
 @asynccontextmanager
 async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
-    """Build an enrichment-wrapped async PostgreSQL checkpointer."""
+    """Build an enrichment-wrapped async PostgreSQL checkpointer.
+
+    Requires the ``skeino[postgres]`` extra (psycopg + langgraph-checkpoint-
+    postgres), imported lazily so postgres stays optional.
+    """
     if not spec.uri:
         raise ValueError("Postgres checkpointer requires a connection URI.")
-    setup_schema = bool(spec.options.get("setup_schema", True))
+    try:
+        from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'postgres' checkpointer requires the skeino[postgres] extra "
+            "(pip install 'skeino[postgres]')."
+        ) from exc
 
+    setup_schema = bool(spec.options.get("setup_schema", True))
     async with AsyncExitStack() as stack:
         saver_cm = AsyncPostgresSaver.from_conn_string(spec.uri)
         inner = await stack.enter_async_context(saver_cm)
@@ -121,7 +131,27 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
             result = inner.setup()
             if inspect.isawaitable(result):
                 await result
-        yield RunEnrichingCheckpointer(inner)
+        yield build_run_enriching_checkpointer(inner)
+
+
+@register_checkpointer("mongodb", "mongo")
+@asynccontextmanager
+async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
+    """Build an async MongoDB checkpointer (requires the ``skeino[mongodb]`` extra)."""
+    if not spec.uri:
+        raise ValueError("MongoDB checkpointer requires a connection URI.")
+    try:
+        from langgraph.checkpoint.mongodb import MongoDBSaver
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(
+            "The 'mongodb' checkpointer requires the skeino[mongodb] extra "
+            "(pip install 'skeino[mongodb]')."
+        ) from exc
+
+    # MongoDBSaver.from_conn_string is a *sync* context manager that exposes the
+    # async checkpoint methods skeino uses.
+    with MongoDBSaver.from_conn_string(spec.uri) as saver:
+        yield saver
 
 
 @register_checkpointer("memory")

@@ -28,8 +28,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 
 ## Use Postgres
 
-Production deployments should set `postgres_uri` so threads, runs, and
-checkpoints survive restarts and are shared across workers. See
+Production deployments should set a durable `checkpointer_scheme` (e.g.
+`postgres`) with a `checkpointer_uri` so threads, runs, and checkpoints survive
+restarts and are shared across workers. See
 [Set up Postgres persistence](postgres.md). The in-memory default is for
 development and tests only.
 

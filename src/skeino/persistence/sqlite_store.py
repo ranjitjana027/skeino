@@ -87,12 +87,22 @@ def _to_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
 
+def _normalize_sqlite_path(uri: str) -> str:
+    """Normalise a sqlite URI/path to what aiosqlite expects (a path/``:memory:``)."""
+    if not uri:
+        return ":memory:"
+    for prefix in ("sqlite:///", "sqlite://"):
+        if uri.startswith(prefix):
+            return uri[len(prefix) :] or ":memory:"
+    return uri
+
+
 class SqliteMetadataStore:
     """SQLite-backed thread + run metadata store satisfying MetadataStoreProtocol."""
 
     def __init__(self, path: str) -> None:
-        """Store the SQLite path/URI (e.g. a file path or ``:memory:``)."""
-        self._path = path
+        """Store the SQLite path/URI (a file path, ``:memory:``, or ``sqlite://``)."""
+        self._path = _normalize_sqlite_path(path)
         self._conn: Any = None
         self._lock = asyncio.Lock()
 

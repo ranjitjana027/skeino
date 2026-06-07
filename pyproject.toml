@@ -36,21 +36,26 @@ pydantic = "^2.0"
 pydantic-settings = "^2.0"
 langgraph = "^1.0.0"
 langgraph-checkpoint = ">=2.0.0"
-langgraph-checkpoint-postgres = ">=2.0.0"
 langchain-core = "*"
-psycopg = { extras = ["binary", "pool"], version = "^3.3.3" }
 python-dotenv = ">=1.0.1"
 uvicorn = ">=0.41,<0.50"
-# Optional SQLite backend — installed via the `skeino[sqlite]` extra and
-# imported lazily so it stays optional. (Redis is supported via a lazy builder
-# too, but is NOT a managed extra: langgraph-checkpoint-redis caps Python at
-# <3.14, narrower than skeino's range, so install it yourself —
-# `pip install langgraph-checkpoint-redis`.)
+# All database backends are OPTIONAL extras, imported lazily so the default
+# install only ships the in-memory checkpointer. Pick a backend with the
+# matching extra: skeino[postgres], skeino[sqlite], or skeino[mongodb].
+# (Redis is supported via a lazy builder too, but is NOT a managed extra:
+# langgraph-checkpoint-redis caps Python at <3.14, narrower than skeino's
+# range — install it yourself: `pip install langgraph-checkpoint-redis`.)
+psycopg = { extras = ["binary", "pool"], version = "^3.3.3", optional = true }
+langgraph-checkpoint-postgres = { version = ">=2.0.0", optional = true }
 aiosqlite = { version = ">=0.20.0", optional = true }
 langgraph-checkpoint-sqlite = { version = ">=2.0.0", optional = true }
+motor = { version = ">=3.4.0", optional = true }
+langgraph-checkpoint-mongodb = { version = ">=0.1.0", optional = true }
 
 [tool.poetry.extras]
+postgres = ["psycopg", "langgraph-checkpoint-postgres"]
 sqlite = ["aiosqlite", "langgraph-checkpoint-sqlite"]
+mongodb = ["motor", "langgraph-checkpoint-mongodb"]
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=9.0.0"
@@ -60,6 +65,7 @@ ruff = ">=0.14.0"
 mypy = ">=1.19.0,<3.0.0"
 bandit = { version = ">=1.7.0", extras = ["toml"] }
 towncrier = ">=24.8.0"
+mongomock-motor = ">=0.0.30"
 
 [tool.poetry.group.docs]
 optional = true
@@ -117,9 +123,14 @@ warn_unreachable = true
 strict_equality = true
 
 [[tool.mypy.overrides]]
-# langgraph-checkpoint-redis is not a managed dependency (it caps Python at
-# <3.14); the redis checkpointer builder imports it lazily.
-module = ["langgraph.checkpoint.redis.*"]
+# Optional/untyped backends imported lazily by the checkpointer builders and
+# the Mongo metadata store. langgraph-checkpoint-redis is not even a managed
+# extra (it caps Python at <3.14).
+module = [
+    "langgraph.checkpoint.redis.*",
+    "langgraph.checkpoint.mongodb.*",
+    "motor.*",
+]
 ignore_missing_imports = true
 
 [tool.bandit]
