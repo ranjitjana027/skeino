@@ -61,6 +61,7 @@ class MongoMetadataStore:
         db = self._client[self._db_name]
         self._threads = db["app_threads"]
         self._runs = db["app_runs"]
+        await self._threads.create_index([("status", 1), ("updated_at", -1)])
         await self._runs.create_index([("thread_id", 1), ("created_at", -1)])
 
     async def aclose(self) -> None:
@@ -121,6 +122,11 @@ class MongoMetadataStore:
                 existing = await self.fetch_thread_row(thread_id)
                 if existing is not None:
                     return existing
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Thread {thread_id} insert conflicted but the row "
+                    "could not be re-read (concurrent delete?).",
+                ) from exc
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Thread {thread_id} already exists.",

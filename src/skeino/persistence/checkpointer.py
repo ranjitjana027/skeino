@@ -1,22 +1,26 @@
 """Pluggable checkpointer resolution for the skeino runtime.
 
-Built-in schemes:
+The backend is chosen by **scheme** (``SkeinoSettings.checkpointer_scheme``,
+default ``memory``); the URI is only a connection string. Built-in schemes —
+the database ones import their driver lazily and need the matching extra:
 
-* ``postgres`` / ``postgresql`` — async PostgreSQL saver from
-  ``langgraph_checkpoint_postgres``, wrapped with
-  :class:`RunEnrichingCheckpointer` so LangGraph Studio groups checkpoints
-  by run.
-* ``memory`` — in-process saver from ``langgraph.checkpoint.memory``.
-  Used when no URI is configured.
+* ``memory`` (default) — in-process ``MemorySaver`` (bundled).
+* ``postgres`` / ``postgresql`` — async PostgreSQL saver, wrapped via
+  :func:`skeino.persistence.enriching.build_run_enriching_checkpointer` so
+  LangGraph Studio groups checkpoints by run. Extra: ``skeino[postgres]``.
+* ``sqlite`` / ``sqlite3`` — ``AsyncSqliteSaver``. Extra: ``skeino[sqlite]``.
+* ``mongodb`` / ``mongo`` — ``MongoDBSaver``. Extra: ``skeino[mongodb]``.
+* ``redis`` — ``AsyncRedisSaver`` (install ``langgraph-checkpoint-redis``
+  yourself; it isn't a managed extra).
 
-Additional backends (Redis, MongoDB, etc.) can plug themselves in:
+Additional backends can plug themselves in under a new scheme:
 
 .. code-block:: python
 
     from skeino.persistence import register_checkpointer
 
-    @register_checkpointer("redis")
-    def _build_redis(spec: CheckpointerSpec) -> AsyncContextManager[BaseCheckpointSaver]:
+    @register_checkpointer("mydb")
+    def _build_mydb(spec: CheckpointerSpec) -> AsyncContextManager[BaseCheckpointSaver]:
         ...
 
 Each builder is an async context manager so connection lifetimes follow
@@ -148,9 +152,19 @@ async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoint
             "(pip install 'skeino[mongodb]')."
         ) from exc
 
-    # MongoDBSaver.from_conn_string is a *sync* context manager that exposes the
-    # async checkpoint methods skeino uses.
+    # MongoDBSaver.from_conn_string is a *sync* context manager (backed by a
+    # synchronous pymongo client) that exposes the async checkpoint methods
+    # skeino uses; its sync __exit__ runs on the event loop at shutdown.
+    setup_schema = bool(spec.options.get("setup_schema", True))
     with MongoDBSaver.from_conn_string(spec.uri) as saver:
+        if setup_schema:
+            for setup_name in ("asetup", "setup"):
+                setup_fn = getattr(saver, setup_name, None)
+                if setup_fn is not None:
+                    result = setup_fn()
+                    if inspect.isawaitable(result):
+                        await result
+                    break
         yield saver
 
 

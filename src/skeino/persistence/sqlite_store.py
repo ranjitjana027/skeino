@@ -190,6 +190,11 @@ class SqliteMetadataStore:
                     existing = await self._fetch_thread_locked(thread_id)
                     if existing is not None:
                         return existing
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Thread {thread_id} insert conflicted but the row "
+                        "could not be re-read (concurrent delete?).",
+                    ) from exc
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=f"Thread {thread_id} already exists.",

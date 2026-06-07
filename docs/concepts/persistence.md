@@ -43,7 +43,14 @@ scheme to `postgres` to use Postgres.
 The Postgres checkpointer is wrapped so that, before each checkpoint is written,
 the current `run_id` is copied into the checkpoint metadata — that's what lets
 clients (and Studio) group a thread's checkpoints by the run that produced them.
-Other backends are used as-is.
+Other backends are used as-is, so this run-grouping is **Postgres-only** today.
+
+!!! note "MongoDB specifics"
+    The MongoDB checkpointer (`MongoDBSaver`) is backed by a **synchronous**
+    pymongo client, so its checkpoint I/O runs on the event loop — size
+    accordingly under high concurrency. It also writes checkpoints to its own
+    default database (`checkpointing_db`), separate from the metadata store's
+    database — both share the server in your `mongodb://` URI.
 
 ### Registering a custom checkpointer
 

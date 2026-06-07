@@ -171,7 +171,8 @@ class MetadataStore:
                         if existing_row is None:
                             raise HTTPException(
                                 status_code=status.HTTP_409_CONFLICT,
-                                detail=f"Thread {thread_id} already exists.",
+                                detail=f"Thread {thread_id} insert conflicted but "
+                                "the row could not be re-read (concurrent delete?).",
                             ) from exc
                         return existing_row
                     raise HTTPException(

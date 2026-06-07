@@ -13,6 +13,7 @@ this module never requires psycopg. ``enrich_metadata`` is a plain function so
 it can be used and tested without Postgres installed.
 """
 
+from collections.abc import Mapping
 from typing import Any
 
 _EXCLUDED_CP_KEYS: frozenset[str] = frozenset({"checkpoint_ns", "checkpoint_id"})
@@ -20,7 +21,9 @@ _EXCLUDED_CP_KEYS: frozenset[str] = frozenset({"checkpoint_ns", "checkpoint_id"}
 _enriching_cls: type[Any] | None = None
 
 
-def enrich_metadata(metadata: Any, config: Any) -> Any:
+def enrich_metadata(
+    metadata: Mapping[str, Any], config: Mapping[str, Any] | None
+) -> dict[str, Any]:
     """Merge config-derived metadata into checkpoint metadata, stamping run_id.
 
     Precedence (low → high): non-internal ``configurable`` keys, ``config``
@@ -75,16 +78,14 @@ def build_run_enriching_checkpointer(inner: Any) -> Any:
             async def aput(
                 self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
             ) -> Any:
-                return await super().aput(
-                    config, checkpoint, enrich_metadata(metadata, config), new_versions
-                )
+                enriched: Any = enrich_metadata(metadata, config)
+                return await super().aput(config, checkpoint, enriched, new_versions)
 
             def put(
                 self, config: Any, checkpoint: Any, metadata: Any, new_versions: Any
             ) -> Any:
-                return super().put(
-                    config, checkpoint, enrich_metadata(metadata, config), new_versions
-                )
+                enriched: Any = enrich_metadata(metadata, config)
+                return super().put(config, checkpoint, enriched, new_versions)
 
         _enriching_cls = RunEnrichingCheckpointer
     return _enriching_cls(inner)

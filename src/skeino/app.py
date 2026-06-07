@@ -93,7 +93,13 @@ def _resolve_metadata_store(settings: SkeinoSettings) -> MetadataStoreProtocol:
     if uri is None and scheme in _SQLITE_SCHEMES:
         uri = ":memory:"
     if uri is None:
-        return InMemoryMetadataStore()
+        # postgres/mongo need a URI. The checkpointer builder normally raises
+        # first; raise here too so a durable scheme never silently downgrades to
+        # ephemeral metadata regardless of call order.
+        raise ValueError(
+            f"checkpointer_scheme={settings.checkpointer_scheme!r} requires "
+            "checkpointer_uri to be set."
+        )
     return factory(uri)
 
 
