@@ -12,12 +12,19 @@ Sub-modules (``api``, ``ops``, ``persistence``, ``serialization``, ``schemas``,
 users — but the contract above is the supported surface.
 """
 
-__version__ = "0.1.0"
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as _pkg_version
 
 from skeino.app import create_app
 from skeino.config import SkeinoSettings
 from skeino.langgraph_json import from_langgraph_json
 from skeino.registry import GraphRegistry
+
+try:
+    # Single source of truth: the installed package version (pyproject).
+    __version__ = _pkg_version("skeino")
+except PackageNotFoundError:  # pragma: no cover - source tree without metadata
+    __version__ = "0.0.0"
 
 __all__ = [
     "GraphRegistry",

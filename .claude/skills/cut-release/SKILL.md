@@ -13,17 +13,20 @@ skeino publishes to PyPI via **Trusted Publishing**: pushing a `vX.Y.Z` tag
 triggers `.github/workflows/publish.yml`, which builds and uploads. The release
 itself is just a version bump + changelog collation merged to `main`, then a tag.
 
-## 1. Decide the version (semver, 0.x)
+## 1. Decide the version (semver)
 
-Look at the pending `changelog.d/` fragments (`poetry run towncrier build --draft
---version 0.0.0` previews them):
+Feature/fix PRs bump `pyproject.toml`'s `version` themselves (patch=fix,
+minor=feature, major=breaking), so **`main` usually already carries the target
+release version** — confirm it matches the pending `changelog.d/` fragments
+(`poetry run towncrier build --draft --version 0.0.0` previews them):
 
-- New endpoints / features, or any observable behaviour change → **minor**
-  (`0.2.0` → `0.3.0`). Under 0.x, behaviour changes ride the minor.
-- Pure bug fixes / docs / chores only → **patch** (`0.3.0` → `0.3.1`).
+- Any `added`/`changed`/`removed` fragment → at least **minor** (major if the
+  fragment is breaking / a `removed`).
+- Only `fixed`/docs/chore fragments → **patch**.
 
-If unsure between two, ask the user. Confirm whether they want a real PyPI
-publish (default yes) or a dry run.
+If `main`'s version already reflects this, reuse it; otherwise bump to it. If
+unsure between two, ask the user. Confirm whether they want a real PyPI publish
+(default yes) or a dry run.
 
 ## 2. Branch and bump
 
