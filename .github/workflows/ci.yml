@@ -3,8 +3,21 @@ name: CI
 on:
   push:
     branches: [main]
+    paths: &code-paths
+      - "src/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - "poetry.lock"
+      - ".github/workflows/ci.yml"
   pull_request:
     branches: [main]
+    paths: *code-paths
+
+# Cancel superseded in-progress runs on the same PR/branch (but let main runs
+# finish).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   checks:

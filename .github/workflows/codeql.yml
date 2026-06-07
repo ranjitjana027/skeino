@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "27 3 * * 1"
 
+# CodeQL runs on every PR (required by the branch's code-scanning merge
+# protection), but cancel superseded in-progress PR runs.
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze (Python)
