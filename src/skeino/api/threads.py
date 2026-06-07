@@ -40,6 +40,13 @@ async def get_thread(request: Request, thread_id: UUID) -> ThreadModel:
     return await state.thread_ops.get(str(thread_id))
 
 
+@router.post("/{thread_id}/copy", response_model=ThreadModel)
+async def copy_thread(request: Request, thread_id: UUID) -> ThreadModel:
+    """Fork a thread into an independent copy seeded with its latest state."""
+    state = get_state(request)
+    return await state.thread_ops.copy(str(thread_id))
+
+
 @router.get("/{thread_id}/state", response_model=ThreadStateModel)
 async def get_thread_state(
     request: Request,

@@ -111,6 +111,53 @@ class ThreadOps:
         row = await self.require_row(thread_id)
         return await self.build_model_from_row(row)
 
+    async def copy(self, source_thread_id: str) -> ThreadModel:
+        """Fork a thread into an independent copy seeded with its latest state.
+
+        The new thread gets a fresh id, copies the source's metadata (stamped
+        with ``forked_from``), and is seeded with the source's *latest*
+        checkpoint state via ``aupdate_state`` so callers can branch and explore
+        without mutating the original.
+
+        This is a **shallow** copy: only the current state carries over, not the
+        full checkpoint history. Replaying history through the graph's reducers
+        (e.g. message-appending channels) would not faithfully reconstruct it, so
+        v1 copies the latest state only. Because it goes through the graph's
+        public state API rather than checkpointer internals, it behaves
+        identically across the in-memory and Postgres backends.
+        """
+        source_row = await self.require_row(source_thread_id)
+        new_thread_id = str(uuid4())
+        new_config: dict[str, JsonValue] = {
+            "configurable": {"thread_id": new_thread_id}
+        }
+        metadata: dict[str, JsonValue] = {
+            **source_row["metadata"],
+            "forked_from": source_thread_id,
+        }
+        row = await self._metadata_store.create_thread(
+            new_thread_id,
+            metadata=metadata,
+            config=new_config,
+            ttl=None,
+            if_exists="raise",
+        )
+
+        source_snapshot = await self._graph.aget_state(
+            {"configurable": {"thread_id": source_thread_id}}
+        )
+        source_values = getattr(source_snapshot, "values", None)
+        # LangGraph state may be a dict or a list (or other non-dict shape), so
+        # seed the copy from any non-empty state rather than dicts only.
+        if source_values:
+            await self._graph.aupdate_state(new_config, source_values)
+            await self._metadata_store.update_thread(
+                new_thread_id, mark_state_updated=True
+            )
+            row = await self.require_row(new_thread_id)
+
+        return await self.build_model_from_row(row)
+
     async def search(self, request: ThreadSearchRequest) -> list[ThreadModel]:
         """Return threads enriched with their latest LangGraph state."""
         rows = await self._metadata_store.search_thread_rows(request)
