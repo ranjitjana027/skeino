@@ -17,7 +17,7 @@
 - [ ] `poetry run bandit -r src` passes
 - [ ] `poetry run pytest` passes
 - [ ] Added/updated tests for the change
-- [ ] Updated `CHANGELOG.md` (under "Unreleased")
+- [ ] Added a changelog fragment in `changelog.d/` (not a direct `CHANGELOG.md` edit)
 - [ ] Updated docs/README where relevant
 
 ## Notes for reviewers

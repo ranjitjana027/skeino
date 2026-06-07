@@ -5,7 +5,10 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+Unreleased changes live as [changelog fragments](https://github.com/ranjitjana027/skeino/blob/main/changelog.d/README.md)
+under `changelog.d/` and are collated here on release with `towncrier build`.
+
+<!-- towncrier release notes start -->
 
 ## [0.3.0] - 2026-06-07
 

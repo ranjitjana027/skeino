@@ -45,7 +45,9 @@ v1 routes a **single graph**.
 ## Definition of done (every change)
 
 - Behavioural tests added/updated (see below).
-- `CHANGELOG.md` `[Unreleased]` entry for any user-facing change.
+- A changelog **fragment** for any user-facing change: `changelog.d/<id>.<type>.md`
+  (type ∈ added/changed/deprecated/removed/fixed/security). Do **not** edit
+  `CHANGELOG.md` directly — see `changelog.d/README.md`.
 - Docs updated where relevant: `docs/api-reference/http.md` (endpoint table) and
   the matching `docs/concepts/*.md`.
 - All five checks green. Code fully typed (mypy is strict).
@@ -60,9 +62,10 @@ update **both** the protocol and **both** store implementations:
 `schemas/*.py` (export in `schemas/__init__.py`) → `ops/*.py` →
 `api/*.py` route → `persistence/base.py` protocol + `metadata_store.py` +
 `in_memory_store.py` → extend `tests/conftest.py::FakeGraph` if new
-graph/checkpointer behaviour is needed → tests → changelog → docs.
+graph/checkpointer behaviour is needed → tests → changelog fragment → docs.
 
-The `add-api-endpoint` skill walks this end to end.
+The `add-api-endpoint` skill walks this end to end. To review and land open PRs,
+see `review-and-merge-prs`; to ship a release, see `cut-release`.
 
 ## Testing conventions
 
@@ -81,8 +84,9 @@ The `add-api-endpoint` skill walks this end to end.
   open branch. Keep PRs file-disjoint where possible.
 - Features get a tracking issue first; PR body uses
   `.github/PULL_REQUEST_TEMPLATE.md` and says `Closes #N`.
-- All PRs editing `CHANGELOG.md [Unreleased]` will conflict with each other once
-  one merges — rebase the rest and combine entries (keep both sides).
+- User-facing changes add a `changelog.d/` fragment, not a `CHANGELOG.md` edit,
+  so concurrent PRs don't conflict on the changelog (collated on release with
+  `towncrier build`).
 
 ## Known Copilot review false positives
 

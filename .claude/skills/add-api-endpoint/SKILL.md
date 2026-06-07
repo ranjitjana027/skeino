@@ -65,7 +65,9 @@ checkpoints by id, and a deletable checkpointer.
 
 ## 4. Changelog & docs
 
-- `CHANGELOG.md` `[Unreleased]` — `### Added` / `### Fixed` / `### Changed`.
+- Add a **changelog fragment** `changelog.d/<id>.<type>.md` (type ∈
+  added/changed/fixed/…) — one file per change, not a `CHANGELOG.md` edit. See
+  `changelog.d/README.md`.
 - `docs/api-reference/http.md` — add the route to the relevant table.
 - `docs/concepts/*.md` — a sentence in the matching concept page.
 
