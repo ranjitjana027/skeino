@@ -59,10 +59,11 @@ async def _materialise_graph(
 
 
 _MEMORY_SCHEMES: frozenset[str] = frozenset({"memory", ""})
+_SQLITE_SCHEMES: frozenset[str] = frozenset({"sqlite", "sqlite3"})
 
-# Schemes whose metadata store has a native (durable) implementation. Other
-# durable checkpointers (redis, custom) fall back to the in-memory metadata
-# store and trip the fail-loud guard unless allow_ephemeral_metadata is set.
+# Schemes whose metadata store has a native implementation. Other durable
+# checkpointers (redis, custom) have no native metadata store and trip the
+# fail-loud guard unless allow_ephemeral_metadata is set.
 _NATIVE_METADATA_STORES: dict[str, Callable[[str], MetadataStoreProtocol]] = {
     "postgres": MetadataStore,
     "postgresql": MetadataStore,
@@ -78,11 +79,22 @@ def _scheme(settings: SkeinoSettings) -> str:
 
 
 def _resolve_metadata_store(settings: SkeinoSettings) -> MetadataStoreProtocol:
-    """Pick the metadata store from the scheme (native for pg/sqlite/mongo)."""
-    factory = _NATIVE_METADATA_STORES.get(_scheme(settings))
-    if factory is not None and settings.checkpointer_uri is not None:
-        return factory(settings.checkpointer_uri)
-    return InMemoryMetadataStore()
+    """Pick the metadata store from the scheme (native for pg/sqlite/mongo).
+
+    SQLite defaults to ``:memory:`` when no URI is given — mirroring the SQLite
+    checkpointer builder — so the checkpointer and metadata store never split.
+    Postgres/Mongo require a URI (the checkpointer builder raises otherwise).
+    """
+    scheme = _scheme(settings)
+    factory = _NATIVE_METADATA_STORES.get(scheme)
+    if factory is None:
+        return InMemoryMetadataStore()
+    uri = settings.checkpointer_uri
+    if uri is None and scheme in _SQLITE_SCHEMES:
+        uri = ":memory:"
+    if uri is None:
+        return InMemoryMetadataStore()
+    return factory(uri)
 
 
 def _check_metadata_durability(settings: SkeinoSettings) -> None:
@@ -90,14 +102,13 @@ def _check_metadata_durability(settings: SkeinoSettings) -> None:
 
     Durable graph state alongside an in-memory thread/run list is a confusing
     split-brain (state persists, the run list evaporates on restart). This
-    arises for a durable scheme with no native metadata store (e.g. ``redis`` or
-    a custom checkpointer); ``allow_ephemeral_metadata`` opts out.
+    arises for a durable scheme with **no native metadata store** (e.g. ``redis``
+    or a custom checkpointer); ``allow_ephemeral_metadata`` opts out. (A missing
+    URI for postgres/mongo is caught separately by the checkpointer builder.)
     """
     scheme = _scheme(settings)
     durable_checkpointer = scheme not in _MEMORY_SCHEMES
-    has_native_metadata = (
-        scheme in _NATIVE_METADATA_STORES and settings.checkpointer_uri is not None
-    )
+    has_native_metadata = scheme in _NATIVE_METADATA_STORES
     if (
         durable_checkpointer
         and not has_native_metadata
@@ -105,9 +116,9 @@ def _check_metadata_durability(settings: SkeinoSettings) -> None:
     ):
         raise ValueError(
             f"checkpointer_scheme={settings.checkpointer_scheme!r} is a durable "
-            "checkpointer with no durable metadata store — thread/run metadata "
+            "checkpointer with no native metadata store — thread/run metadata "
             "would be in-memory and lost on restart. Use a scheme with a native "
-            "metadata store (postgres/sqlite/mongodb) and set checkpointer_uri, "
+            "metadata store (postgres/sqlite/mongodb), "
             "or pass allow_ephemeral_metadata=True to accept ephemeral metadata."
         )
 
@@ -148,8 +159,9 @@ def create_app(
         _check_metadata_durability(settings)
         async with AsyncExitStack() as stack:
             # The scheme alone selects the backend (default "memory"); the URI is
-            # a connection detail. A non-memory scheme without a URI still opens
-            # (e.g. memory), and a URI without a matching scheme is ignored.
+            # a connection detail. A URI without a matching scheme is ignored
+            # (memory). Durable schemes that need a URI (postgres/mongodb/redis)
+            # raise here if it's missing; sqlite defaults to ":memory:".
             checkpointer = await stack.enter_async_context(
                 open_checkpointer(
                     settings.checkpointer_uri,

@@ -29,10 +29,12 @@ def test_durability_guard_allows_opt_in_and_safe_combos() -> None:
     )
     # Memory checkpointer is not durable.
     _check_metadata_durability(SkeinoSettings(checkpointer_scheme="memory"))
-    # SQLite has a native metadata store.
+    # SQLite has a native metadata store — usable even without an explicit URI
+    # (defaults to :memory:, matching the SQLite checkpointer builder).
     _check_metadata_durability(
         SkeinoSettings(checkpointer_scheme="sqlite", checkpointer_uri=":memory:")
     )
+    _check_metadata_durability(SkeinoSettings(checkpointer_scheme="sqlite"))
     # Mongo has a native metadata store.
     _check_metadata_durability(
         SkeinoSettings(
@@ -75,3 +77,17 @@ def test_sqlite_backend_end_to_end() -> None:
 
         listed = client.get(f"/threads/{thread_id}/runs").json()
         assert any(r["run_id"] == run.json()["run_id"] for r in listed)
+
+
+def test_sqlite_scheme_without_uri_defaults_to_memory() -> None:
+    # scheme="sqlite" with no checkpointer_uri must work (both default :memory:),
+    # not fail the durability guard.
+    app = create_app(
+        graphs={"test_agent": lambda _ckpt: FakeGraph()},
+        settings=SkeinoSettings(
+            default_assistant_id="test_agent", checkpointer_scheme="sqlite"
+        ),
+    )
+    with TestClient(app) as client:
+        thread_id = client.post("/threads", json={}).json()["thread_id"]
+        assert client.get(f"/threads/{thread_id}").status_code == 200

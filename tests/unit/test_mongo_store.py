@@ -5,6 +5,7 @@ patching motor's ``AsyncIOMotorClient``, and checks the row shapes match the
 other stores (UUID ids, datetime timestamps, dict fields).
 """
 
+from collections.abc import AsyncIterator
 from datetime import datetime
 from uuid import UUID, uuid4
 
@@ -15,17 +16,20 @@ from skeino.persistence import MongoMetadataStore
 from skeino.schemas import ThreadSearchRequest, ThreadTtlConfig
 
 
-async def _store(monkeypatch: pytest.MonkeyPatch) -> MongoMetadataStore:
+@pytest.fixture
+async def store(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[MongoMetadataStore]:
     import motor.motor_asyncio
 
     monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
-    store = MongoMetadataStore("mongodb://mock", db_name="skeino_test")
-    await store.setup()
-    return store
+    s = MongoMetadataStore("mongodb://mock", db_name="skeino_test")
+    await s.setup()
+    try:
+        yield s
+    finally:
+        await s.aclose()
 
 
-async def test_create_fetch_thread_row_shapes(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = await _store(monkeypatch)
+async def test_create_fetch_thread_row_shapes(store: MongoMetadataStore) -> None:
     tid = str(uuid4())
     row = await store.create_thread(
         tid,
@@ -47,10 +51,7 @@ async def test_create_fetch_thread_row_shapes(monkeypatch: pytest.MonkeyPatch) -
     assert fetched["metadata"] == {"topic": "swing"}
 
 
-async def test_create_thread_conflict_and_do_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = await _store(monkeypatch)
+async def test_create_thread_conflict_and_do_nothing(store: MongoMetadataStore) -> None:
     tid = str(uuid4())
     await store.create_thread(tid, metadata={}, config={}, ttl=None, if_exists="raise")
     with pytest.raises(Exception) as exc_info:
@@ -64,8 +65,7 @@ async def test_create_thread_conflict_and_do_nothing(
     assert existing["thread_id"] == UUID(tid)
 
 
-async def test_update_thread_and_search(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = await _store(monkeypatch)
+async def test_update_thread_and_search(store: MongoMetadataStore) -> None:
     a, b = str(uuid4()), str(uuid4())
     await store.create_thread(a, metadata={}, config={}, ttl=None, if_exists="raise")
     await store.create_thread(b, metadata={}, config={}, ttl=None, if_exists="raise")
@@ -81,8 +81,7 @@ async def test_update_thread_and_search(monkeypatch: pytest.MonkeyPatch) -> None
     assert {str(r["thread_id"]) for r in all_rows} == {a, b}
 
 
-async def test_runs_lifecycle_and_scoping(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = await _store(monkeypatch)
+async def test_runs_lifecycle_and_scoping(store: MongoMetadataStore) -> None:
     tid, other = str(uuid4()), str(uuid4())
     await store.create_thread(tid, metadata={}, config={}, ttl=None, if_exists="raise")
     rid = str(uuid4())
@@ -106,8 +105,7 @@ async def test_runs_lifecycle_and_scoping(monkeypatch: pytest.MonkeyPatch) -> No
     assert [str(r["run_id"]) for r in rows] == [rid]
 
 
-async def test_delete_thread_cascades_runs(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = await _store(monkeypatch)
+async def test_delete_thread_cascades_runs(store: MongoMetadataStore) -> None:
     tid = str(uuid4())
     await store.create_thread(tid, metadata={}, config={}, ttl=None, if_exists="raise")
     await store.create_run(

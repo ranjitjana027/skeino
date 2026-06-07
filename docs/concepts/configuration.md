@@ -19,13 +19,15 @@ from pydantic_settings import BaseSettings
 from skeino import SkeinoSettings, create_app
 
 class Env(BaseSettings):
+    checkpointer_scheme: str = "memory"
     checkpointer_uri: str | None = None
 
-env = Env()  # reads CHECKPOINTER_URI from the environment
+env = Env()  # reads CHECKPOINTER_SCHEME / CHECKPOINTER_URI from the environment
 app = create_app(
     graphs={"my_agent": graph},
     settings=SkeinoSettings(
-        checkpointer_scheme="postgres", checkpointer_uri=env.checkpointer_uri
+        checkpointer_scheme=env.checkpointer_scheme,
+        checkpointer_uri=env.checkpointer_uri,
     ),
 )
 ```

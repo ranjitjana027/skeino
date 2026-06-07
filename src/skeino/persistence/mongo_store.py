@@ -49,7 +49,13 @@ class MongoMetadataStore:
 
     async def setup(self) -> None:
         """Open the motor client (lazily) and ensure indexes."""
-        import motor.motor_asyncio  # optional dependency: skeino[mongodb]
+        try:
+            import motor.motor_asyncio  # optional dependency: skeino[mongodb]
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "The 'mongodb' metadata store requires the skeino[mongodb] extra "
+                "(pip install 'skeino[mongodb]')."
+            ) from exc
 
         self._client = motor.motor_asyncio.AsyncIOMotorClient(self._uri)
         db = self._client[self._db_name]

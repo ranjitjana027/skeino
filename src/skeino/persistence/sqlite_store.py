@@ -108,7 +108,13 @@ class SqliteMetadataStore:
 
     async def setup(self) -> None:
         """Open the connection (lazily importing aiosqlite) and create tables."""
-        import aiosqlite  # optional dependency: skeino[sqlite]
+        try:
+            import aiosqlite  # optional dependency: skeino[sqlite]
+        except ImportError as exc:  # pragma: no cover - optional dependency
+            raise RuntimeError(
+                "The 'sqlite' metadata store requires the skeino[sqlite] extra "
+                "(pip install 'skeino[sqlite]')."
+            ) from exc
 
         self._conn = await aiosqlite.connect(self._path)
         await self._conn.execute("PRAGMA foreign_keys = ON")
