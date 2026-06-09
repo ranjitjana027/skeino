@@ -43,8 +43,9 @@ uvicorn = ">=0.41,<0.50"
 # install only ships the in-memory checkpointer. Pick a backend with the
 # matching extra: skeino[postgres], skeino[sqlite], or skeino[mongodb].
 # (Redis is supported via a lazy builder too, but is NOT a managed extra:
-# langgraph-checkpoint-redis caps Python at <3.14, narrower than skeino's
-# range — install it yourself: `pip install langgraph-checkpoint-redis`.)
+# langgraph-checkpoint-redis caps Python at <3.15, narrower than skeino's
+# range — install it yourself: `pip install langgraph-checkpoint-redis`,
+# or for development use the optional `redis` poetry group below.)
 psycopg = { extras = ["binary", "pool"], version = "^3.3.3", optional = true }
 langgraph-checkpoint-postgres = { version = ">=2.0.0", optional = true }
 aiosqlite = { version = ">=0.20.0", optional = true }
@@ -74,13 +75,24 @@ optional = true
 mkdocs-material = { version = ">=9.5.0", extras = ["imaging"] }
 mkdocstrings = { version = ">=0.26.0", extras = ["python"] }
 
+[tool.poetry.group.redis]
+optional = true
+
+[tool.poetry.group.redis.dependencies]
+# Dev-only, used by tests/api. Not a package extra: its python cap (<3.15)
+# is narrower than skeino's (<4.0), so it cannot ship as `skeino[redis]`.
+langgraph-checkpoint-redis = { version = ">=0.4.0", python = ">=3.11,<3.15" }
+
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-testpaths = ["tests"]
+# tests/api (infra-backed, needs docker compose) is deliberately NOT listed:
+# plain `pytest` stays in-memory and sub-second. Run it explicitly with
+# `poetry run pytest tests/api`.
+testpaths = ["tests/unit", "tests/integration"]
 
 [tool.ruff]
 # .claude/ holds agent/editor tooling (e.g. hook scripts), not shippable
@@ -125,7 +137,7 @@ strict_equality = true
 [[tool.mypy.overrides]]
 # Optional/untyped backends imported lazily by the checkpointer builders and
 # the Mongo metadata store. langgraph-checkpoint-redis is not even a managed
-# extra (it caps Python at <3.14).
+# extra (it caps Python at <3.15).
 module = [
     "langgraph.checkpoint.redis.*",
     "langgraph.checkpoint.mongodb.*",

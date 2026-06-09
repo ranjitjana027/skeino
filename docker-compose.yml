@@ -1,0 +1,47 @@
+# Local-only infrastructure for the tests/api suite (real Postgres/Mongo/Redis
+# behind the HTTP API). Disposable by design: tmpfs storage, no named volumes.
+#
+#   Start:  docker compose up -d --wait
+#   Run:    poetry run pytest tests/api
+#   Stop:   docker compose down -v
+#
+# Host ports are deliberately off-default (5433/27018/6380) to avoid clashing
+# with locally running services; override the URIs the tests use via
+# SKEINO_TEST_POSTGRES_URI / SKEINO_TEST_MONGODB_URI / SKEINO_TEST_REDIS_URI.
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports: ["5433:5432"]
+    environment:
+      POSTGRES_USER: skeino
+      POSTGRES_PASSWORD: skeino
+      POSTGRES_DB: skeino_test
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U skeino -d skeino_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mongodb:
+    image: mongo:7
+    ports: ["27018:27017"]
+    tmpfs: ["/data/db"]
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ping: 1}).ok' | grep -q 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  redis:
+    # Redis 8 bundles RedisJSON + RediSearch, both required by
+    # langgraph-checkpoint-redis (the alpine variant is unverified — keep this
+    # image, or use redis/redis-stack-server).
+    image: redis:8
+    ports: ["6380:6379"]
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

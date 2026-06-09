@@ -32,6 +32,20 @@ poetry run ruff format .
 poetry run ruff check --fix .
 ```
 
+### Infra-backed API tests (optional)
+
+`tests/api/` exercises the HTTP API end to end against **real** Postgres,
+MongoDB, and Redis (a real LangGraph graph behind the real checkpointer). It
+is excluded from plain `pytest` and CI — run it locally when touching
+persistence or streaming code:
+
+```bash
+docker compose up -d --wait
+poetry install --all-extras --with redis
+poetry run pytest tests/api
+docker compose down -v
+```
+
 ## Guidelines
 
 - Keep the public surface small. The supported API is `create_app`,
