@@ -10,6 +10,13 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [1.0.1] - 2026-06-10
+
+### Fixed
+
+- Token-by-token `values` streaming now works for real langgraph-sdk clients. Two fixes: (1) the incremental accumulator engages when `values` is *among* the requested stream modes (SDK clients send `["values", "messages-tuple", "custom"]`), instead of only on an exact `== ["values"]` match that never fired — and it now forwards `custom` (UI) events so generative-UI consumers don't regress; (2) output-schema value filtering introspects **TypedDict** output schemas (the common `StateGraph(State, output=OutputState)` pattern) via `__annotations__` instead of failing closed and stripping every field — previously it dropped `messages` from every streamed event, so clients only saw the message after the post-run state fetch. Genuinely opaque schemas still fail closed. ([#42](https://github.com/ranjitjana027/skeino/pull/42))
+
+
 ## [1.0.0] - 2026-06-07
 
 ### Added
@@ -110,7 +117,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ranjitjana027/skeino/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/ranjitjana027/skeino/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/ranjitjana027/skeino/compare/v0.1.0...v0.2.0
