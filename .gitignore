@@ -34,3 +34,4 @@ coverage.xml
 .idea/
 .vscode/
 .DS_Store
+.claude/hooks/.stop-test-blocks
