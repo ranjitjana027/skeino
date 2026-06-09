@@ -95,7 +95,7 @@ right here in these docs.
 
 ## Status
 
-skeino is in **beta** (`0.1.0`). The supported public surface is
+skeino is **stable** (1.x, semver). The supported public surface is
 [`create_app`][skeino.create_app], [`from_langgraph_json`][skeino.from_langgraph_json],
 [`SkeinoSettings`][skeino.SkeinoSettings], and [`GraphRegistry`][skeino.GraphRegistry].
 Sub-modules are importable for advanced use but aren't part of the stability
