@@ -24,6 +24,12 @@ from skeino.streaming.incremental import stream_incremental_values
 
 logger = logging.getLogger(__name__)
 
+# Stream modes the incremental accumulator can serve: it emits "values"
+# token-by-token, makes "messages-tuple" redundant, and forwards "custom" (UI)
+# events. A request limited to these (and including "values") is routed to the
+# accumulator; any other mode (e.g. "updates") falls through to the generic path.
+_ACCUMULATOR_MODES = frozenset({"values", "messages-tuple", "custom"})
+
 
 class Streamer:
     """Dispatch graph streams across the supported LangGraph stream modes."""
@@ -46,18 +52,25 @@ class Streamer:
         if schema is None:
             # No declared output schema → no filtering (everything passes).
             return None
-        try:
-            return frozenset(schema.model_fields.keys())
-        except AttributeError:
-            # The schema exists but is not introspectable. Fail *closed*: an
-            # empty allow-set drops every field rather than leaking internal
-            # pipeline state to clients.
-            logger.warning(
-                "Could not resolve output schema fields for %s; filtering out "
-                "all streamed values to avoid leaking internal fields",
-                type(self._graph).__name__,
-            )
-            return frozenset()
+        # Pydantic model schema: keys live in model_fields.
+        model_fields = getattr(schema, "model_fields", None)
+        if isinstance(model_fields, dict) and model_fields:
+            return frozenset(model_fields.keys())
+        # TypedDict / annotated-class schema (the common LangGraph case, e.g.
+        # `StateGraph(State, output=OutputState)`): the declared keys are
+        # introspectable via __annotations__, so we can still filter precisely
+        # without leaking internal state — and without dropping `messages`.
+        annotations = getattr(schema, "__annotations__", None)
+        if isinstance(annotations, dict) and annotations:
+            return frozenset(annotations.keys())
+        # Genuinely opaque schema. Fail *closed*: an empty allow-set drops every
+        # field rather than leaking internal pipeline state to clients.
+        logger.warning(
+            "Could not resolve output schema fields for %s; filtering out "
+            "all streamed values to avoid leaking internal fields",
+            type(self._graph).__name__,
+        )
+        return frozenset()
 
     def _filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         if self._output_keys is None:
@@ -84,7 +97,21 @@ class Streamer:
                 yield "events", serialize_mapping(event)
             return
 
-        if stream_modes == ["values"]:
+        # Token-by-token streaming. When the consumer opts in (agent_nodes set)
+        # and the client wants "values", synthesize incremental "values" events
+        # from the message stream so UIs can reveal text as the model speaks.
+        # Real langgraph-sdk clients request ["values", "messages-tuple",
+        # "custom"], so match on membership, not equality — an exact ["values"]
+        # check never fires for them. The accumulator *covers* exactly those
+        # modes (values incrementally; messages-tuple becomes redundant; custom
+        # is forwarded), so only engage when every requested mode is one it
+        # serves — a request for "updates" (or anything else) still needs the
+        # generic path. "events" is exclusive (validated upstream), handled above.
+        if (
+            self._agent_nodes
+            and "values" in stream_modes
+            and set(stream_modes) <= _ACCUMULATOR_MODES
+        ):
             async for event_name, payload in stream_incremental_values(
                 self._graph,
                 runnable_input,

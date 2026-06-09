@@ -44,7 +44,7 @@ async def stream_incremental_values(
         runnable_input,
         config,
         context=normalize_input_payload(request.context),
-        stream_mode=["messages", "values"],
+        stream_mode=["messages", "values", "custom"],
         interrupt_before=request.interrupt_before,
         interrupt_after=request.interrupt_after,
         durability=request.durability,
@@ -55,6 +55,14 @@ async def stream_incremental_values(
         elif isinstance(chunk, tuple) and len(chunk) == 2:
             event_name, payload = str(chunk[0]), chunk[1]
         else:
+            continue
+
+        if event_name == "custom":
+            # Pass through graph-emitted custom (UI) events untouched so
+            # generative-UI consumers keep working alongside token streaming.
+            serialized = serialize_value(payload)
+            if isinstance(serialized, dict):
+                yield "custom", serialized
             continue
 
         if event_name == "values":
