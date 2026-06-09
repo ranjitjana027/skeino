@@ -1,6 +1,6 @@
 """Persistence layer: metadata store, checkpointer registry, enrichment."""
 
-from skeino.persistence.base import MetadataStoreProtocol
+from skeino.persistence.base import MetadataStoreProtocol, RunRow, ThreadRow
 from skeino.persistence.checkpointer import (
     CheckpointerSpec,
     open_checkpointer,
@@ -17,7 +17,9 @@ __all__ = [
     "MetadataStore",
     "MetadataStoreProtocol",
     "MongoMetadataStore",
+    "RunRow",
     "SqliteMetadataStore",
+    "ThreadRow",
     "open_checkpointer",
     "register_checkpointer",
 ]

@@ -9,7 +9,7 @@ from fastapi import HTTPException, status
 from skeino.concurrency import ThreadLockManager
 from skeino.ops.assistants import AssistantOps
 from skeino.ops.threads import ThreadOps
-from skeino.persistence import MetadataStoreProtocol
+from skeino.persistence import MetadataStoreProtocol, RunRow
 from skeino.schemas import (
     JsonValue,
     RunCreateRequest,
@@ -354,7 +354,7 @@ class RunOps:
             return 0
         return total_tokens_from_messages(messages)
 
-    def _run_row_to_model(self, row: dict[str, Any]) -> RunModel:
+    def _run_row_to_model(self, row: RunRow) -> RunModel:
         """Convert a run metadata row into the API response model."""
         return RunModel(
             run_id=UUID(str(row["run_id"])),

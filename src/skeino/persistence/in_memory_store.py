@@ -6,11 +6,11 @@ runs, and any deployment where durability is not required.
 """
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from skeino.persistence.base import RunRow, ThreadRow
 from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
@@ -32,14 +32,14 @@ class InMemoryMetadataStore:
 
     def __init__(self) -> None:
         """Initialise empty thread and run maps."""
-        self._threads: dict[str, dict[str, Any]] = {}
-        self._runs: dict[str, dict[str, Any]] = {}
+        self._threads: dict[str, ThreadRow] = {}
+        self._runs: dict[str, RunRow] = {}
 
     async def setup(self) -> None:
         """No-op; the dicts are already ready."""
         return None
 
-    async def fetch_thread_row(self, thread_id: str) -> dict[str, Any] | None:
+    async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored row for ``thread_id`` (or None)."""
         return self._threads.get(thread_id)
 
@@ -51,7 +51,7 @@ class InMemoryMetadataStore:
         config: dict[str, JsonValue],
         ttl: ThreadTtlConfig | None,
         if_exists: ThreadIfExists,
-    ) -> dict[str, Any]:
+    ) -> ThreadRow:
         """Insert a thread row and return it."""
         if thread_id in self._threads:
             if if_exists == "do_nothing":
@@ -68,7 +68,7 @@ class InMemoryMetadataStore:
                 "ttl_minutes": ttl.ttl,
                 "expires_at": (now + timedelta(minutes=ttl.ttl)).isoformat(),
             }
-        row = {
+        row: ThreadRow = {
             "thread_id": UUID(thread_id),
             "created_at": now,
             "updated_at": now,
@@ -104,9 +104,7 @@ class InMemoryMetadataStore:
         if mark_state_updated:
             row["state_updated_at"] = _utcnow()
 
-    async def search_thread_rows(
-        self, request: ThreadSearchRequest
-    ) -> list[dict[str, Any]]:
+    async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """List thread rows respecting basic filter / pagination flags."""
         rows = list(self._threads.values())
         if request.ids:
@@ -134,10 +132,10 @@ class InMemoryMetadataStore:
         metadata: dict[str, JsonValue],
         kwargs: dict[str, JsonValue],
         multitask_strategy: MultitaskStrategy,
-    ) -> dict[str, Any]:
+    ) -> RunRow:
         """Insert a run row and return it."""
         now = _utcnow()
-        row = {
+        row: RunRow = {
             "run_id": UUID(run_id),
             "thread_id": UUID(thread_id),
             "assistant_id": assistant_id,
@@ -147,6 +145,7 @@ class InMemoryMetadataStore:
             "metadata": dict(metadata),
             "kwargs": dict(kwargs),
             "multitask_strategy": multitask_strategy,
+            "error": None,
         }
         self._runs[run_id] = row
         return row
@@ -164,10 +163,11 @@ class InMemoryMetadataStore:
             return
         row["status"] = status_value
         row["updated_at"] = _utcnow()
-        if error is not None:
-            row["error"] = error
+        # Always assign (clearing with None) — same semantics as the SQL/Mongo
+        # stores, which unconditionally write the error column on update.
+        row["error"] = error
 
-    async def fetch_run_row(self, thread_id: str, run_id: str) -> dict[str, Any] | None:
+    async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""
         row = self._runs.get(run_id)
         if row is None or str(row["thread_id"]) != thread_id:
@@ -181,7 +181,7 @@ class InMemoryMetadataStore:
         limit: int,
         offset: int,
         status_value: RunStatus | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunRow]:
         """List runs for a thread sorted newest-first."""
         rows = [r for r in self._runs.values() if str(r["thread_id"]) == thread_id]
         if status_value is not None:

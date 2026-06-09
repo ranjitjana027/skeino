@@ -6,11 +6,13 @@ Exercises the same contract as the in-memory/Postgres stores against a
 """
 
 from datetime import datetime
+from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
 
 from skeino.persistence import SqliteMetadataStore
+from skeino.persistence.sqlite_store import _BUSY_TIMEOUT_MS
 from skeino.schemas import ThreadSearchRequest, ThreadTtlConfig
 
 
@@ -153,5 +155,32 @@ async def test_delete_thread_cascades_runs() -> None:
         assert (
             await store.list_run_rows(tid, limit=10, offset=0, status_value=None) == []
         )
+    finally:
+        await store.aclose()
+
+
+async def test_file_backed_store_enables_wal_and_busy_timeout(tmp_path: Path) -> None:
+    store = SqliteMetadataStore(str(tmp_path / "meta.db"))
+    await store.setup()
+    try:
+        cursor = await store._conn.execute("PRAGMA journal_mode")
+        assert (await cursor.fetchone())[0] == "wal"
+        cursor = await store._conn.execute("PRAGMA busy_timeout")
+        assert (await cursor.fetchone())[0] == _BUSY_TIMEOUT_MS
+    finally:
+        await store.aclose()
+
+
+async def test_memory_store_setup_unaffected_by_wal_pragma() -> None:
+    # journal_mode=WAL is a documented no-op on ":memory:" databases.
+    store = await _store()
+    try:
+        cursor = await store._conn.execute("PRAGMA journal_mode")
+        assert (await cursor.fetchone())[0] == "memory"
+        tid = str(uuid4())
+        await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        assert await store.fetch_thread_row(tid) is not None
     finally:
         await store.aclose()

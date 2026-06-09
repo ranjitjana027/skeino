@@ -10,7 +10,10 @@ read so the returned row shapes match the other stores exactly.
 lazily in :meth:`SqliteMetadataStore.setup` so importing this module never
 requires it. A single connection is held for the store's lifetime (so an
 in-memory database survives across operations) and access is serialised with an
-``asyncio.Lock`` — correct for skeino's single-process model.
+``asyncio.Lock`` — correct for skeino's single-process model. File-backed
+databases are opened in WAL mode with a busy timeout so sharing the file with
+the SQLite checkpointer doesn't hit ``database is locked`` under concurrent
+writes.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from skeino.persistence.base import RunRow, ThreadRow
+from skeino.persistence.uri import normalize_sqlite_uri
 from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
@@ -75,8 +80,13 @@ _THREAD_COLUMNS = (
 )
 _RUN_COLUMNS = (
     "run_id, thread_id, assistant_id, created_at, updated_at, "
-    "status, metadata, kwargs, multitask_strategy"
+    "status, metadata, kwargs, multitask_strategy, error"
 )
+
+# Wait out a concurrent writer (e.g. the SQLite checkpointer sharing the
+# file) instead of failing with "database is locked". Deliberately above the
+# driver's 5 s default so the setting is observable.
+_BUSY_TIMEOUT_MS = 10_000
 
 
 def _utcnow() -> datetime:
@@ -87,22 +97,12 @@ def _to_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
 
-def _normalize_sqlite_path(uri: str) -> str:
-    """Normalise a sqlite URI/path to what aiosqlite expects (a path/``:memory:``)."""
-    if not uri:
-        return ":memory:"
-    for prefix in ("sqlite:///", "sqlite://"):
-        if uri.startswith(prefix):
-            return uri[len(prefix) :] or ":memory:"
-    return uri
-
-
 class SqliteMetadataStore:
     """SQLite-backed thread + run metadata store satisfying MetadataStoreProtocol."""
 
     def __init__(self, path: str) -> None:
         """Store the SQLite path/URI (a file path, ``:memory:``, or ``sqlite://``)."""
-        self._path = _normalize_sqlite_path(path)
+        self._path = normalize_sqlite_uri(path)
         self._conn: Any = None
         self._lock = asyncio.Lock()
 
@@ -117,6 +117,12 @@ class SqliteMetadataStore:
             ) from exc
 
         self._conn = await aiosqlite.connect(self._path)
+        # Busy timeout first: the WAL conversion below takes an exclusive lock
+        # and must itself wait out a concurrent checkpointer connection.
+        await self._conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+        # WAL lets readers and a writer coexist on a shared file; a harmless
+        # no-op on ":memory:" (journal_mode stays "memory").
+        await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys = ON")
         await self._conn.execute(_CREATE_THREADS_SQL)
         await self._conn.execute(_CREATE_RUNS_SQL)
@@ -132,11 +138,11 @@ class SqliteMetadataStore:
     # ------------------------------------------------------------------ threads
 
     @staticmethod
-    def _thread_row(row: Any) -> dict[str, Any]:
+    def _thread_row(row: Any) -> ThreadRow:
         return {
             "thread_id": UUID(row[0]),
-            "created_at": _to_dt(row[1]),
-            "updated_at": _to_dt(row[2]),
+            "created_at": datetime.fromisoformat(row[1]),
+            "updated_at": datetime.fromisoformat(row[2]),
             "state_updated_at": _to_dt(row[3]),
             "metadata": json.loads(row[4]),
             "config": json.loads(row[5]),
@@ -144,7 +150,7 @@ class SqliteMetadataStore:
             "ttl": json.loads(row[7]) if row[7] is not None else None,
         }
 
-    async def fetch_thread_row(self, thread_id: str) -> dict[str, Any] | None:
+    async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored row for ``thread_id`` (or None)."""
         async with self._lock:
             cursor = await self._conn.execute(
@@ -163,7 +169,7 @@ class SqliteMetadataStore:
         config: dict[str, JsonValue],
         ttl: ThreadTtlConfig | None,
         if_exists: ThreadIfExists,
-    ) -> dict[str, Any]:
+    ) -> ThreadRow:
         """Insert a thread row and return it."""
         now = _utcnow()
         ttl_payload = self._ttl_payload(ttl, now)
@@ -210,7 +216,7 @@ class SqliteMetadataStore:
             "ttl": ttl_payload,
         }
 
-    async def _fetch_thread_locked(self, thread_id: str) -> dict[str, Any] | None:
+    async def _fetch_thread_locked(self, thread_id: str) -> ThreadRow | None:
         """Fetch a thread row assuming the lock is already held."""
         cursor = await self._conn.execute(
             "SELECT thread_id, created_at, updated_at, state_updated_at, "
@@ -254,9 +260,7 @@ class SqliteMetadataStore:
             await self._conn.execute(query, values)
             await self._conn.commit()
 
-    async def search_thread_rows(
-        self, request: ThreadSearchRequest
-    ) -> list[dict[str, Any]]:
+    async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows (filtered by ids/status, sorted, paginated)."""
         conditions: list[str] = []
         values: list[Any] = []
@@ -296,17 +300,18 @@ class SqliteMetadataStore:
     # --------------------------------------------------------------------- runs
 
     @staticmethod
-    def _run_row(row: Any) -> dict[str, Any]:
+    def _run_row(row: Any) -> RunRow:
         return {
             "run_id": UUID(row[0]),
             "thread_id": UUID(row[1]),
             "assistant_id": row[2],
-            "created_at": _to_dt(row[3]),
-            "updated_at": _to_dt(row[4]),
+            "created_at": datetime.fromisoformat(row[3]),
+            "updated_at": datetime.fromisoformat(row[4]),
             "status": row[5],
             "metadata": json.loads(row[6]),
             "kwargs": json.loads(row[7]),
             "multitask_strategy": row[8],
+            "error": row[9],
         }
 
     async def create_run(
@@ -317,7 +322,7 @@ class SqliteMetadataStore:
         metadata: dict[str, JsonValue],
         kwargs: dict[str, JsonValue],
         multitask_strategy: MultitaskStrategy,
-    ) -> dict[str, Any]:
+    ) -> RunRow:
         """Insert a run row and return it."""
         now = _utcnow()
         async with self._lock:
@@ -349,6 +354,7 @@ class SqliteMetadataStore:
             "metadata": dict(metadata),
             "kwargs": dict(kwargs),
             "multitask_strategy": multitask_strategy,
+            "error": None,
         }
 
     async def update_run_status(
@@ -367,12 +373,11 @@ class SqliteMetadataStore:
             )
             await self._conn.commit()
 
-    async def fetch_run_row(self, thread_id: str, run_id: str) -> dict[str, Any] | None:
+    async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""
         async with self._lock:
             cursor = await self._conn.execute(
-                "SELECT run_id, thread_id, assistant_id, created_at, updated_at, "
-                "status, metadata, kwargs, multitask_strategy FROM app_runs "
+                f"SELECT {_RUN_COLUMNS} FROM app_runs "  # nosec B608 - static columns
                 "WHERE thread_id = ? AND run_id = ?",
                 (thread_id, run_id),
             )
@@ -386,7 +391,7 @@ class SqliteMetadataStore:
         limit: int,
         offset: int,
         status_value: RunStatus | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunRow]:
         """List runs for a thread sorted newest-first."""
         conditions = ["thread_id = ?"]
         values: list[Any] = [thread_id]

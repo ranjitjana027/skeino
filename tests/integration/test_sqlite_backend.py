@@ -1,5 +1,7 @@
 """SQLite backend wiring: durability guard + end-to-end through create_app."""
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -91,3 +93,31 @@ def test_sqlite_scheme_without_uri_defaults_to_memory() -> None:
     with TestClient(app) as client:
         thread_id = client.post("/threads", json={}).json()["thread_id"]
         assert client.get(f"/threads/{thread_id}").status_code == 200
+
+
+def test_sqlite_file_shared_by_checkpointer_and_metadata_store(tmp_path: Path) -> None:
+    # Checkpointer and metadata store on the SAME file — the contention
+    # scenario the metadata store's WAL + busy-timeout hardening targets.
+    db_path = tmp_path / "skeino.db"
+    app = create_app(
+        graphs={"test_agent": lambda _ckpt: FakeGraph()},
+        settings=SkeinoSettings(
+            default_assistant_id="test_agent",
+            checkpointer_scheme="sqlite",
+            checkpointer_uri=str(db_path),
+        ),
+    )
+    with TestClient(app) as client:
+        thread_id = client.post("/threads", json={"metadata": {"t": "x"}}).json()[
+            "thread_id"
+        ]
+        run = client.post(
+            f"/threads/{thread_id}/runs",
+            json={
+                "assistant_id": "test_agent",
+                "input": {"messages": [{"role": "user", "content": "hi"}]},
+            },
+        )
+        assert run.status_code == 200
+        assert run.json()["status"] == "success"
+    assert db_path.exists()
