@@ -48,9 +48,10 @@ Other backends are used as-is, so this run-grouping is **Postgres-only** today.
 !!! note "MongoDB specifics"
     The MongoDB checkpointer (`MongoDBSaver`) is backed by a **synchronous**
     pymongo client, so its checkpoint I/O runs on the event loop — size
-    accordingly under high concurrency. It also writes checkpoints to its own
-    default database (`checkpointing_db`), separate from the metadata store's
-    database — both share the server in your `mongodb://` URI.
+    accordingly under high concurrency. Name a database in the URI path
+    (`mongodb://host/mydb`) and both the checkpointer and the metadata store
+    use it; a pathless URI falls back to the historical split defaults
+    (`checkpointing_db` for checkpoints, `skeino` for metadata).
 
 ### Registering a custom checkpointer
 
@@ -82,11 +83,16 @@ scheme**, and native implementations exist for the durable schemes:
 - **`MetadataStore`** (`postgres`) — two tables, `app_threads` and `app_runs`
   (the latter `ON DELETE CASCADE`), a fresh async connection per operation.
 - **`SqliteMetadataStore`** (`sqlite`) — the same two tables over `aiosqlite`
-  (a single shared connection); a durable, serverless option.
+  (a single shared connection, WAL mode + busy timeout so it can share a file
+  with the SQLite checkpointer); a durable, serverless option.
 - **`MongoMetadataStore`** (`mongodb`) — the same data as two collections over
-  `motor`.
+  `motor`, in the database named by the URI path (else `skeino`).
 - **`InMemoryMetadataStore`** — used for `memory`, and for durable checkpointer
   schemes that have no native metadata store (e.g. `redis` or a custom backend).
+
+Every implementation returns the same row shapes, declared as the `ThreadRow` /
+`RunRow` TypedDicts next to `MetadataStoreProtocol` in `skeino.persistence` —
+the contract a custom backend must satisfy.
 
 !!! warning "No split-brain"
     A durable checkpointer with no native metadata store (e.g. `redis`, or a
@@ -102,7 +108,7 @@ scheme**, and native implementations exist for the durable schemes:
 | Quick local dev, tests, throwaway demos | Default — `checkpointer_scheme="memory"` |
 | Durable, serverless (single node, a file) | `checkpointer_scheme="sqlite"`, `checkpointer_uri="/data/skeino.db"` (`skeino[sqlite]`) |
 | State shared across workers / a managed DB | `checkpointer_scheme="postgres"`, `checkpointer_uri="postgresql://…"` (`skeino[postgres]`) |
-| MongoDB | `checkpointer_scheme="mongodb"`, `checkpointer_uri="mongodb://…"` (`skeino[mongodb]`) |
+| MongoDB | `checkpointer_scheme="mongodb"`, `checkpointer_uri="mongodb://…/mydb"` (`skeino[mongodb]`) |
 
 !!! warning "In-memory is not for production"
     The in-memory checkpointer and metadata store keep everything in the

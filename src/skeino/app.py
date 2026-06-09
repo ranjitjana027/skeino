@@ -34,6 +34,11 @@ from skeino.persistence import (
     SqliteMetadataStore,
     open_checkpointer,
 )
+from skeino.persistence.uri import (
+    MEMORY_SCHEMES,
+    SQLITE_SCHEMES,
+    normalize_sqlite_uri,
+)
 from skeino.registry import GraphRegistry
 from skeino.streaming import Streamer
 
@@ -57,9 +62,6 @@ async def _materialise_graph(
         return await result
     return result
 
-
-_MEMORY_SCHEMES: frozenset[str] = frozenset({"memory", ""})
-_SQLITE_SCHEMES: frozenset[str] = frozenset({"sqlite", "sqlite3"})
 
 # Schemes whose metadata store has a native implementation. Other durable
 # checkpointers (redis, custom) have no native metadata store and trip the
@@ -90,8 +92,8 @@ def _resolve_metadata_store(settings: SkeinoSettings) -> MetadataStoreProtocol:
     if factory is None:
         return InMemoryMetadataStore()
     uri = settings.checkpointer_uri
-    if uri is None and scheme in _SQLITE_SCHEMES:
-        uri = ":memory:"
+    if uri is None and scheme in SQLITE_SCHEMES:
+        uri = normalize_sqlite_uri(uri)  # ":memory:" — same default as the builder
     if uri is None:
         # postgres/mongo need a URI. The checkpointer builder normally raises
         # first; raise here too so a durable scheme never silently downgrades to
@@ -113,7 +115,7 @@ def _check_metadata_durability(settings: SkeinoSettings) -> None:
     URI for postgres/mongo is caught separately by the checkpointer builder.)
     """
     scheme = _scheme(settings)
-    durable_checkpointer = scheme not in _MEMORY_SCHEMES
+    durable_checkpointer = scheme not in MEMORY_SCHEMES
     has_native_metadata = scheme in _NATIVE_METADATA_STORES
     if (
         durable_checkpointer

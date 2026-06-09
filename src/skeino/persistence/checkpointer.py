@@ -36,6 +36,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
 from skeino.persistence.enriching import build_run_enriching_checkpointer
+from skeino.persistence.uri import mongo_db_from_uri, normalize_sqlite_uri
 
 CheckpointerBuilder = Callable[
     ["CheckpointerSpec"], AsyncContextManager[BaseCheckpointSaver]
@@ -156,7 +157,17 @@ async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoint
     # synchronous pymongo client) that exposes the async checkpoint methods
     # skeino uses; its sync __exit__ runs on the event loop at shutdown.
     setup_schema = bool(spec.options.get("setup_schema", True))
-    with MongoDBSaver.from_conn_string(spec.uri) as saver:
+    db_name = mongo_db_from_uri(spec.uri)
+    # Only override when the URI names a database (then the metadata store
+    # derives the same name, so graph state and metadata share it). A pathless
+    # URI keeps the saver's 'checkpointing_db' default — overriding it would
+    # silently re-point existing deployments' checkpoints.
+    saver_cm = (
+        MongoDBSaver.from_conn_string(spec.uri)
+        if db_name is None
+        else MongoDBSaver.from_conn_string(spec.uri, db_name=db_name)
+    )
+    with saver_cm as saver:
         if setup_schema:
             for setup_name in ("asetup", "setup"):
                 setup_fn = getattr(saver, setup_name, None)
@@ -176,16 +187,6 @@ async def _build_memory(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
     yield MemorySaver()
 
 
-def _sqlite_conn_string(uri: str | None) -> str:
-    """Normalise a sqlite URI/path to what AsyncSqliteSaver expects."""
-    if not uri:
-        return ":memory:"
-    for prefix in ("sqlite:///", "sqlite://"):
-        if uri.startswith(prefix):
-            return uri[len(prefix) :] or ":memory:"
-    return uri
-
-
 @register_checkpointer("sqlite", "sqlite3")
 @asynccontextmanager
 async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
@@ -198,7 +199,7 @@ async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
             "(pip install 'skeino[sqlite]')."
         ) from exc
 
-    conn_string = _sqlite_conn_string(spec.uri)
+    conn_string = normalize_sqlite_uri(spec.uri)
     setup_schema = bool(spec.options.get("setup_schema", True))
     async with AsyncExitStack() as stack:
         saver = await stack.enter_async_context(

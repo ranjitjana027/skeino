@@ -16,6 +16,7 @@ from typing import Any, Final
 
 from fastapi import HTTPException, status
 
+from skeino.persistence.base import RunRow, ThreadRow
 from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
@@ -117,13 +118,16 @@ class MetadataStore:
                 await cursor.execute(_CREATE_RUNS_THREAD_INDEX_SQL)
             await conn.commit()
 
-    async def fetch_thread_row(self, thread_id: str) -> dict[str, Any] | None:
+    async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored metadata row for a thread."""
         psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
             self._postgres_uri, row_factory=dict_row
         ) as conn:
             async with conn.cursor() as cursor:
+                # The SELECT/RETURNING column lists in this module exactly
+                # mirror ThreadRow/RunRow — that is what makes the dict_row →
+                # TypedDict annotations below sound.
                 await cursor.execute(
                     """
                     SELECT thread_id, created_at, updated_at, state_updated_at,
@@ -133,7 +137,7 @@ class MetadataStore:
                     """,
                     (thread_id,),
                 )
-                row: dict[str, Any] | None = await cursor.fetchone()
+                row: ThreadRow | None = await cursor.fetchone()
                 return row
 
     async def create_thread(
@@ -144,7 +148,7 @@ class MetadataStore:
         config: dict[str, JsonValue],
         ttl: ThreadTtlConfig | None,
         if_exists: ThreadIfExists,
-    ) -> dict[str, Any]:
+    ) -> ThreadRow:
         """Insert a thread row and return the stored record."""
         psycopg, dict_row = _pg()
         ttl_payload = self._build_ttl_payload(ttl)
@@ -184,7 +188,7 @@ class MetadataStore:
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"Thread {thread_id} already exists.",
                     ) from exc
-                created_row: dict[str, Any] | None = await cursor.fetchone()
+                created_row: ThreadRow | None = await cursor.fetchone()
             await conn.commit()
         if created_row is None:
             raise HTTPException(
@@ -250,7 +254,7 @@ class MetadataStore:
     async def search_thread_rows(
         self,
         request: ThreadSearchRequest,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ThreadRow]:
         """Return stored thread rows before graph-state enrichment."""
         conditions: list[str] = []
         values: list[Any] = []
@@ -299,7 +303,7 @@ class MetadataStore:
         metadata: dict[str, JsonValue],
         kwargs: dict[str, JsonValue],
         multitask_strategy: MultitaskStrategy,
-    ) -> dict[str, Any]:
+    ) -> RunRow:
         """Insert a run row and return it."""
         psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
@@ -313,7 +317,7 @@ class MetadataStore:
                         metadata, kwargs, multitask_strategy
                     ) VALUES (%s, %s, %s, %s, %s, %s, %s)
                     RETURNING run_id, thread_id, assistant_id, created_at, updated_at,
-                              status, metadata, kwargs, multitask_strategy
+                              status, metadata, kwargs, multitask_strategy, error
                     """,
                     (
                         run_id,
@@ -325,7 +329,7 @@ class MetadataStore:
                         multitask_strategy,
                     ),
                 )
-                run_row: dict[str, Any] | None = await cursor.fetchone()
+                run_row: RunRow | None = await cursor.fetchone()
             await conn.commit()
         if run_row is None:
             raise HTTPException(
@@ -355,7 +359,7 @@ class MetadataStore:
                 )
             await conn.commit()
 
-    async def fetch_run_row(self, thread_id: str, run_id: str) -> dict[str, Any] | None:
+    async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a single run row for a thread."""
         psycopg, dict_row = _pg()
         async with await psycopg.AsyncConnection.connect(
@@ -365,13 +369,13 @@ class MetadataStore:
                 await cursor.execute(
                     """
                     SELECT run_id, thread_id, assistant_id, created_at, updated_at,
-                           status, metadata, kwargs, multitask_strategy
+                           status, metadata, kwargs, multitask_strategy, error
                     FROM app_runs
                     WHERE thread_id = %s AND run_id = %s
                     """,
                     (thread_id, run_id),
                 )
-                row: dict[str, Any] | None = await cursor.fetchone()
+                row: RunRow | None = await cursor.fetchone()
                 return row
 
     async def list_run_rows(
@@ -381,7 +385,7 @@ class MetadataStore:
         limit: int,
         offset: int,
         status_value: RunStatus | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunRow]:
         """List run rows for a thread."""
         conditions: list[str] = ["thread_id = %s"]
         values: list[Any] = [thread_id]
@@ -393,7 +397,7 @@ class MetadataStore:
         # built above; every user value is bound via %s parameters.
         query = f"""
             SELECT run_id, thread_id, assistant_id, created_at, updated_at,
-                   status, metadata, kwargs, multitask_strategy
+                   status, metadata, kwargs, multitask_strategy, error
             FROM app_runs
             WHERE {" AND ".join(conditions)}
             ORDER BY created_at DESC
