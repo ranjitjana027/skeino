@@ -7,6 +7,10 @@ an optional dependency (``skeino[mongodb]``), imported lazily in
 
 Thread and run documents use the id as ``_id`` (so duplicate inserts raise a
 ``DuplicateKeyError``); runs are deleted with their thread.
+
+The database defaults to the one named in the ``mongodb://…/<db>`` URI path —
+matching the checkpointer builder, so graph state and metadata share the
+operator's chosen database — falling back to ``skeino`` for pathless URIs.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -15,6 +19,8 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 
+from skeino.persistence.base import RunRow, ThreadRow
+from skeino.persistence.uri import mongo_db_from_uri
 from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
@@ -39,10 +45,10 @@ def _utcnow() -> datetime:
 class MongoMetadataStore:
     """MongoDB-backed thread + run metadata store (MetadataStoreProtocol)."""
 
-    def __init__(self, uri: str, *, db_name: str = _DEFAULT_DB_NAME) -> None:
-        """Store the MongoDB connection URI and database name."""
+    def __init__(self, uri: str, *, db_name: str | None = None) -> None:
+        """Store the URI; ``db_name`` defaults to the URI's path, else "skeino"."""
         self._uri = uri
-        self._db_name = db_name
+        self._db_name = db_name or mongo_db_from_uri(uri) or _DEFAULT_DB_NAME
         self._client: Any = None
         self._threads: Any = None
         self._runs: Any = None
@@ -73,7 +79,7 @@ class MongoMetadataStore:
     # ------------------------------------------------------------------ threads
 
     @staticmethod
-    def _thread_row(doc: dict[str, Any]) -> dict[str, Any]:
+    def _thread_row(doc: dict[str, Any]) -> ThreadRow:
         return {
             "thread_id": UUID(doc["thread_id"]),
             "created_at": doc["created_at"],
@@ -85,7 +91,7 @@ class MongoMetadataStore:
             "ttl": doc.get("ttl"),
         }
 
-    async def fetch_thread_row(self, thread_id: str) -> dict[str, Any] | None:
+    async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored row for ``thread_id`` (or None)."""
         doc = await self._threads.find_one({"_id": thread_id})
         return self._thread_row(doc) if doc is not None else None
@@ -98,7 +104,7 @@ class MongoMetadataStore:
         config: dict[str, JsonValue],
         ttl: ThreadTtlConfig | None,
         if_exists: ThreadIfExists,
-    ) -> dict[str, Any]:
+    ) -> ThreadRow:
         """Insert a thread document and return its row."""
         from pymongo.errors import DuplicateKeyError
 
@@ -156,9 +162,7 @@ class MongoMetadataStore:
             return
         await self._threads.update_one({"_id": thread_id}, {"$set": updates})
 
-    async def search_thread_rows(
-        self, request: ThreadSearchRequest
-    ) -> list[dict[str, Any]]:
+    async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows (filtered by ids/status, sorted, paginated)."""
         query: dict[str, Any] = {}
         if request.ids:
@@ -185,7 +189,7 @@ class MongoMetadataStore:
     # --------------------------------------------------------------------- runs
 
     @staticmethod
-    def _run_row(doc: dict[str, Any]) -> dict[str, Any]:
+    def _run_row(doc: dict[str, Any]) -> RunRow:
         return {
             "run_id": UUID(doc["run_id"]),
             "thread_id": UUID(doc["thread_id"]),
@@ -196,6 +200,7 @@ class MongoMetadataStore:
             "metadata": doc.get("metadata", {}),
             "kwargs": doc.get("kwargs", {}),
             "multitask_strategy": doc["multitask_strategy"],
+            "error": doc.get("error"),
         }
 
     async def create_run(
@@ -206,7 +211,7 @@ class MongoMetadataStore:
         metadata: dict[str, JsonValue],
         kwargs: dict[str, JsonValue],
         multitask_strategy: MultitaskStrategy,
-    ) -> dict[str, Any]:
+    ) -> RunRow:
         """Insert a run document and return its row."""
         now = _utcnow()
         doc = {
@@ -238,7 +243,7 @@ class MongoMetadataStore:
             {"$set": {"status": status_value, "updated_at": _utcnow(), "error": error}},
         )
 
-    async def fetch_run_row(self, thread_id: str, run_id: str) -> dict[str, Any] | None:
+    async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""
         doc = await self._runs.find_one({"_id": run_id, "thread_id": thread_id})
         return self._run_row(doc) if doc is not None else None
@@ -250,7 +255,7 @@ class MongoMetadataStore:
         limit: int,
         offset: int,
         status_value: RunStatus | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RunRow]:
         """List runs for a thread sorted newest-first."""
         query: dict[str, Any] = {"thread_id": thread_id}
         if status_value is not None:

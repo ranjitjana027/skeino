@@ -119,3 +119,33 @@ async def test_delete_thread_cascades_runs(store: MongoMetadataStore) -> None:
     await store.delete_thread(tid)
     assert await store.fetch_thread_row(tid) is None
     assert await store.list_run_rows(tid, limit=10, offset=0, status_value=None) == []
+
+
+def test_db_name_derived_from_uri_path() -> None:
+    assert MongoMetadataStore("mongodb://host:27017/customdb")._db_name == "customdb"
+
+
+def test_explicit_db_name_wins_over_uri_path() -> None:
+    store = MongoMetadataStore("mongodb://host:27017/customdb", db_name="explicit")
+    assert store._db_name == "explicit"
+
+
+def test_pathless_uri_falls_back_to_default_db() -> None:
+    assert MongoMetadataStore("mongodb://host:27017")._db_name == "skeino"
+
+
+async def test_setup_uses_uri_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    import motor.motor_asyncio
+
+    monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
+    store = MongoMetadataStore("mongodb://mock/customdb")
+    await store.setup()
+    try:
+        assert store._threads.database.name == "customdb"
+        tid = str(uuid4())
+        await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        assert await store.fetch_thread_row(tid) is not None
+    finally:
+        await store.aclose()

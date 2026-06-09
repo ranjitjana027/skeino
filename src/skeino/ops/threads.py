@@ -6,7 +6,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
 
-from skeino.persistence import MetadataStoreProtocol
+from skeino.persistence import MetadataStoreProtocol, ThreadRow
 from skeino.schemas import (
     CheckpointConfigModel,
     JsonValue,
@@ -272,7 +272,7 @@ class ThreadOps:
                 detail=f"Thread {thread_id} not found.",
             )
 
-    async def require_row(self, thread_id: str) -> dict[str, Any]:
+    async def require_row(self, thread_id: str) -> ThreadRow:
         """Return an existing thread row or raise 404."""
         row = await self._metadata_store.fetch_thread_row(thread_id)
         if row is None:
@@ -320,7 +320,7 @@ class ThreadOps:
                 )
             return frozenset()
 
-    async def build_model_from_row(self, row: dict[str, Any]) -> ThreadModel:
+    async def build_model_from_row(self, row: ThreadRow) -> ThreadModel:
         """Combine stored metadata with the latest graph state."""
         thread_id = str(row["thread_id"])
         thread_status: ThreadStatus = row["status"]

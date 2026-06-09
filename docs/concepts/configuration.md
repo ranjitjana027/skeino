@@ -39,7 +39,7 @@ app = create_app(
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `checkpointer_scheme` | `str` | `"memory"` | **Selects the persistence backend** (`memory`/`postgres`/`sqlite`/`mongodb`/`redis`/custom). The scheme alone decides it — both the checkpointer and (where native) the metadata store follow it. DB backends are optional extras. |
-| `checkpointer_uri` | `str \| None` | `None` | Connection string/path for the selected scheme (`postgresql://…`, a SQLite path or `:memory:`, `mongodb://…`). Ignored for `memory`. A URI without a matching scheme is **not** a selector. |
+| `checkpointer_uri` | `str \| None` | `None` | Connection string/path for the selected scheme (`postgresql://…`, a SQLite path or `:memory:`, `mongodb://…`). For Mongo, the URI path selects the database used by both the checkpointer and the metadata store (`mongodb://host/mydb`). Ignored for `memory`. A URI without a matching scheme is **not** a selector. |
 | `checkpointer_options` | `dict[str, object]` | `{}` | Extra options passed to the checkpointer builder (e.g. `{"setup_schema": False}`). |
 | `allow_ephemeral_metadata` | `bool` | `False` | Permit a durable scheme with no native metadata store (e.g. `redis`/custom) to run with the in-memory metadata store. Off by default so the split-brain fails loudly at startup. |
 
