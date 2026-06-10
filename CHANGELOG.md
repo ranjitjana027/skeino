@@ -10,6 +10,39 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [1.1.0] - 2026-06-10
+
+### Changed
+
+- The SQLite metadata store enables `journal_mode=WAL` and a 10 s busy timeout
+  at setup, preventing `database is locked` errors when sharing a database file
+  with the SQLite checkpointer. WAL persists in the database file once enabled. ([#36](https://github.com/ranjitjana027/skeino/issues/36))
+- Metadata store row shapes are now a typed contract: `ThreadRow`/`RunRow`
+  TypedDicts (exported from `skeino.persistence`) replace the `dict[str, Any]`
+  returns on `MetadataStoreProtocol`, and every backend now always includes the
+  `error` key on run rows (previously the in-memory store omitted it until a
+  failure and kept stale values across status updates). HTTP responses are
+  unchanged; custom `MetadataStoreProtocol` implementations should return the
+  new shapes. ([#36](https://github.com/ranjitjana027/skeino/issues/36))
+- MongoDB: both the checkpointer and the metadata store now use the database
+  named in the `mongodb://…/<db>` URI path, so graph state and metadata share
+  the operator's chosen database. URIs without a path keep the previous
+  defaults (`checkpointing_db` for checkpoints, `skeino` for metadata). If your
+  URI already names a database, both stores re-point to it on upgrade —
+  existing data in the old default databases is not migrated. ([#36](https://github.com/ranjitjana027/skeino/issues/36))
+
+### Fixed
+
+- PyPI trove classifier updated from `Development Status :: 4 - Beta` to `5 - Production/Stable` to match the stable 1.x release line. ([#48](https://github.com/ranjitjana027/skeino/issues/48))
+- Per-run token usage is now measured with a `UsageMetadataCallbackHandler`
+  attached to each run's config, so `X-Tokens-Used` and the streaming `end`
+  event report the run's own tokens — including for graphs that never store
+  usage-bearing messages in checkpoint state (previously reported as 0), and
+  without the cumulative over-count on multi-turn threads. Summing the final
+  checkpoint's messages remains as a fallback for providers the handler can't
+  see. ([#52](https://github.com/ranjitjana027/skeino/issues/52))
+
+
 ## [1.0.1] - 2026-06-10
 
 ### Fixed
@@ -117,7 +150,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ranjitjana027/skeino/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/ranjitjana027/skeino/compare/v0.2.0...v0.3.0
