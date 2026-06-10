@@ -131,12 +131,22 @@ already busy:
 
 ## Token usage
 
-After a run completes, skeino sums the total tokens across all AI messages in the
-final state, normalising the different provider formats (LangChain
-`usage_metadata`, Gemini, OpenAI/Groq/Bedrock). The total is surfaced:
+skeino measures each run's token usage with a LangChain
+`UsageMetadataCallbackHandler` attached to the run's config. The handler
+records every LLM call made during the run — including calls whose responses
+never reach checkpoint state — and is scoped to that run, so multi-turn
+threads report per-run totals. The total is surfaced:
 
 - on `POST /threads/{id}/runs` via the `X-Tokens-Used` response header, and
 - on the streaming endpoint inside the terminal `end` event's `usage` field.
+
+When the handler records nothing (providers that don't populate
+`usage_metadata` plus `model_name` on their messages), skeino falls back to
+summing the total tokens across all AI messages in the final state,
+normalising the different provider formats (LangChain `usage_metadata`,
+Gemini, OpenAI/Groq/Bedrock). The fallback covers the thread's whole message
+history, so on multi-turn threads it reports cumulative totals rather than
+the run's own.
 
 ## Related reference
 

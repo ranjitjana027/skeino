@@ -14,6 +14,8 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+from langchain_core.outputs import ChatGeneration, LLMResult
 
 from skeino import SkeinoSettings, create_app
 
@@ -55,6 +57,10 @@ class FakeGraph:
         self.stream_error_after: int = 0
         self.stream_fail_times: int = 0
         self.stream_attempts: int = 0
+        # Simulated LLM token usage: when set, ainvoke/astream fire on_llm_end
+        # on every handler in config["callbacks"], as a real chat model would.
+        self.llm_usage: dict[str, int] | None = None
+        self.llm_model_name: str = "fake-model"
 
     async def aupdate_state(
         self,
@@ -105,6 +111,26 @@ class FakeGraph:
             thread_id, self.state_by_thread.get(thread_id, {}), latest_id
         )
 
+    def _fire_usage_callbacks(self, config: dict[str, Any]) -> None:
+        """Simulate an LLM call's on_llm_end against the config's callbacks.
+
+        Uses real langchain-core types so the actual handler logic runs —
+        including UsageMetadataCallbackHandler's requirement that both
+        usage_metadata and response_metadata["model_name"] be present.
+        """
+        if self.llm_usage is None:
+            return
+        message = AIMessage(
+            content="",
+            usage_metadata=self.llm_usage,  # type: ignore[arg-type]
+            response_metadata={"model_name": self.llm_model_name},
+        )
+        result = LLMResult(generations=[[ChatGeneration(message=message)]])
+        for handler in config.get("callbacks") or []:
+            on_llm_end = getattr(handler, "on_llm_end", None)
+            if callable(on_llm_end):
+                on_llm_end(result)
+
     async def ainvoke(
         self,
         input_value: dict[str, Any] | Any,
@@ -119,6 +145,7 @@ class FakeGraph:
         del context, stream_mode, interrupt_before, interrupt_after, durability
         if self.invoke_error is not None:
             raise self.invoke_error
+        self._fire_usage_callbacks(config)
         thread_id = str(config["configurable"]["thread_id"])
         state = self.state_by_thread.setdefault(thread_id, {})
         if isinstance(input_value, dict) and "messages" in input_value:
@@ -180,6 +207,7 @@ class FakeGraph:
                 emitted += 1
             raise pending_error
 
+        self._fire_usage_callbacks(config)
         for event in events:
             yield event
         state["messages"] = final_messages

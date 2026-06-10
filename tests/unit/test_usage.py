@@ -2,7 +2,13 @@
 
 from types import SimpleNamespace
 
-from skeino.usage import total_tokens_from_messages
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+
+from skeino.usage import (
+    attach_usage_handler,
+    total_tokens_from_messages,
+    total_tokens_from_usage,
+)
 
 
 def _msg(*, usage_metadata=None, response_metadata=None):
@@ -65,3 +71,41 @@ def test_messages_without_usage_contribute_zero():
 
 def test_empty_list():
     assert total_tokens_from_messages([]) == 0
+
+
+def test_attach_usage_handler_creates_callbacks_key():
+    config = {"configurable": {"thread_id": "t1"}}
+    handler = attach_usage_handler(config)
+    assert isinstance(handler, UsageMetadataCallbackHandler)
+    assert config["callbacks"] == [handler]
+
+
+def test_attach_usage_handler_appends_to_existing_callbacks():
+    sentinel = object()
+    config = {"callbacks": [sentinel]}
+    handler = attach_usage_handler(config)
+    assert config["callbacks"] == [sentinel, handler]
+
+
+def test_total_tokens_from_usage_sums_across_models():
+    usage = {
+        "gemini-2.5-pro": {
+            "input_tokens": 600,
+            "output_tokens": 400,
+            "total_tokens": 1000,
+        },
+        "gemini-2.5-flash": {
+            "input_tokens": 100,
+            "output_tokens": 50,
+            "total_tokens": 150,
+        },
+    }
+    assert total_tokens_from_usage(usage) == 1150
+
+
+def test_total_tokens_from_usage_empty():
+    assert total_tokens_from_usage({}) == 0
+
+
+def test_total_tokens_from_usage_ignores_malformed_entries():
+    assert total_tokens_from_usage({"model": None, "other": {"total_tokens": 7}}) == 7

@@ -43,7 +43,9 @@ A successful stream always looks like:
 2. **Zero or more data events** — the graph's output, in a shape determined by
    the requested `stream_mode` (see below).
 3. **`end`** (terminal, on success) — `{"run_id", "status": "success",
-   "usage": {"total_tokens": <int>}}`.
+   "usage": {"total_tokens": <int>}}`. The total is measured per run by a
+   usage callback attached to the run's config (see
+   [Token usage](threads-and-runs.md#token-usage)).
 
 If the graph raises, the terminal event is instead:
 
