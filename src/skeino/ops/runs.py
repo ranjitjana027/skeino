@@ -5,6 +5,7 @@ from typing import Any, AsyncIterator, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 
 from skeino.concurrency import ThreadLockManager
 from skeino.ops.assistants import AssistantOps
@@ -32,7 +33,11 @@ from skeino.streaming import (
     is_retriable_stream_error,
     sse_event,
 )
-from skeino.usage import total_tokens_from_messages
+from skeino.usage import (
+    attach_usage_handler,
+    total_tokens_from_messages,
+    total_tokens_from_usage,
+)
 
 _THREAD_BUSY: Final[ThreadStatus] = "busy"
 _THREAD_IDLE: Final[ThreadStatus] = "idle"
@@ -88,17 +93,22 @@ class RunOps:
                 thread_id, status_value=_THREAD_BUSY
             )
             await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
-            await self._execute_graph_run(thread_id, request, run_id=run_id)
+            usage_handler = await self._execute_graph_run(
+                thread_id, request, run_id=run_id
+            )
             await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
             await self._metadata_store.update_thread(
                 thread_id,
                 status_value=_THREAD_IDLE,
                 mark_state_updated=True,
             )
-            # Read token usage while we still hold the lock; otherwise an
-            # enqueued run for this thread could advance the graph state
-            # between release and the read, yielding another run's totals.
-            total_tokens = await self._total_run_tokens(thread_id)
+            total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
+            if total_tokens == 0:
+                # Fallback for providers the callback handler can't see. Read
+                # while we still hold the lock; otherwise an enqueued run for
+                # this thread could advance the graph state between release
+                # and the read, yielding another run's totals.
+                total_tokens = await self._total_run_tokens(thread_id)
         except HTTPException as exc:
             self._log_error(
                 "Run %s failed for thread %s: %s",
@@ -192,6 +202,9 @@ class RunOps:
                     request.checkpoint,
                     run_id=str(run.run_id),
                 )
+                # One handler for all retry attempts: tokens consumed by a
+                # failed attempt were still consumed, so they count.
+                usage_handler = attach_usage_handler(config)
                 for attempt in range(STREAM_MAX_RETRIES):
                     try:
                         async for event_name, payload in self._streamer.stream(
@@ -232,7 +245,10 @@ class RunOps:
                     status_value=_THREAD_IDLE,
                     mark_state_updated=True,
                 )
-                total_tokens = await self._total_run_tokens(thread_id)
+                total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
+                if total_tokens == 0:
+                    # Fallback for providers the callback handler can't see.
+                    total_tokens = await self._total_run_tokens(thread_id)
                 yield sse_event(
                     "end",
                     {
@@ -306,12 +322,13 @@ class RunOps:
 
     async def _execute_graph_run(
         self, thread_id: str, request: RunCreateRequest, run_id: str | None = None
-    ) -> None:
-        """Execute a graph run without streaming."""
+    ) -> UsageMetadataCallbackHandler:
+        """Execute a graph run without streaming; return its usage handler."""
         runnable_input = self._resolve_run_input(request)
         config = build_thread_config(
             thread_id, request.config, request.checkpoint, run_id=run_id
         )
+        usage_handler = attach_usage_handler(config)
         await self._graph.ainvoke(
             runnable_input,
             config,
@@ -321,15 +338,17 @@ class RunOps:
             interrupt_after=request.interrupt_after,
             durability=request.durability,
         )
+        return usage_handler
 
     async def _total_run_tokens(self, thread_id: str) -> int:
-        """Compute total tokens consumed by a completed run from final state.
+        """Fallback token count: sum usage over the final checkpoint's messages.
 
-        Reads the latest checkpoint's raw messages (which carry provider
-        ``usage_metadata`` / ``response_metadata``) and sums their token counts.
-        The streaming serializer strips this data from the wire, so we recompute
-        it here to surface usage explicitly. Degrades to 0 when no checkpointer
-        or state is available.
+        Used only when the per-run usage callback recorded nothing (providers
+        that don't populate ``usage_metadata`` + ``model_name``). Reads the
+        latest checkpoint's raw messages and sums their token counts. Caveat:
+        this covers the thread's whole message history, so on multi-turn
+        threads it reports cumulative totals, not this run's. Degrades to 0
+        when no checkpointer or state is available.
         """
         try:
             config = {"configurable": {"thread_id": thread_id}}

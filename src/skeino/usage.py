@@ -1,14 +1,49 @@
-"""Provider-agnostic token-usage extraction from LangChain message lists.
+"""Per-run token-usage measurement for the ``end`` event and usage header.
 
 The streaming serializer (:mod:`skeino.serialization.serialize`) deliberately
 strips ``usage_metadata`` / ``response_metadata`` to keep the wire format lean,
 so token counts are not visible to downstream consumers (e.g. the gateway that
-enforces rate limits). This module recomputes the total token count from the
-graph's final message list so it can be surfaced explicitly in the ``end`` SSE
-event and the ``X-Tokens-Used`` response header.
+enforces rate limits). Usage is therefore measured server-side and surfaced
+explicitly in the ``end`` SSE event and the ``X-Tokens-Used`` response header.
+
+Primary mechanism: a :class:`UsageMetadataCallbackHandler` attached to each
+run's config (:func:`attach_usage_handler`), which records every LLM call made
+during the run — including calls whose responses never reach checkpoint state —
+and is inherently scoped to that run. Fallback: summing ``usage_metadata`` /
+``response_metadata`` over the final checkpoint's messages
+(:func:`total_tokens_from_messages`), for providers that don't populate the
+fields the callback handler requires (``usage_metadata`` + ``model_name``).
 """
 
+from collections.abc import Mapping
 from typing import Any
+
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+
+
+def attach_usage_handler(config: dict[str, Any]) -> UsageMetadataCallbackHandler:
+    """Attach a fresh usage handler to a run config and return it.
+
+    Appends to any caller-supplied ``callbacks`` list rather than clobbering
+    it. LangChain propagates config callbacks to every nested LLM call inside
+    graph nodes (the same contextvar mechanism tracing uses), so the handler
+    sees the whole run.
+    """
+    handler = UsageMetadataCallbackHandler()
+    existing = config.get("callbacks")
+    config["callbacks"] = (
+        [*existing, handler] if isinstance(existing, list) else [handler]
+    )
+    return handler
+
+
+def total_tokens_from_usage(usage_by_model: Mapping[str, Any]) -> int:
+    """Sum ``total_tokens`` across a usage handler's per-model aggregates."""
+    total = 0
+    for usage in usage_by_model.values():
+        if isinstance(usage, Mapping):
+            total += int(usage.get("total_tokens", 0))
+    return total
 
 
 def total_tokens_from_messages(messages: list[Any]) -> int:

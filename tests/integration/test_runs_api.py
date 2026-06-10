@@ -1,6 +1,10 @@
 """Integration tests for the runs API (non-streaming)."""
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessage
+
+from tests.conftest import FakeGraph
 
 
 def test_create_run_succeeds(skeino_client: TestClient) -> None:
@@ -67,3 +71,70 @@ def test_list_runs_rejects_invalid_status_filter(skeino_client: TestClient) -> N
     thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
     r = skeino_client.get(f"/threads/{thread_id}/runs?status=bogus")
     assert r.status_code == 422
+
+
+def test_sync_run_reports_callback_usage_in_header(
+    skeino_app_and_graph: tuple[FastAPI, FakeGraph], skeino_client: TestClient
+) -> None:
+    # FakeGraph's checkpoint messages are plain dicts with no usage metadata,
+    # so a nonzero header proves the callback handler (not the checkpoint
+    # fallback) measured the run.
+    _, graph = skeino_app_and_graph
+    graph.llm_usage = {"input_tokens": 600, "output_tokens": 400, "total_tokens": 1000}
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    r = skeino_client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": "test_agent",
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+        },
+    )
+    assert r.status_code == 200
+    assert r.headers["X-Tokens-Used"] == "1000"
+
+
+def test_sync_run_usage_is_per_run_not_cumulative(
+    skeino_app_and_graph: tuple[FastAPI, FakeGraph], skeino_client: TestClient
+) -> None:
+    # Each run on the same thread must report its own tokens, not the
+    # thread's cumulative total.
+    _, graph = skeino_app_and_graph
+    graph.llm_usage = {"input_tokens": 600, "output_tokens": 400, "total_tokens": 1000}
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    payload = {
+        "assistant_id": "test_agent",
+        "input": {"messages": [{"role": "user", "content": "hello"}]},
+    }
+    first = skeino_client.post(f"/threads/{thread_id}/runs", json=payload)
+    second = skeino_client.post(f"/threads/{thread_id}/runs", json=payload)
+    assert first.headers["X-Tokens-Used"] == "1000"
+    assert second.headers["X-Tokens-Used"] == "1000"
+
+
+def test_sync_run_falls_back_to_checkpoint_usage(
+    skeino_app_and_graph: tuple[FastAPI, FakeGraph], skeino_client: TestClient
+) -> None:
+    # When the callback handler records nothing (llm_usage unset), the header
+    # falls back to summing usage over the checkpoint's messages. The run
+    # input deliberately has no "messages" key so FakeGraph.ainvoke leaves the
+    # pre-seeded usage-bearing message in place.
+    _, graph = skeino_app_and_graph
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    graph.state_by_thread[thread_id] = {
+        "messages": [
+            AIMessage(
+                content="prior",
+                usage_metadata={
+                    "input_tokens": 5,
+                    "output_tokens": 5,
+                    "total_tokens": 10,
+                },
+            )
+        ]
+    }
+    r = skeino_client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": "test_agent", "input": {"other": "value"}},
+    )
+    assert r.status_code == 200
+    assert r.headers["X-Tokens-Used"] == "10"
