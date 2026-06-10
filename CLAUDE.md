@@ -18,6 +18,15 @@ poetry run bandit -r src           # security
 poetry run pytest                  # unit + integration (in-memory, no services)
 ```
 
+Infra-backed API tests (local-only, not part of the five checks; needs Docker):
+
+```bash
+docker compose up -d --wait
+poetry install --all-extras --with redis
+poetry run pytest tests/api
+docker compose down -v
+```
+
 ## Architecture (request flows through layers, in this order)
 
 ```
@@ -79,6 +88,11 @@ see `review-and-merge-prs`; to ship a release, see `cut-release`.
 - Tests must be **non-vacuous**: a test that still passes when the feature is
   broken is worthless. If a behaviour can't be exercised (e.g. failure
   injection, checkpoint selection), extend `FakeGraph` so it can.
+- `tests/api/` runs against **real** Postgres/Mongo/Redis from
+  `docker-compose.yml` with a real LangGraph echo graph. It is excluded from
+  plain `pytest` via `testpaths` (keeps the default suite sub-second) — run it
+  explicitly with `poetry run pytest tests/api`; it fails loud when the
+  services are down.
 
 ## Git / PR workflow
 

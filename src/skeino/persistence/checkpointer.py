@@ -218,7 +218,7 @@ async def _build_redis(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSa
     """Build an async Redis checkpointer.
 
     Requires ``langgraph-checkpoint-redis``, which is not a managed skeino extra
-    (it caps Python at <3.14) — install it yourself:
+    (it caps Python at <3.15) — install it yourself:
     ``pip install langgraph-checkpoint-redis``.
     """
     if not spec.uri:
