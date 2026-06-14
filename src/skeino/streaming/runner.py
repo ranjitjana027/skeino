@@ -1,11 +1,15 @@
 """Stream-mode dispatcher.
 
-``Streamer.stream`` picks one of three execution paths:
+``Streamer.stream`` picks one of two execution paths:
 
 * ``["events"]`` — proxy ``graph.astream_events`` (LangGraph v2 events).
-* ``["values"]`` — token-level accumulation via
-  :func:`stream_incremental_values`.
-* anything else — straight ``graph.astream`` with the requested modes.
+* anything else — straight ``graph.astream`` with the requested modes, faithful
+  to a real LangGraph server: ``values`` = full state per super-step,
+  ``updates`` = per-node deltas, ``messages``/``messages-tuple`` = message
+  chunks, ``custom`` = graph-emitted writer events.
+
+State-bearing events (``values`` and ``updates``) are passed through a
+fail-closed output-key filter so internal pipeline fields never leak to clients.
 
 The runner is intentionally stateless across calls; per-stream state lives in
 locals of the async generator.
@@ -20,31 +24,16 @@ from skeino.serialization import (
     serialize_mapping,
     serialize_value,
 )
-from skeino.streaming.incremental import stream_incremental_values
 
 logger = logging.getLogger(__name__)
-
-# Stream modes the incremental accumulator can serve: it emits "values"
-# token-by-token, makes "messages-tuple" redundant, and forwards "custom" (UI)
-# events. A request limited to these (and including "values") is routed to the
-# accumulator; any other mode (e.g. "updates") falls through to the generic path.
-_ACCUMULATOR_MODES = frozenset({"values", "messages-tuple", "custom"})
 
 
 class Streamer:
     """Dispatch graph streams across the supported LangGraph stream modes."""
 
-    def __init__(
-        self,
-        graph: Any,
-        *,
-        agent_nodes: frozenset[str] = frozenset(),
-        status_field: str | None = None,
-    ) -> None:
-        """Capture the graph and the policy for incremental message streaming."""
+    def __init__(self, graph: Any) -> None:
+        """Capture the graph and resolve its declared output keys for filtering."""
         self._graph = graph
-        self._agent_nodes = agent_nodes
-        self._status_field = status_field
         self._output_keys: frozenset[str] | None = self._resolve_output_keys()
 
     def _resolve_output_keys(self) -> frozenset[str] | None:
@@ -73,9 +62,31 @@ class Streamer:
         return frozenset()
 
     def _filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Drop non-output keys from a ``values`` (full-state) snapshot."""
         if self._output_keys is None:
             return payload
         return {k: v for k, v in payload.items() if k in self._output_keys}
+
+    def _filter_updates(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Drop non-output keys from each node's delta in an ``updates`` event.
+
+        An ``updates`` payload is ``{node_name: {state_key: value}}``. Node
+        deltas carry internal pipeline fields (routing metadata, raw reports,
+        etc.), so apply the same fail-closed allow-set to each node's update.
+        """
+        if self._output_keys is None:
+            return payload
+        filtered: dict[str, JsonValue] = {}
+        for node, update in payload.items():
+            if isinstance(update, dict):
+                filtered[node] = {
+                    k: v for k, v in update.items() if k in self._output_keys
+                }
+            else:
+                # Non-dict node update (rare); pass through unchanged — it
+                # carries no named state keys to leak.
+                filtered[node] = update
+        return filtered
 
     async def stream(
         self,
@@ -95,34 +106,6 @@ class Streamer:
                 durability=request.durability,
             ):
                 yield "events", serialize_mapping(event)
-            return
-
-        # Token-by-token streaming. When the consumer opts in (agent_nodes set)
-        # and the client wants "values", synthesize incremental "values" events
-        # from the message stream so UIs can reveal text as the model speaks.
-        # Real langgraph-sdk clients request ["values", "messages-tuple",
-        # "custom"], so match on membership, not equality — an exact ["values"]
-        # check never fires for them. The accumulator *covers* exactly those
-        # modes (values incrementally; messages-tuple becomes redundant; custom
-        # is forwarded), so only engage when every requested mode is one it
-        # serves — a request for "updates" (or anything else) still needs the
-        # generic path. "events" is exclusive (validated upstream), handled above.
-        if (
-            self._agent_nodes
-            and "values" in stream_modes
-            and set(stream_modes) <= _ACCUMULATOR_MODES
-        ):
-            async for event_name, payload in stream_incremental_values(
-                self._graph,
-                runnable_input,
-                config,
-                request,
-                agent_nodes=self._agent_nodes,
-                status_field=self._status_field,
-            ):
-                if event_name == "values" and isinstance(payload, dict):
-                    payload = self._filter_values(payload)
-                yield event_name, payload
             return
 
         async for chunk in self._graph.astream(
@@ -147,4 +130,6 @@ class Streamer:
             if isinstance(event_payload, dict):
                 if event_name == "values":
                     event_payload = self._filter_values(event_payload)
+                elif event_name == "updates":
+                    event_payload = self._filter_updates(event_payload)
                 yield event_name, event_payload

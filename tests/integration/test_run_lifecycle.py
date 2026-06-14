@@ -41,7 +41,7 @@ def _reject_run_still_acquires(client: TestClient, thread_id: str) -> int:
 
 
 def test_failed_sync_run_releases_lock_and_records_error() -> None:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         graph.invoke_error = RuntimeError("graph boom")
@@ -60,7 +60,7 @@ def test_failed_sync_run_releases_lock_and_records_error() -> None:
 
 
 def test_streaming_error_emits_error_event_and_releases_lock() -> None:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         graph.stream_error = ValueError("deterministic boom")  # not retriable
@@ -88,7 +88,7 @@ def test_streaming_error_emits_error_event_and_releases_lock() -> None:
 
 
 def test_streaming_does_not_replay_after_first_event() -> None:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         # Retriable by message, but raised *after* one event has been sent.
@@ -116,7 +116,7 @@ def test_streaming_retries_before_first_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("skeino.ops.runs.STREAM_RETRY_BACKOFF_SECS", 0.0)
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         # First attempt fails with a retriable error before emitting anything;
@@ -140,7 +140,7 @@ def test_streaming_retries_before_first_event(
 
 
 async def test_streaming_cancellation_marks_interrupted_and_releases_lock() -> None:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     assert isinstance(graph, FakeGraph)
     async with app.router.lifespan_context(app):
         run_ops = app.state.skeino.run_ops

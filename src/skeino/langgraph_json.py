@@ -174,9 +174,8 @@ def from_langgraph_json(
         Path to the ``langgraph.json`` file.
     settings:
         Optional :class:`SkeinoSettings` whose explicit fields override anything
-        derived from the manifest. Useful for setting graph-specific options
-        (``agent_nodes``, ``status_field``) that ``langgraph.json`` does not
-        describe.
+        derived from the manifest. Useful for setting server options that
+        ``langgraph.json`` does not describe.
 
     """
     path = Path(manifest_path).resolve()

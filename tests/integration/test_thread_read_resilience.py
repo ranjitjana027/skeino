@@ -14,7 +14,7 @@ from tests.conftest import build_test_app
 
 
 def _client_and_graph() -> Iterator[tuple[TestClient, Any]]:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         yield client, graph
 

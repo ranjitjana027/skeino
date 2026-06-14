@@ -56,31 +56,30 @@ If the client disconnects mid-stream, the run is marked `interrupted`.
 ## Stream modes
 
 The `stream_mode` field on the run request (a single mode or a list) selects how
-graph output is emitted. skeino dispatches three ways:
-
-=== "`values` (default)"
-
-    Incremental value streaming. skeino subscribes to both LangGraph's
-    `messages` and `values` streams and emits `values` events whose `messages`
-    list grows token-by-token as agent nodes produce output. This is what powers
-    live "typing" UIs.
-
-    - Only nodes you declare as **agent nodes** (`SkeinoSettings.agent_nodes`)
-      contribute streamed message chunks.
-    - If you configure a `status_field`, new entries appended to that state-list
-      field are emitted as separate `status` events (`{"message": "..."}`),
-      useful for surfacing pipeline progress.
+graph output is emitted. skeino behaves like a real LangGraph server — it
+forwards each requested mode faithfully rather than transforming it. Dispatch is
+two ways:
 
 === "`events`"
 
     Passes LangGraph's `astream_events` (v2) output straight through as `events`
-    events — the full event firehose, serialized as-is.
+    events — the full event firehose, serialized as-is. Exclusive: cannot be
+    combined with other modes.
 
-=== "other modes"
+=== "all other modes"
 
-    `updates`, `messages`, `messages-tuple`, `tasks`, `checkpoints`, `debug`,
-    `custom` — skeino calls `graph.astream(stream_mode=...)` and forwards each
-    chunk under an event name matching the mode.
+    `values`, `updates`, `messages`, `messages-tuple`, `tasks`, `checkpoints`,
+    `debug`, `custom` — skeino calls `graph.astream(stream_mode=...)` and
+    forwards each chunk under an event name matching the mode:
+
+    - `values` — the full state snapshot after every super-step.
+    - `updates` — per-node deltas (`{node: {state_key: value}}`).
+    - `custom` — arbitrary data your graph emits via `get_stream_writer()`; the
+      canonical way to surface pipeline progress (e.g. status lines).
+
+    For live, low-bandwidth UIs, request incremental modes such as
+    `["updates", "custom"]` — you get only each node's new output plus your
+    progress events, with no full-history re-send.
 
 The recognised modes are `values`, `messages`, `messages-tuple`, `tasks`,
 `checkpoints`, `updates`, `events`, `debug`, and `custom`.
@@ -130,10 +129,9 @@ are stringified, and arbitrary objects fall back to their public attributes.
 | Event | When | Payload |
 | --- | --- | --- |
 | `metadata` | first, always | `{run_id, thread_id, run}` |
-| `values` | `values` mode | `{messages: [...], ...}` (grows incrementally) |
-| `status` | `values` mode, if `status_field` set | `{message}` |
+| `values` | `values` mode | full state snapshot `{messages: [...], ...}` per super-step |
 | `events` | `events` mode | raw LangGraph v2 event |
-| `updates` / `messages` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode |
+| `updates` / `messages` / `messages-tuple` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode (`updates` deltas are output-key filtered) |
 | `end` | terminal, success | `{run_id, status: "success", usage: {total_tokens}}` |
 | `error` | terminal, failure | `{detail, run_id}` |
 

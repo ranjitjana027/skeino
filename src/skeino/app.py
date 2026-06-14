@@ -199,11 +199,7 @@ def create_app(
                 stack.push_async_callback(aclose)
             await metadata_store.setup()
 
-            streamer = Streamer(
-                default_graph,
-                agent_nodes=settings.agent_nodes,
-                status_field=settings.status_field,
-            )
+            streamer = Streamer(default_graph)
             assistant_ops = AssistantOps(
                 graph=default_graph,
                 default_assistant_id=default_id,

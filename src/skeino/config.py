@@ -61,10 +61,6 @@ class SkeinoSettings(BaseModel):
     assistant_description: str | None = None
     assistant_namespace: str = "https://skeino.local/assistants"
 
-    # Streaming behaviour
-    agent_nodes: frozenset[str] = Field(default_factory=frozenset)
-    status_field: str | None = None
-
     # Server presentation
     server_title: str = "skeino"
     server_description: str = "LangGraph-compatible HTTP API powered by skeino."
