@@ -18,7 +18,7 @@ def _new_thread(client: TestClient) -> str:
 
 
 def test_patch_thread_updates_metadata() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         r = client.patch(
@@ -34,7 +34,7 @@ def test_patch_thread_updates_metadata() -> None:
 
 
 def test_patch_thread_empty_body_is_noop() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         # An empty PATCH must not wipe existing metadata.
@@ -47,7 +47,7 @@ def test_patch_thread_empty_body_is_noop() -> None:
 
 
 def test_update_state_preserves_empty_list_payload() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         # An empty list payload must reach the graph as a list, not be coerced
@@ -60,7 +60,7 @@ def test_update_state_preserves_empty_list_payload() -> None:
 
 
 def test_delete_thread_removes_metadata_and_checkpoints() -> None:
-    app, graph = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, graph = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         client.post(
@@ -81,7 +81,7 @@ def test_delete_thread_removes_metadata_and_checkpoints() -> None:
 
 
 def test_update_state_writes_and_returns_checkpoint() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         r = client.post(
@@ -106,7 +106,7 @@ def _write_state(client: TestClient, thread_id: str, note: str) -> str:
 
 
 def test_get_state_at_checkpoint_id_selects_that_checkpoint() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         first = _write_state(client, thread_id, "A")
@@ -124,7 +124,7 @@ def test_get_state_at_checkpoint_id_selects_that_checkpoint() -> None:
 
 
 def test_post_state_checkpoint_body_selects_that_checkpoint() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         first = _write_state(client, thread_id, "A")
@@ -141,7 +141,7 @@ def test_post_state_checkpoint_body_selects_that_checkpoint() -> None:
 
 
 def test_mutation_endpoints_404_on_missing_thread() -> None:
-    app, _ = build_test_app(agent_nodes=frozenset({"simple"}))
+    app, _ = build_test_app()
     with TestClient(app) as client:
         missing = str(uuid4())
         assert (

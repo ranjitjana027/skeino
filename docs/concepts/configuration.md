@@ -53,13 +53,6 @@ app = create_app(
 | `assistant_description` | `str \| None` | `None` | Human-readable description, surfaced in `/assistants/{id}`. |
 | `assistant_namespace` | `str` | `"https://skeino.local/assistants"` | URI namespace for assistant identifiers. |
 
-#### Streaming behaviour
-
-| Field | Type | Default | Description |
-| --- | --- | --- | --- |
-| `agent_nodes` | `frozenset[str]` | `frozenset()` | Node names treated as "agent" nodes — only these contribute token-by-token message chunks in `values` streaming. |
-| `status_field` | `str \| None` | `None` | A state-list field whose new entries are emitted as `status` events during streaming. |
-
 #### Server presentation
 
 | Field | Type | Default | Description |
@@ -86,8 +79,8 @@ app = create_app(
 [`from_langgraph_json`][skeino.from_langgraph_json] reads a manifest, loads each
 graph, and builds `SkeinoSettings` from the `http.cors` and `store` sections.
 Any settings you pass explicitly to `from_langgraph_json(..., settings=...)`
-override the manifest-derived values — useful for graph-specific options like
-`agent_nodes` and `status_field` that the JSON doesn't express.
+override the manifest-derived values — useful for server options that the JSON
+doesn't express.
 
 ```json title="langgraph.json"
 {

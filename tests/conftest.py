@@ -291,8 +291,6 @@ class FakeGraph:
 def build_test_app(
     *,
     assistant_id: str = "test_agent",
-    agent_nodes: frozenset[str] | None = None,
-    status_field: str | None = None,
 ) -> tuple[FastAPI, FakeGraph]:
     """Build a skeino FastAPI app backed by a fresh FakeGraph + in-memory store."""
     graph = FakeGraph()
@@ -300,8 +298,6 @@ def build_test_app(
         default_assistant_id=assistant_id,
         assistant_name="Test Agent",
         assistant_description="skeino test agent",
-        agent_nodes=agent_nodes or frozenset(),
-        status_field=status_field,
         server_version="0.0.1-test",
         welcome_message="hello",
     )
@@ -321,9 +317,7 @@ def fake_graph() -> FakeGraph:
 @pytest.fixture
 def skeino_app_and_graph() -> tuple[FastAPI, FakeGraph]:
     """Return a FastAPI app + FakeGraph wired through ``create_app``."""
-    return build_test_app(
-        agent_nodes=frozenset({"simple"}), status_field="pipeline_status"
-    )
+    return build_test_app()
 
 
 @pytest.fixture
