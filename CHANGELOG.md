@@ -10,6 +10,17 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.0.0] - 2026-06-14
+
+### Changed
+
+- Streaming now mirrors a real LangGraph server: each requested `stream_mode` is forwarded faithfully (`values` = full state per super-step, `updates` = per-node deltas, `custom` = graph stream-writer events) instead of synthesising full-history `values` snapshots from the message stream. `updates` events are now passed through the same fail-closed output-key filter as `values`, so internal pipeline fields never leak in node deltas. ([#57](https://github.com/ranjitjana027/skeino/issues/57))
+
+### Removed
+
+- `SkeinoSettings.agent_nodes` and `SkeinoSettings.status_field`, along with the non-standard token-accumulation streaming path they fed. Consumers that want live progress should emit it from the graph via LangGraph's `get_stream_writer()` (`custom` stream mode); clients select incremental streaming with standard modes such as `updates`. ([#57](https://github.com/ranjitjana027/skeino/issues/57))
+
+
 ## [1.1.0] - 2026-06-10
 
 ### Changed
@@ -150,7 +161,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...HEAD
+[2.0.0]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ranjitjana027/skeino/compare/v0.3.0...v1.0.0

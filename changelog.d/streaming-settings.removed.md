@@ -1,1 +1,0 @@
-`SkeinoSettings.agent_nodes` and `SkeinoSettings.status_field`, along with the non-standard token-accumulation streaming path they fed. Consumers that want live progress should emit it from the graph via LangGraph's `get_stream_writer()` (`custom` stream mode); clients select incremental streaming with standard modes such as `updates`.
