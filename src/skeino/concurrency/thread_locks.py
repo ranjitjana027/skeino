@@ -8,7 +8,8 @@ is the single-process langgraph-dev replacement.
 Multitask-strategy enforcement (reject/enqueue/interrupt/rollback) lives in
 ``RunOps`` admission, not here: this is now a plain per-thread lock map. The
 ``enqueue`` strategy is realised by the background run task simply waiting on
-``await lock.acquire()`` — queued runs serialise FIFO on the lock.
+``await lock.acquire()`` — queued runs serialise on the lock (mutual exclusion;
+one run executes at a time).
 """
 
 import asyncio

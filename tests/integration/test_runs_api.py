@@ -24,7 +24,9 @@ def test_create_run_returns_background_run(skeino_client: TestClient) -> None:
     assert body["thread_id"] == thread_id
     assert "run_id" in body
     assert "Location" in r.headers
-    # The background task settles to success.
+    # Join blocks until the run reaches a terminal state — no timing assumption.
+    joined = skeino_client.get(f"/threads/{thread_id}/runs/{body['run_id']}/join")
+    assert joined.status_code == 200
     final = skeino_client.get(f"/threads/{thread_id}/runs/{body['run_id']}").json()
     assert final["status"] == "success"
 

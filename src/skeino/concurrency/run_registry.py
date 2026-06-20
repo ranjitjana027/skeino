@@ -45,6 +45,14 @@ class BackgroundRunRegistry:
         """Return the set of non-terminal run ids tracked for ``thread_id``."""
         return set(self._active_by_thread.get(thread_id, ()))
 
+    def all_active(self) -> list[tuple[str, str]]:
+        """Return ``(thread_id, run_id)`` for every currently-active run."""
+        return [
+            (thread_id, run_id)
+            for thread_id, run_ids in self._active_by_thread.items()
+            for run_id in run_ids
+        ]
+
     def get(self, run_id: str) -> asyncio.Task[Any] | None:
         """Return the live task for ``run_id`` (or ``None`` if not running)."""
         return self._tasks.get(run_id)

@@ -195,6 +195,58 @@ async def test_multitask_enqueue_runs_sequentially() -> None:
         assert (await run_ops.get_run(_THREAD, str(second.run_id))).status == "success"
 
 
+async def test_shutdown_marks_queued_run_interrupted() -> None:
+    # A run cancelled while still *queued* for the execution lock (never started)
+    # must be persisted as ``interrupted``, not left stuck at ``pending``.
+    app, graph = build_test_app()
+    assert isinstance(graph, FakeGraph)
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        running = await run_ops.create_run(_THREAD, _req())
+        await graph.invoke_started.wait()  # first holds the lock, parked
+        queued = await run_ops.create_run(_THREAD, _req())  # waits on the lock
+    # Lifespan exit cancels both; the queued one never acquired the lock.
+    assert (await run_ops.get_run(_THREAD, str(running.run_id))).status == "interrupted"
+    assert (await run_ops.get_run(_THREAD, str(queued.run_id))).status == "interrupted"
+
+
+async def test_join_live_streaming_run_is_409() -> None:
+    # A live streaming run is registered as external (no joinable task); joining
+    # it must fail fast rather than return a non-terminal snapshot.
+    app, _ = build_test_app()
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        request = RunCreateRequest(
+            assistant_id="test_agent",
+            input={"messages": []},
+            if_not_exists="create",
+            stream_mode="values",
+        )
+        run, stream = await run_ops.create_streaming_run(_THREAD, request)
+        await stream.__anext__()  # start the generator (emit metadata)
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await run_ops.join_run(_THREAD, str(run.run_id))
+            assert exc.value.status_code == 409
+        finally:
+            await stream.aclose()  # runs the generator's finally → releases lock
+
+
+async def test_join_returns_404_when_run_deleted_concurrently() -> None:
+    # If the run row is removed (rollback / DELETE) before output is collected,
+    # the waiter sees a 404, not a misleading 500.
+    app, _ = build_test_app()
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        run = await run_ops.create_run(_THREAD, _req())
+        await run_ops.join_run(_THREAD, str(run.run_id))  # reach terminal
+        await run_ops._metadata_store.delete_run(_THREAD, str(run.run_id))
+        with pytest.raises(HTTPException) as exc:
+            await run_ops._collect_terminal_output(_THREAD, str(run.run_id), None)
+        assert exc.value.status_code == 404
+
+
 async def test_shutdown_cancels_in_flight_runs() -> None:
     app, graph = build_test_app()
     assert isinstance(graph, FakeGraph)

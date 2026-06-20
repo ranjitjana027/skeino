@@ -110,10 +110,21 @@ class RunOps:
         Mirrors the LangGraph SDK ``runs.join`` contract (returns the final
         graph state values). If the run is already terminal this returns at once.
         """
-        await self.get_run(thread_id, run_id)  # 404 if unknown
+        run = await self.get_run(thread_id, run_id)  # 404 if unknown
         task = self._registry.get(run_id)
         if task is not None:
             await asyncio.wait({task})
+        elif run.status not in _TERMINAL_STATUSES:
+            # No background task to await and the run is still in flight — a live
+            # streaming run has no joinable server-side handle in v1. Fail fast
+            # rather than return a non-terminal snapshot and break the contract.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Run {run_id} is {run.status} with no joinable background "
+                    "task; live streaming runs cannot be joined in this version."
+                ),
+            )
         output, _tokens = await self._collect_terminal_output(thread_id, run_id, task)
         return output
 
@@ -357,8 +368,19 @@ class RunOps:
         return self._run_row_to_model(row)
 
     async def shutdown(self) -> None:
-        """Cancel all in-flight background runs (runtime shutdown)."""
+        """Cancel all in-flight background runs (runtime shutdown).
+
+        A task cancelled before it ever started executing never runs its own
+        ``interrupted`` cleanup, so after cancelling we sweep the runs that were
+        active and persist ``interrupted`` for any still left non-terminal — no
+        run row is stranded at ``pending``/``running`` across a restart.
+        """
+        active = self._registry.all_active()
         await self._registry.shutdown()
+        for thread_id, run_id in active:
+            row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+            if row is not None and str(row["status"]) not in _TERMINAL_STATUSES:
+                await self._mark_run_interrupted(run_id, thread_id)
 
     # ------------------------------------------------------------------ helpers
 
@@ -426,13 +448,25 @@ class RunOps:
         """Execute a run to completion in the background; return total tokens.
 
         Acquires the execution lock for the duration (so ``enqueue`` runs
-        serialise FIFO). Graph failures are persisted and swallowed — the task
-        has no awaiter in the background path, so a raised exception would be
-        logged by asyncio as "never retrieved". ``CancelledError`` is persisted
-        as ``interrupted`` and re-raised so the task is genuinely cancelled.
+        serialise — one at a time). Graph failures are persisted and swallowed —
+        the task has no awaiter in the background path, so a raised exception
+        would be logged by asyncio as "never retrieved". ``CancelledError`` is
+        persisted as ``interrupted`` and re-raised so the task is genuinely
+        cancelled.
         """
         lock = self._lock_manager.get(thread_id)
-        await lock.acquire()
+        try:
+            await lock.acquire()
+        except asyncio.CancelledError:
+            # Cancelled while still queued for the lock (e.g. shutdown, or a
+            # superseding interrupt/rollback) before execution began. No lock is
+            # held to release; persist ``interrupted`` so the run row does not
+            # stay stuck at ``pending``.
+            self._log_warning(
+                "Queued run %s cancelled for thread %s", run_id, thread_id
+            )
+            await self._mark_run_interrupted(run_id, thread_id)
+            raise
         try:
             await self._metadata_store.update_thread(
                 thread_id, status_value=_THREAD_BUSY
@@ -473,16 +507,22 @@ class RunOps:
     async def _collect_terminal_output(
         self, thread_id: str, run_id: str, task: asyncio.Task[Any] | None
     ) -> tuple[JsonValue, int]:
-        """Return ``(output, tokens)`` for a finished run; 500 if it errored."""
+        """Return ``(output, tokens)`` for a finished run.
+
+        Raises 404 if the run row is gone (it can be deleted by a concurrent
+        ``cancel(action=rollback)`` or ``DELETE`` while a waiter/joiner is in
+        flight) and 500 if the run itself errored.
+        """
         final = await self._metadata_store.fetch_run_row(thread_id, run_id)
-        status_value = str(final["status"]) if final is not None else _RUN_ERROR
-        if status_value == _RUN_ERROR:
-            detail = (
-                final.get("error") if final is not None else None
-            ) or "Run failed."
+        if final is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run {run_id} not found for thread {thread_id}.",
+            )
+        if str(final["status"]) == _RUN_ERROR:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=detail,
+                detail=final.get("error") or "Run failed.",
             )
         tokens = 0
         if task is not None and not task.cancelled():
