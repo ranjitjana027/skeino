@@ -128,9 +128,11 @@ demand.
 
 ## Concurrency: one run at a time
 
-skeino enforces **at most one in-flight run per thread**. Each thread has its own
-execution lock held by the running task; admission decisions are serialized by a
-per-thread admission lock, so a queued caller can't observe a stale "free" slot.
+skeino runs **at most one *executing* run per thread**. With the `enqueue`
+strategy, additional background runs can sit `pending`, queued behind the
+execution lock — only one runs at any moment. Each thread has its own execution
+lock held by the running task; admission decisions are serialized by a per-thread
+admission lock, so a queued caller can't observe a stale "free" slot.
 
 The `multitask_strategy` on the run request decides what happens when a thread is
 already busy:

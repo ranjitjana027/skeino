@@ -21,6 +21,25 @@ async def test_spawn_tracks_then_forgets_on_completion() -> None:
     assert reg.get("r1") is None
 
 
+async def test_active_runs_prunes_finished_task_synchronously() -> None:
+    # Reconstruct the window where a task is done but its done-callback (which
+    # removes it) has not fired yet: active_runs must not report it as active,
+    # so a follow-up reject admission can't 409 on a completed run.
+    reg = BackgroundRunRegistry()
+
+    async def work() -> int:
+        return 1
+
+    task = reg.spawn("t1", "r1", work())
+    await task
+    reg._active_by_thread.setdefault("t1", set()).add("r1")
+    reg._tasks["r1"] = task
+    assert task.done()
+
+    assert reg.active_runs("t1") == set()
+    assert reg.get("r1") is None  # pruning also dropped the task entry
+
+
 async def test_cancel_returns_false_for_unknown_run() -> None:
     reg = BackgroundRunRegistry()
     assert await reg.cancel("nope", wait=True) is False

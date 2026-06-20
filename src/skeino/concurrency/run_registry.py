@@ -42,8 +42,26 @@ class BackgroundRunRegistry:
             yield
 
     def active_runs(self, thread_id: str) -> set[str]:
-        """Return the set of non-terminal run ids tracked for ``thread_id``."""
-        return set(self._active_by_thread.get(thread_id, ()))
+        """Return the still-active run ids tracked for ``thread_id``.
+
+        A task-backed run that has finished is pruned synchronously here rather
+        than waiting for its ``add_done_callback`` to fire on the next loop tick
+        — otherwise a just-completed run could still read as active and make an
+        admission decision (e.g. ``reject``) 409 incorrectly. Externally
+        registered runs (live streams, no task) stay active until explicitly
+        unregistered.
+        """
+        run_ids = self._active_by_thread.get(thread_id)
+        if not run_ids:
+            return set()
+        active: set[str] = set()
+        for run_id in list(run_ids):
+            task = self._tasks.get(run_id)
+            if task is not None and task.done():
+                self._forget(thread_id, run_id)
+                continue
+            active.add(run_id)
+        return active
 
     def all_active(self) -> list[tuple[str, str]]:
         """Return ``(thread_id, run_id)`` for every currently-active run."""
