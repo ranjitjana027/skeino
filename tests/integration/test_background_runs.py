@@ -99,6 +99,27 @@ async def test_cancel_rollback_deletes_the_run() -> None:
         assert exc.value.status_code == 404
 
 
+async def test_cancel_rollback_waits_for_unwind_even_when_wait_false() -> None:
+    # rollback must let the task fully unwind before deleting, regardless of the
+    # wait flag. Proof: the execution lock (released only in the task's finally)
+    # is free by the time cancel_run returns, and the row is gone.
+    app, graph = build_test_app()
+    assert isinstance(graph, FakeGraph)
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        run = await run_ops.create_run(_THREAD, _req())
+        await graph.invoke_started.wait()
+
+        await run_ops.cancel_run(
+            _THREAD, str(run.run_id), action="rollback", wait=False
+        )
+        assert not run_ops._lock_manager.get(_THREAD).locked()
+        with pytest.raises(HTTPException) as exc:
+            await run_ops.get_run(_THREAD, str(run.run_id))
+        assert exc.value.status_code == 404
+
+
 async def test_cancel_terminal_run_is_409() -> None:
     app, _ = build_test_app()
     async with app.router.lifespan_context(app):

@@ -142,6 +142,11 @@ class RunOps:
         ``action="rollback"`` cancels it and deletes the run row. Returns 409 if
         the run is already terminal or cannot be cancelled (e.g. a live
         streaming run, which is cancelled by client disconnect in v1).
+
+        ``rollback`` always waits for the task to fully unwind before deleting,
+        regardless of ``wait`` — otherwise a still-running task could keep
+        mutating thread state (and race the deletion with its own persistence)
+        after the row is already gone.
         """
         run = await self.get_run(thread_id, run_id)  # 404 if unknown
         if run.status in _TERMINAL_STATUSES:
@@ -149,7 +154,9 @@ class RunOps:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Run {run_id} is already {run.status}; nothing to cancel.",
             )
-        cancelled = await self._registry.cancel(run_id, wait=wait)
+        cancelled = await self._registry.cancel(
+            run_id, wait=wait or action == "rollback"
+        )
         if not cancelled:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
