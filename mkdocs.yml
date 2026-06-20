@@ -78,6 +78,8 @@ plugins:
         python:
           paths: [src]
           options:
+            extensions:
+              - griffe_pydantic: { schema: false }
             docstring_style: google
             show_source: true
             show_root_heading: true

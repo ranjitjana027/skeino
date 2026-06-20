@@ -3,7 +3,9 @@
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel
 
+import skeino.schemas as schemas
 from skeino.schemas import (
     AssistantSearchRequest,
     CheckpointConfigModel,
@@ -11,6 +13,39 @@ from skeino.schemas import (
     ThreadCreateRequest,
     ThreadSearchRequest,
 )
+
+
+def _public_models() -> list[type[BaseModel]]:
+    """Every BaseModel re-exported from the public schemas package."""
+    return [
+        obj
+        for name in schemas.__all__
+        if isinstance(obj := getattr(schemas, name), type)
+        and issubclass(obj, BaseModel)
+        and obj is not BaseModel
+    ]
+
+
+@pytest.mark.parametrize("model", _public_models(), ids=lambda m: m.__name__)
+def test_every_field_has_a_description(model: type[BaseModel]) -> None:
+    """Every request/response field carries a description.
+
+    Descriptions are the single source of the field-level API docs that render
+    in the OpenAPI schema, ``/docs``, the API explorer, and the Python API
+    reference. A field added without one would silently ship undocumented, so
+    this fails loud instead.
+    """
+    missing = [
+        name
+        for name, field in model.model_fields.items()
+        if not (field.description and field.description.strip())
+    ]
+    assert not missing, f"{model.__name__} fields without a description: {missing}"
+
+
+def test_public_models_discovered() -> None:
+    """The guard above is non-vacuous: it actually found models to check."""
+    assert len(_public_models()) >= 15
 
 
 def test_thread_create_request_defaults() -> None:

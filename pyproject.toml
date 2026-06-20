@@ -74,6 +74,7 @@ optional = true
 [tool.poetry.group.docs.dependencies]
 mkdocs-material = { version = ">=9.5.0", extras = ["imaging"] }
 mkdocstrings = { version = ">=0.26.0", extras = ["python"] }
+griffe-pydantic = ">=1.1.0"
 
 [tool.poetry.group.redis]
 optional = true

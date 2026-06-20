@@ -70,6 +70,12 @@ Prefix: `/threads/{thread_id}`
 
 ### Key `RunCreateRequest` fields
 
+A curated quick-reference for the most-used fields. Every request and response
+model — including all remaining `RunCreateRequest` fields — carries a per-field
+description that renders in the [API explorer](explorer.md), the
+[Python API reference](python.md), and `/docs`; those are the authoritative,
+always-current source.
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `assistant_id` | `str` | — | Which assistant/graph to run (required). |
