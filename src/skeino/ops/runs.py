@@ -535,13 +535,36 @@ class RunOps:
         if task is not None and not task.cancelled():
             result = task.result()
             tokens = result if isinstance(result, int) else 0
-        output = await self._final_state_values(thread_id)
+        output = await self._final_state_values(thread_id, run_id)
         return output, tokens
 
-    async def _final_state_values(self, thread_id: str) -> JsonValue:
-        """Return the thread's latest graph state values (the run output)."""
+    async def _final_state_values(self, thread_id: str, run_id: str) -> JsonValue:
+        """Return the requested run's final graph state values (its output).
+
+        Reads the most recent checkpoint tagged with this ``run_id`` so a
+        follow-on enqueued run — which can start the instant this run releases
+        the execution lock — cannot leak its own state into this waiter's output
+        (the LangGraph ``runs.wait``/``runs.join`` contract returns output for
+        the requested run). Falls back to the latest thread state when no
+        run-scoped checkpoint is available (e.g. no checkpointer).
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+        get_history = getattr(self._graph, "aget_state_history", None)
+        if get_history is not None:
+            try:
+                async for snapshot in get_history(
+                    config, filter={"run_id": run_id}, limit=1
+                ):
+                    return serialize_value(getattr(snapshot, "values", None))
+            except Exception as exc:
+                # Run-scoped read is best-effort; fall back to the latest state.
+                self._log_warning(
+                    "Run-scoped state read failed for run %s; using latest "
+                    "thread state: %s",
+                    run_id,
+                    exc,
+                )
         try:
-            config = {"configurable": {"thread_id": thread_id}}
             snapshot = await self._graph.aget_state(config)
         except Exception as exc:
             self._log_error(
@@ -551,8 +574,7 @@ class RunOps:
                 exc=exc,
             )
             return None
-        values = getattr(snapshot, "values", None)
-        return serialize_value(values)
+        return serialize_value(getattr(snapshot, "values", None))
 
     async def _execute_graph_run(
         self, thread_id: str, request: RunCreateRequest, run_id: str | None = None

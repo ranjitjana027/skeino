@@ -17,10 +17,11 @@ from tests.conftest import FakeGraph, build_test_app
 _THREAD = "11111111-1111-1111-1111-111111111111"
 
 
-def _req(strategy: str = "enqueue") -> RunCreateRequest:
+def _req(strategy: str = "enqueue", *, text: str | None = None) -> RunCreateRequest:
+    messages = [{"role": "user", "content": text}] if text is not None else []
     return RunCreateRequest(
         assistant_id="test_agent",
-        input={"messages": []},
+        input={"messages": messages},
         if_not_exists="create",
         multitask_strategy=strategy,  # type: ignore[arg-type]
     )
@@ -214,6 +215,28 @@ async def test_multitask_enqueue_runs_sequentially() -> None:
         await run_ops.join_run(_THREAD, str(second.run_id))
         assert (await run_ops.get_run(_THREAD, str(first.run_id))).status == "success"
         assert (await run_ops.get_run(_THREAD, str(second.run_id))).status == "success"
+
+
+async def test_join_returns_run_scoped_output_not_the_next_run() -> None:
+    # With an enqueued follow-on run, join/wait must return the *requested*
+    # run's output, not whatever the next run left as the latest thread state.
+    app, graph = build_test_app()
+    assert isinstance(graph, FakeGraph)
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        first = await run_ops.create_run(_THREAD, _req(text="alpha"))
+        await graph.invoke_started.wait()
+        graph.invoke_started.clear()
+        second = await run_ops.create_run(_THREAD, _req(text="beta"))  # enqueued
+
+        graph.invoke_gate.set()  # first finishes, then second runs
+        out_first = await run_ops.join_run(_THREAD, str(first.run_id))
+        out_second = await run_ops.join_run(_THREAD, str(second.run_id))
+
+        assert isinstance(out_first, dict) and isinstance(out_second, dict)
+        assert any(m.get("content") == "alpha" for m in out_first["messages"])
+        assert any(m.get("content") == "beta" for m in out_second["messages"])
 
 
 async def test_shutdown_marks_queued_run_interrupted() -> None:

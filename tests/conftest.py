@@ -169,9 +169,14 @@ class FakeGraph:
             state.update(input_value)
         else:
             state["data"] = input_value
-        self.history_by_thread.setdefault(thread_id, []).append(
-            self._snapshot(thread_id, state)
-        )
+        # Tag this run's checkpoint with its run_id (as the real config metadata
+        # carries) so run-scoped reads (aget_state_history filter) can find it.
+        run_id = (config.get("metadata") or {}).get("run_id")
+        checkpoint_id = self._record_checkpoint(thread_id, state)
+        snapshot = self._snapshot(thread_id, state, checkpoint_id)
+        if run_id is not None:
+            snapshot.metadata = {"run_id": run_id}
+        self.history_by_thread.setdefault(thread_id, []).append(snapshot)
         return state
 
     async def astream(
@@ -272,9 +277,17 @@ class FakeGraph:
         before: dict[str, Any] | None = None,
         limit: int | None = None,
     ):
-        del filter, before
+        del before
         thread_id = str(config["configurable"]["thread_id"])
         history = list(reversed(self.history_by_thread.get(thread_id, [])))
+        if filter:
+            history = [
+                s
+                for s in history
+                if all(
+                    getattr(s, "metadata", {}).get(k) == v for k, v in filter.items()
+                )
+            ]
         if limit is not None:
             history = history[:limit]
         for snapshot in history:
