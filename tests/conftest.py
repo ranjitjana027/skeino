@@ -7,6 +7,7 @@ LangGraph graph — enough for the SDK shape, none of the heavy LLM machinery.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
@@ -61,6 +62,13 @@ class FakeGraph:
         # on every handler in config["callbacks"], as a real chat model would.
         self.llm_usage: dict[str, int] | None = None
         self.llm_model_name: str = "fake-model"
+        # --- Gated long-running mode (for background/cancel/join tests) ---
+        # When ``invoke_gate`` is set, ``ainvoke`` signals ``invoke_started`` and
+        # then awaits the gate before finishing, so a test can observe a
+        # ``running`` run and cancel or join it. Without it ``ainvoke`` runs to
+        # completion immediately (the default cooperative behaviour).
+        self.invoke_gate: asyncio.Event | None = None
+        self.invoke_started: asyncio.Event = asyncio.Event()
 
     async def aupdate_state(
         self,
@@ -145,6 +153,11 @@ class FakeGraph:
         del context, stream_mode, interrupt_before, interrupt_after, durability
         if self.invoke_error is not None:
             raise self.invoke_error
+        if self.invoke_gate is not None:
+            # Park here until the test releases the gate, so the run is
+            # observably ``running`` and remains cancellable mid-flight.
+            self.invoke_started.set()
+            await self.invoke_gate.wait()
         self._fire_usage_callbacks(config)
         thread_id = str(config["configurable"]["thread_id"])
         state = self.state_by_thread.setdefault(thread_id, {})

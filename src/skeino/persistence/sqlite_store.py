@@ -408,6 +408,15 @@ class SqliteMetadataStore:
             rows = await cursor.fetchall()
         return [self._run_row(row) for row in rows]
 
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a single run row scoped to its thread."""
+        async with self._lock:
+            await self._conn.execute(
+                "DELETE FROM app_runs WHERE thread_id = ? AND run_id = ?",
+                (thread_id, run_id),
+            )
+            await self._conn.commit()
+
     @staticmethod
     def _ttl_payload(
         ttl: ThreadTtlConfig | None, now: datetime

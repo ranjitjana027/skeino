@@ -7,7 +7,9 @@ from langchain_core.messages import AIMessage
 from tests.conftest import FakeGraph
 
 
-def test_create_run_succeeds(skeino_client: TestClient) -> None:
+def test_create_run_returns_background_run(skeino_client: TestClient) -> None:
+    # POST /runs is now a background create: it returns immediately with a
+    # non-terminal run that subsequently reaches a terminal state.
     thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
     r = skeino_client.post(
         f"/threads/{thread_id}/runs",
@@ -18,10 +20,30 @@ def test_create_run_succeeds(skeino_client: TestClient) -> None:
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["status"] == "success"
+    assert body["status"] in {"pending", "running", "success"}
     assert body["thread_id"] == thread_id
     assert "run_id" in body
     assert "Location" in r.headers
+    # The background task settles to success.
+    final = skeino_client.get(f"/threads/{thread_id}/runs/{body['run_id']}").json()
+    assert final["status"] == "success"
+
+
+def test_wait_run_returns_output(skeino_client: TestClient) -> None:
+    # POST /runs/wait runs to completion and returns the final graph state
+    # values (the run output), matching the LangGraph SDK contract.
+    thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
+    r = skeino_client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": "test_agent",
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, dict)
+    assert any(m.get("content") == "completed" for m in body["messages"])
 
 
 def test_create_run_rejects_after_seconds(skeino_client: TestClient) -> None:
@@ -83,7 +105,7 @@ def test_sync_run_reports_callback_usage_in_header(
     graph.llm_usage = {"input_tokens": 600, "output_tokens": 400, "total_tokens": 1000}
     thread_id = skeino_client.post("/threads", json={}).json()["thread_id"]
     r = skeino_client.post(
-        f"/threads/{thread_id}/runs",
+        f"/threads/{thread_id}/runs/wait",
         json={
             "assistant_id": "test_agent",
             "input": {"messages": [{"role": "user", "content": "hello"}]},
@@ -105,8 +127,8 @@ def test_sync_run_usage_is_per_run_not_cumulative(
         "assistant_id": "test_agent",
         "input": {"messages": [{"role": "user", "content": "hello"}]},
     }
-    first = skeino_client.post(f"/threads/{thread_id}/runs", json=payload)
-    second = skeino_client.post(f"/threads/{thread_id}/runs", json=payload)
+    first = skeino_client.post(f"/threads/{thread_id}/runs/wait", json=payload)
+    second = skeino_client.post(f"/threads/{thread_id}/runs/wait", json=payload)
     assert first.headers["X-Tokens-Used"] == "1000"
     assert second.headers["X-Tokens-Used"] == "1000"
 
@@ -133,7 +155,7 @@ def test_sync_run_falls_back_to_checkpoint_usage(
         ]
     }
     r = skeino_client.post(
-        f"/threads/{thread_id}/runs",
+        f"/threads/{thread_id}/runs/wait",
         json={"assistant_id": "test_agent", "input": {"other": "value"}},
     )
     assert r.status_code == 200

@@ -3,7 +3,6 @@
 import asyncio
 
 import pytest
-from fastapi import HTTPException
 
 from skeino.concurrency import ThreadLockManager
 
@@ -15,13 +14,15 @@ def test_get_returns_same_lock_for_same_thread() -> None:
 
 
 @pytest.mark.asyncio
-async def test_acquire_enqueue_waits() -> None:
+async def test_lock_serialises_runs_fifo() -> None:
+    # The lock map is a plain per-thread asyncio.Lock; ``enqueue`` semantics are
+    # realised by waiting on it (a second acquirer blocks until release).
     mgr = ThreadLockManager()
     lock = mgr.get("t1")
-    await mgr.acquire(lock, "enqueue", "t1")
+    await lock.acquire()
 
     async def second() -> None:
-        await mgr.acquire(lock, "enqueue", "t1")
+        await lock.acquire()
         lock.release()
 
     task = asyncio.create_task(second())
@@ -29,14 +30,3 @@ async def test_acquire_enqueue_waits() -> None:
     assert not task.done()
     lock.release()
     await task
-
-
-@pytest.mark.asyncio
-async def test_acquire_reject_raises_on_busy_lock() -> None:
-    mgr = ThreadLockManager()
-    lock = mgr.get("t1")
-    await mgr.acquire(lock, "reject", "t1")
-    with pytest.raises(HTTPException) as exc:
-        await mgr.acquire(lock, "reject", "t1")
-    assert exc.value.status_code == 409
-    lock.release()

@@ -414,6 +414,17 @@ class MetadataStore:
                 rows = await cursor.fetchall()
         return list(rows)
 
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a single run row scoped to its thread."""
+        psycopg, _ = _pg()
+        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    "DELETE FROM app_runs WHERE thread_id = %s AND run_id = %s",
+                    (thread_id, run_id),
+                )
+            await conn.commit()
+
     def _build_ttl_payload(
         self, ttl: ThreadTtlConfig | None
     ) -> dict[str, JsonValue] | None:

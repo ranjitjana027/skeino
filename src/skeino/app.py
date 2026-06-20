@@ -23,7 +23,7 @@ from skeino.api import (
     threads_router,
 )
 from skeino.api._request import SkeinoState
-from skeino.concurrency import ThreadLockManager
+from skeino.concurrency import BackgroundRunRegistry, ThreadLockManager
 from skeino.config import SkeinoSettings
 from skeino.ops import AssistantOps, RunOps, ThreadOps
 from skeino.persistence import (
@@ -221,6 +221,7 @@ def create_app(
                 thread_ops=thread_ops,
                 assistant_ops=assistant_ops,
                 lock_manager=ThreadLockManager(),
+                registry=BackgroundRunRegistry(),
                 logger=logger,
             )
 
@@ -236,6 +237,9 @@ def create_app(
                 yield
             finally:
                 logger.info("skeino runtime shutting down")
+                # Cancel any in-flight background runs so their tasks unwind
+                # (persist ``interrupted``, release locks) before resources close.
+                await run_ops.shutdown()
 
     fastapi_app = FastAPI(
         title=settings.server_title,

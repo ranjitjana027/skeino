@@ -64,7 +64,7 @@ def test_delete_thread_removes_metadata_and_checkpoints() -> None:
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         client.post(
-            f"/threads/{thread_id}/runs",
+            f"/threads/{thread_id}/runs/wait",
             json={
                 "assistant_id": "test_agent",
                 "input": {"messages": [{"role": "user", "content": "hi"}]},

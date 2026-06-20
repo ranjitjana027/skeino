@@ -12,6 +12,7 @@ from skeino.schemas.assistants import (
 )
 from skeino.schemas.common import (
     DEFAULT_STREAM_MODES,
+    CancelAction,
     CheckpointConfigModel,
     JsonArray,
     JsonObject,
@@ -50,6 +51,7 @@ __all__ = [
     "DEFAULT_STREAM_MODES",
     "AssistantModel",
     "AssistantSearchRequest",
+    "CancelAction",
     "CheckpointConfigModel",
     "CommandModel",
     "ErrorResponse",

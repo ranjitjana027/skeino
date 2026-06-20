@@ -135,3 +135,7 @@ class MetadataStoreProtocol(Protocol):
     ) -> list[RunRow]:
         """List run rows for a thread."""
         ...
+
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a single run row, scoped to its thread."""
+        ...
