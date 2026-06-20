@@ -30,10 +30,12 @@ def _public_models() -> list[type[BaseModel]]:
 def test_every_field_has_a_description(model: type[BaseModel]) -> None:
     """Every request/response field carries a description.
 
-    Descriptions are the single source of the field-level API docs that render
-    in the OpenAPI schema, ``/docs``, the API explorer, and the Python API
-    reference. A field added without one would silently ship undocumented, so
-    this fails loud instead.
+    Descriptions are the single source of the field-level API docs. They always
+    render in the Python API reference (``python.md`` reads source directly);
+    response models additionally surface them in the OpenAPI-driven surfaces
+    (``/openapi.json``, ``/docs``, the API explorer). Request models are absent
+    from the generated OpenAPI schema today (see #67). A field added without a
+    description would silently ship undocumented, so this fails loud instead.
     """
     missing = [
         name
@@ -44,8 +46,14 @@ def test_every_field_has_a_description(model: type[BaseModel]) -> None:
 
 
 def test_public_models_discovered() -> None:
-    """The guard above is non-vacuous: it actually found models to check."""
-    assert len(_public_models()) >= 15
+    """The guard above is non-vacuous: it actually found models to check.
+
+    Asserts discovery returns a representative request and response model rather
+    than baking in an arbitrary count, so legitimate API consolidation can't
+    break this while a broken discovery (empty list) still fails loud.
+    """
+    discovered = {m.__name__ for m in _public_models()}
+    assert {"RunCreateRequest", "ThreadModel"} <= discovered
 
 
 def test_thread_create_request_defaults() -> None:

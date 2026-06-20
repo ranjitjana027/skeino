@@ -44,7 +44,7 @@ class RunCreateRequest(BaseModel):
     )
     command: CommandModel | None = Field(
         default=None,
-        description="Resume an interrupted graph (update/resume/goto). Provide either input or command, not both.",
+        description="Resume an interrupted graph (update/resume/goto). Takes precedence over ``input`` when both are given.",
     )
     metadata: dict[str, JsonValue] = Field(
         default_factory=dict, description="Metadata passed through to the run."
