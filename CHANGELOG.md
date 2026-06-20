@@ -10,6 +10,14 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.0.2] - 2026-06-20
+
+### Security
+
+- Bumped transitive dependency `langsmith` 0.8.5→0.8.18 to resolve a high-severity
+  advisory (LangSmith SDK `TracingMiddleware` arbitrary server-side file read).
+
+
 ## [2.0.1] - 2026-06-20
 
 ### Changed
@@ -171,7 +179,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...v1.1.0
