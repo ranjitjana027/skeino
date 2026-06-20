@@ -5,6 +5,7 @@
         "description": "LangGraph-compatible assistant representation.",
         "properties": {
           "assistant_id": {
+            "description": "Unique identifier of the assistant.",
             "format": "uuid",
             "title": "Assistant Id",
             "type": "string"
@@ -37,6 +38,7 @@
                 }
               ]
             },
+            "description": "Config baked into the assistant.",
             "title": "Config",
             "type": "object"
           },
@@ -68,10 +70,12 @@
                 }
               ]
             },
+            "description": "Context baked into the assistant.",
             "title": "Context",
             "type": "object"
           },
           "created_at": {
+            "description": "ISO-8601 timestamp when the assistant was created.",
             "title": "Created At",
             "type": "string"
           },
@@ -84,9 +88,11 @@
                 "type": "null"
               }
             ],
+            "description": "Human-readable assistant description.",
             "title": "Description"
           },
           "graph_id": {
+            "description": "Graph the assistant is bound to.",
             "title": "Graph Id",
             "type": "string"
           },
@@ -118,6 +124,7 @@
                 }
               ]
             },
+            "description": "Metadata stored with the assistant.",
             "title": "Metadata",
             "type": "object"
           },
@@ -130,14 +137,17 @@
                 "type": "null"
               }
             ],
+            "description": "Human-readable assistant name.",
             "title": "Name"
           },
           "updated_at": {
+            "description": "ISO-8601 timestamp when the assistant was last updated.",
             "title": "Updated At",
             "type": "string"
           },
           "version": {
             "default": 1,
+            "description": "Assistant version number.",
             "title": "Version",
             "type": "integer"
           }
@@ -163,6 +173,7 @@
                 "type": "null"
               }
             ],
+            "description": "Identifier of the specific checkpoint to select.",
             "title": "Checkpoint Id"
           },
           "checkpoint_map": {
@@ -201,6 +212,7 @@
                 "type": "null"
               }
             ],
+            "description": "Map of namespace to checkpoint id, used to pin nested subgraph checkpoints.",
             "title": "Checkpoint Map"
           },
           "checkpoint_ns": {
@@ -212,6 +224,7 @@
                 "type": "null"
               }
             ],
+            "description": "Checkpoint namespace; empty for the root graph, set for subgraphs.",
             "title": "Checkpoint Ns"
           },
           "thread_id": {
@@ -223,6 +236,7 @@
                 "type": "null"
               }
             ],
+            "description": "Thread the checkpoint belongs to.",
             "title": "Thread Id"
           }
         },
@@ -268,6 +282,7 @@
                 "type": "null"
               }
             ],
+            "description": "JSON schema for graph config, if available.",
             "title": "Config Schema"
           },
           "context_schema": {
@@ -306,9 +321,11 @@
                 "type": "null"
               }
             ],
+            "description": "JSON schema for graph context, if available.",
             "title": "Context Schema"
           },
           "graph_id": {
+            "description": "Graph the schemas describe.",
             "title": "Graph Id",
             "type": "string"
           },
@@ -348,6 +365,7 @@
                 "type": "null"
               }
             ],
+            "description": "JSON schema for graph input, if available.",
             "title": "Input Schema"
           },
           "output_schema": {
@@ -386,6 +404,7 @@
                 "type": "null"
               }
             ],
+            "description": "JSON schema for graph output, if available.",
             "title": "Output Schema"
           },
           "state_schema": {
@@ -416,6 +435,7 @@
                 }
               ]
             },
+            "description": "JSON schema for the graph's state.",
             "title": "State Schema",
             "type": "object"
           }
@@ -444,10 +464,12 @@
         "description": "Health check response.",
         "properties": {
           "status": {
+            "description": "Liveness indicator, ``ok`` when the server is up.",
             "title": "Status",
             "type": "string"
           },
           "version": {
+            "description": "Running skeino version.",
             "title": "Version",
             "type": "string"
           }
@@ -463,10 +485,12 @@
         "description": "Welcome message response.",
         "properties": {
           "message": {
+            "description": "Configured welcome message for SDK clients.",
             "title": "Message",
             "type": "string"
           },
           "version": {
+            "description": "Running skeino version.",
             "title": "Version",
             "type": "string"
           }
@@ -490,6 +514,7 @@
                 "type": "null"
               }
             ],
+            "description": "Interrupt identifier, if any.",
             "title": "Id"
           },
           "value": {
@@ -520,6 +545,7 @@
                 }
               ]
             },
+            "description": "Payload surfaced by the interrupt.",
             "title": "Value",
             "type": "object"
           }
@@ -534,10 +560,12 @@
         "description": "LangGraph-compatible run metadata.",
         "properties": {
           "assistant_id": {
+            "description": "Assistant/graph the run executed.",
             "title": "Assistant Id",
             "type": "string"
           },
           "created_at": {
+            "description": "ISO-8601 timestamp when the run was created.",
             "title": "Created At",
             "type": "string"
           },
@@ -569,6 +597,7 @@
                 }
               ]
             },
+            "description": "Stored run creation arguments.",
             "title": "Kwargs",
             "type": "object"
           },
@@ -600,10 +629,12 @@
                 }
               ]
             },
+            "description": "Metadata stored with the run.",
             "title": "Metadata",
             "type": "object"
           },
           "multitask_strategy": {
+            "description": "Multitask strategy the run was created with.",
             "enum": [
               "reject",
               "rollback",
@@ -614,11 +645,13 @@
             "type": "string"
           },
           "run_id": {
+            "description": "Unique identifier of the run.",
             "format": "uuid",
             "title": "Run Id",
             "type": "string"
           },
           "status": {
+            "description": "Run lifecycle status (pending/running/success/error/timeout/interrupted).",
             "enum": [
               "pending",
               "running",
@@ -631,11 +664,13 @@
             "type": "string"
           },
           "thread_id": {
+            "description": "Thread the run belongs to.",
             "format": "uuid",
             "title": "Thread Id",
             "type": "string"
           },
           "updated_at": {
+            "description": "ISO-8601 timestamp when the run was last updated.",
             "title": "Updated At",
             "type": "string"
           }
@@ -656,14 +691,17 @@
         "description": "Minimal system information exposed by the server.",
         "properties": {
           "name": {
+            "description": "Server identity reported to SDK clients.",
             "title": "Name",
             "type": "string"
           },
           "status": {
+            "description": "Server status indicator.",
             "title": "Status",
             "type": "string"
           },
           "version": {
+            "description": "Running skeino version.",
             "title": "Version",
             "type": "string"
           }
@@ -707,10 +745,12 @@
                 }
               ]
             },
+            "description": "Config associated with the thread.",
             "title": "Config",
             "type": "object"
           },
           "created_at": {
+            "description": "ISO-8601 timestamp when the thread was created.",
             "title": "Created At",
             "type": "string"
           },
@@ -750,6 +790,7 @@
                 "type": "null"
               }
             ],
+            "description": "Fields extracted from state per the search request's ``extract``.",
             "title": "Extracted"
           },
           "interrupts": {
@@ -778,6 +819,7 @@
                 "type": "null"
               }
             ],
+            "description": "Pending interrupts on the thread, if any.",
             "title": "Interrupts"
           },
           "metadata": {
@@ -808,6 +850,7 @@
                 }
               ]
             },
+            "description": "Metadata stored with the thread.",
             "title": "Metadata",
             "type": "object"
           },
@@ -820,9 +863,11 @@
                 "type": "null"
               }
             ],
+            "description": "ISO-8601 timestamp when the thread's state last changed.",
             "title": "State Updated At"
           },
           "status": {
+            "description": "Thread status (idle/busy/interrupted/error).",
             "enum": [
               "idle",
               "busy",
@@ -833,6 +878,7 @@
             "type": "string"
           },
           "thread_id": {
+            "description": "Unique identifier of the thread.",
             "format": "uuid",
             "title": "Thread Id",
             "type": "string"
@@ -845,9 +891,11 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Resolved TTL information, if a TTL is set."
           },
           "updated_at": {
+            "description": "ISO-8601 timestamp when the thread row was last updated.",
             "title": "Updated At",
             "type": "string"
           },
@@ -887,6 +935,7 @@
                 "type": "null"
               }
             ],
+            "description": "Latest checkpoint state values, if any.",
             "title": "Values"
           }
         },
@@ -903,7 +952,8 @@
         "description": "Latest checkpointed state for a thread.",
         "properties": {
           "checkpoint": {
-            "$ref": "#/components/schemas/CheckpointConfigModel"
+            "$ref": "#/components/schemas/CheckpointConfigModel",
+            "description": "Selector identifying this checkpoint."
           },
           "created_at": {
             "anyOf": [
@@ -914,9 +964,11 @@
                 "type": "null"
               }
             ],
+            "description": "ISO-8601 timestamp when the checkpoint was created.",
             "title": "Created At"
           },
           "interrupts": {
+            "description": "Interrupts active at this checkpoint.",
             "items": {
               "$ref": "#/components/schemas/InterruptModel"
             },
@@ -951,10 +1003,12 @@
                 }
               ]
             },
+            "description": "Metadata stored with the checkpoint.",
             "title": "Metadata",
             "type": "object"
           },
           "next": {
+            "description": "Nodes scheduled to run next; empty when the graph is idle.",
             "items": {
               "type": "string"
             },
@@ -997,9 +1051,11 @@
                 "type": "null"
               }
             ],
+            "description": "Selector of the parent checkpoint, if any.",
             "title": "Parent Checkpoint"
           },
           "tasks": {
+            "description": "Pending tasks at this checkpoint.",
             "items": {
               "$ref": "#/components/schemas/ThreadTaskModel"
             },
@@ -1069,6 +1125,7 @@
                 "type": "array"
               }
             ],
+            "description": "Checkpointed state values.",
             "title": "Values"
           }
         },
@@ -1091,7 +1148,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "description": "Checkpoint associated with the task, if any."
           },
           "error": {
             "anyOf": [
@@ -1102,13 +1160,16 @@
                 "type": "null"
               }
             ],
+            "description": "Error message if the task failed.",
             "title": "Error"
           },
           "id": {
+            "description": "Task identifier.",
             "title": "Id",
             "type": "string"
           },
           "interrupts": {
+            "description": "Interrupts raised by the task.",
             "items": {
               "$ref": "#/components/schemas/InterruptModel"
             },
@@ -1116,6 +1177,7 @@
             "type": "array"
           },
           "name": {
+            "description": "Name of the node the task runs.",
             "title": "Name",
             "type": "string"
           },
@@ -1155,6 +1217,7 @@
                 "type": "null"
               }
             ],
+            "description": "Task-local state, if any.",
             "title": "State"
           }
         },
@@ -1169,10 +1232,12 @@
         "description": "TTL information returned for a thread.",
         "properties": {
           "expires_at": {
+            "description": "ISO-8601 timestamp at which the thread expires.",
             "title": "Expires At",
             "type": "string"
           },
           "strategy": {
+            "description": "Expiry strategy applied to the thread.",
             "enum": [
               "delete",
               "keep_latest"
@@ -1181,6 +1246,7 @@
             "type": "string"
           },
           "ttl_minutes": {
+            "description": "Time-to-live in minutes.",
             "title": "Ttl Minutes",
             "type": "number"
           }

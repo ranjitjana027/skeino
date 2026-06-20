@@ -74,6 +74,14 @@ Prefix: `/threads/{thread_id}`
 
 ### Key `RunCreateRequest` fields
 
+A curated quick-reference for the most-used fields. Every request and response
+model — including all remaining `RunCreateRequest` fields — carries a per-field
+description in the [Python API reference](python.md), which is the
+authoritative, always-current source. Response models additionally render those
+descriptions in the [API explorer](explorer.md) and `/docs`; request models are
+not yet part of the generated OpenAPI schema (tracked in
+[#67](https://github.com/ranjitjana027/skeino/issues/67)).
+
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `assistant_id` | `str` | — | Which assistant/graph to run (required). |
@@ -85,9 +93,9 @@ Prefix: `/threads/{thread_id}`
 | `if_not_exists` | enum | `"reject"` | `"create"` to auto-create a missing thread. |
 | `config` / `context` / `metadata` | `dict` | `{}` | Passed through to the graph invocation. |
 
-Provide **either** `input` **or** `command`, not both. Some LangGraph Platform
-options (scheduled runs via `after_seconds`, `webhook`) are accepted by the
-schema but rejected at runtime as out of scope for v1.
+Provide `input` **or** `command`; if both are sent, `command` takes precedence.
+Some LangGraph Platform options (scheduled runs via `after_seconds`, `webhook`)
+are accepted by the schema but rejected at runtime as out of scope for v1.
 
 ## Status values
 
