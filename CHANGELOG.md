@@ -10,6 +10,16 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.0.1] - 2026-06-20
+
+### Changed
+
+- Bumped dependencies: fastapi 0.136.3→0.138.0, starlette 1.1.0→1.3.1,
+  langchain 1.3.4→1.3.9, langchain-core 1.4.7→1.4.8, langgraph 1.2.4→1.2.6,
+  pydantic-settings 2.14.1→2.14.2, and dev tooling (pytest 9.0.3→9.1.1,
+  ruff 0.15.17→0.15.18). CI now uses actions/checkout v7.
+
+
 ## [2.0.0] - 2026-06-14
 
 ### Changed
@@ -161,7 +171,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...HEAD
+[2.0.1]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/ranjitjana027/skeino/compare/v1.0.1...v1.1.0
 [1.0.1]: https://github.com/ranjitjana027/skeino/compare/v1.0.0...v1.0.1
