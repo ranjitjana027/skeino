@@ -2,7 +2,7 @@
 
 from typing import Any, Final, Literal, TypeAlias
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 JsonObject: TypeAlias = dict[str, Any]
 JsonArray: TypeAlias = list[Any]
@@ -31,7 +31,17 @@ DEFAULT_STREAM_MODES: Final[tuple[StreamMode, ...]] = ("values",)
 class CheckpointConfigModel(BaseModel):
     """Checkpoint selector for thread state or run resumption."""
 
-    thread_id: str | None = None
-    checkpoint_ns: str | None = None
-    checkpoint_id: str | None = None
-    checkpoint_map: dict[str, JsonValue] | None = None
+    thread_id: str | None = Field(
+        default=None, description="Thread the checkpoint belongs to."
+    )
+    checkpoint_ns: str | None = Field(
+        default=None,
+        description="Checkpoint namespace; empty for the root graph, set for subgraphs.",
+    )
+    checkpoint_id: str | None = Field(
+        default=None, description="Identifier of the specific checkpoint to select."
+    )
+    checkpoint_map: dict[str, JsonValue] | None = Field(
+        default=None,
+        description="Map of namespace to checkpoint id, used to pin nested subgraph checkpoints.",
+    )
