@@ -85,6 +85,28 @@ async def test_cancel_interrupt_marks_interrupted_and_releases_lock() -> None:
         assert not run_ops._lock_manager.get(_THREAD).locked()
 
 
+async def test_cancel_interrupt_wait_false_defers_status_to_the_task() -> None:
+    # With wait=False the run must NOT be marked terminal eagerly — the task is
+    # still unwinding (and may still hold the lock). Its own CancelledError
+    # handler persists ``interrupted`` once it exits.
+    app, graph = build_test_app()
+    assert isinstance(graph, FakeGraph)
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        run = await run_ops.create_run(_THREAD, _req())
+        await graph.invoke_started.wait()
+        run_id = str(run.run_id)
+
+        await run_ops.cancel_run(_THREAD, run_id, action="interrupt", wait=False)
+        task = run_ops._registry.get(run_id)
+        assert task is not None and not task.done()  # still unwinding
+        assert (await run_ops.get_run(_THREAD, run_id)).status != "interrupted"
+
+        await asyncio.wait({task})  # let the task's handler run
+        assert (await run_ops.get_run(_THREAD, run_id)).status == "interrupted"
+
+
 async def test_cancel_rollback_deletes_the_run() -> None:
     app, graph = build_test_app()
     assert isinstance(graph, FakeGraph)

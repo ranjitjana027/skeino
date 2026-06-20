@@ -154,9 +154,8 @@ class RunOps:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Run {run_id} is already {run.status}; nothing to cancel.",
             )
-        cancelled = await self._registry.cancel(
-            run_id, wait=wait or action == "rollback"
-        )
+        cancel_wait = wait or action == "rollback"
+        cancelled = await self._registry.cancel(run_id, wait=cancel_wait)
         if not cancelled:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -166,13 +165,18 @@ class RunOps:
                 ),
             )
         if action == "rollback":
+            # rollback always waited above, so the task has fully unwound.
             await self._metadata_store.delete_run(thread_id, run_id)
-        else:
-            # The cancelled task marks itself ``interrupted``; this is an
-            # idempotent backstop in case the persistence write was skipped.
+        elif cancel_wait:
+            # We waited for the task to settle; persist ``interrupted`` as an
+            # idempotent backstop in case the task's own handler didn't (e.g. it
+            # was cancelled before its body ever ran).
             await self._metadata_store.update_run_status(
                 run_id, _RUN_INTERRUPTED, error="Run cancelled."
             )
+        # else (interrupt, wait=False): don't mark the run terminal eagerly —
+        # the task is still unwinding (and may still hold the execution lock).
+        # Its ``CancelledError`` handler persists ``interrupted`` as it exits.
 
     async def delete_run(self, thread_id: str, run_id: str) -> None:
         """Delete a terminal run row. Returns 409 if the run is still active."""
