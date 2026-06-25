@@ -117,11 +117,25 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
 
     Requires the ``skeino[postgres]`` extra (psycopg + langgraph-checkpoint-
     postgres), imported lazily so postgres stays optional.
+
+    The saver runs over an :class:`~psycopg_pool.AsyncConnectionPool` rather
+    than a single ``from_conn_string`` connection: a connection dropped by the
+    server or a connection pooler (e.g. a Supabase/pgbouncer idle-timeout or
+    recycle) is then detected and replaced on checkout, instead of wedging
+    *every* subsequent checkpoint read with ``OperationalError: the connection
+    is closed``. ``check=check_connection`` validates a connection before each
+    checkout; ``prepare_threshold=0`` disables client-side prepared statements,
+    which also keeps the saver correct behind a transaction-mode pooler.
+
+    ``pool_max_size`` (default 10) is read from ``spec.options``.
     """
     if not spec.uri:
         raise ValueError("Postgres checkpointer requires a connection URI.")
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+        from psycopg import AsyncConnection
+        from psycopg.rows import DictRow, dict_row
+        from psycopg_pool import AsyncConnectionPool
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise RuntimeError(
             "The 'postgres' checkpointer requires the skeino[postgres] extra "
@@ -129,9 +143,29 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
         ) from exc
 
     setup_schema = bool(spec.options.get("setup_schema", True))
+    max_size = int(spec.options.get("pool_max_size", 10))
+
+    async def _check(conn: AsyncConnection[DictRow]) -> None:
+        # Validate a pooled connection before checkout; raising discards it so
+        # the pool reconnects instead of handing out a dropped socket.
+        await conn.execute("SELECT 1")
+
     async with AsyncExitStack() as stack:
-        saver_cm = AsyncPostgresSaver.from_conn_string(spec.uri)
-        inner = await stack.enter_async_context(saver_cm)
+        pool = AsyncConnectionPool[AsyncConnection[DictRow]](
+            conninfo=spec.uri,
+            min_size=1,
+            max_size=max_size,
+            open=False,
+            check=_check,
+            kwargs={
+                "autocommit": True,
+                "prepare_threshold": 0,
+                "row_factory": dict_row,
+            },
+        )
+        await pool.open(wait=True)
+        stack.push_async_callback(pool.close)
+        inner = AsyncPostgresSaver(pool)
         if setup_schema and hasattr(inner, "setup"):
             result = inner.setup()
             if inspect.isawaitable(result):

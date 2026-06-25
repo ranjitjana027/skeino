@@ -94,6 +94,13 @@ app = create_app(
 - Use a connection string your network can reach from the server process. For
   managed Postgres, include `sslmode=require` (or your provider's equivalent) in
   the URI.
+- The checkpointer runs over a **connection pool** that validates each
+  connection before use, so a connection dropped by the server or a connection
+  pooler (e.g. a Supabase/pgbouncer idle-timeout or recycle) is transparently
+  replaced rather than wedging later reads with `the connection is closed`.
+  Prepared statements are disabled, so a **transaction-mode** pooler URI works
+  too. Tune the pool's upper bound with
+  `checkpointer_options={"pool_max_size": N}` (default `10`).
 
 ## Verifying durability
 
