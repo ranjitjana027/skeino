@@ -76,3 +76,105 @@ async def test_mongodb_builder_keeps_default_db_for_pathless_uri(
         pass
     # No db in the URI path → the saver's own default must be left alone.
     assert "db_name" not in _FakeMongoSaver.calls
+
+
+class _FakePool:
+    """Records construction kwargs; opens/closes are tracked, no real DB."""
+
+    instances: list["_FakePool"] = []
+
+    def __class_getitem__(cls, _item: object) -> type["_FakePool"]:
+        # Support the generic subscription AsyncConnectionPool[AsyncConnection[...]].
+        return cls
+
+    def __init__(self, **kwargs: object) -> None:
+        self.kwargs = kwargs
+        self.opened = False
+        self.closed = False
+        _FakePool.instances.append(self)
+
+    async def open(self, wait: bool = False) -> None:
+        self.opened = True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _FakePGSaver:
+    """Stand-in AsyncPostgresSaver that records the connection it was given."""
+
+    def __init__(self, conn: object) -> None:
+        self.conn = conn
+        self.setup_called = False
+
+    async def setup(self) -> None:
+        self.setup_called = True
+
+
+@pytest.mark.asyncio
+async def test_postgres_builder_uses_checked_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The postgres saver is built over a liveness-checked connection pool.
+
+    A single long-lived connection silently dies when a pooler (e.g. Supabase/
+    pgbouncer) recycles it, wedging every later read with "the connection is
+    closed". The builder must instead hand the saver a pool that validates and
+    replaces connections on checkout.
+    """
+    import langgraph.checkpoint.postgres.aio as pg_aio
+    import psycopg_pool
+
+    from skeino.persistence import checkpointer as ckpt_mod
+
+    monkeypatch.setattr(psycopg_pool, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg_aio, "AsyncPostgresSaver", _FakePGSaver)
+    monkeypatch.setattr(
+        ckpt_mod, "build_run_enriching_checkpointer", lambda inner: inner
+    )
+    _FakePool.instances.clear()
+
+    uri = "postgres://u:p@host:5432/db"
+    async with open_checkpointer(uri, scheme="postgres") as ckpt:
+        assert isinstance(ckpt, _FakePGSaver)
+        assert ckpt.setup_called is True
+        assert isinstance(ckpt.conn, _FakePool)
+
+    assert len(_FakePool.instances) == 1
+    pool = _FakePool.instances[0]
+    assert pool.opened is True  # opened on enter
+    assert pool.closed is True  # released on exit via the exit stack
+    assert pool.kwargs["conninfo"] == uri
+    # Resilience: a liveness check is configured so dropped sockets are replaced.
+    assert callable(pool.kwargs["check"])
+    # Pooler-safety: prepared statements off, autocommit on (saver requirement).
+    conn_kwargs = pool.kwargs["kwargs"]
+    assert conn_kwargs["prepare_threshold"] == 0
+    assert conn_kwargs["autocommit"] is True
+
+
+@pytest.mark.asyncio
+async def test_postgres_builder_pool_max_size_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pool_max_size flows from spec.options into the pool."""
+    import langgraph.checkpoint.postgres.aio as pg_aio
+    import psycopg_pool
+
+    from skeino.persistence import checkpointer as ckpt_mod
+
+    monkeypatch.setattr(psycopg_pool, "AsyncConnectionPool", _FakePool)
+    monkeypatch.setattr(pg_aio, "AsyncPostgresSaver", _FakePGSaver)
+    monkeypatch.setattr(
+        ckpt_mod, "build_run_enriching_checkpointer", lambda inner: inner
+    )
+    _FakePool.instances.clear()
+
+    async with open_checkpointer(
+        "postgres://u:p@host:5432/db",
+        scheme="postgres",
+        options={"pool_max_size": 25},
+    ):
+        pass
+
+    assert _FakePool.instances[0].kwargs["max_size"] == 25
