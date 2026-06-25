@@ -10,6 +10,17 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.1.0] - 2026-06-26
+
+### Changed
+
+- Every request/response schema field now carries a description. These render in the Python API reference for all models; response models additionally surface them in the generated OpenAPI schema, Swagger UI (`/docs`), and the API explorer. ([#68](https://github.com/ranjitjana027/skeino/issues/68))
+
+### Fixed
+
+- Postgres checkpointer now runs over a liveness-checked `AsyncConnectionPool` instead of a single long-lived connection. A connection dropped by the server or a connection pooler (e.g. a Supabase/pgbouncer idle-timeout or recycle) is now detected and replaced on checkout, instead of wedging every subsequent checkpoint read with `OperationalError: the connection is closed`. Prepared statements are disabled (`prepare_threshold=0`) so the saver is also correct behind a transaction-mode pooler; pool size is configurable via the `pool_max_size` checkpointer option (default 10). ([#70](https://github.com/ranjitjana027/skeino/issues/70))
+
+
 ## [2.0.2] - 2026-06-20
 
 ### Security
@@ -179,7 +190,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...HEAD
+[2.1.0]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...v2.0.0
