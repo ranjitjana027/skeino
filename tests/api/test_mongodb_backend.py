@@ -1,9 +1,10 @@
 """Mongo-only assertions at the collection level: documents really land.
 
-Note the split this test pins down: metadata documents live in db "skeino"
-(``MongoMetadataStore``'s default) while langgraph checkpoints live in db
-"checkpointing_db" (``MongoDBSaver``'s default) — the db named in the URI path
-is ignored by both.
+Both ``MongoMetadataStore`` and the langgraph ``MongoDBSaver`` honour the db
+named in the URI path, so metadata documents and checkpoints share the
+operator's chosen database (see ``MONGO_METADATA_DB`` / ``MONGO_CHECKPOINT_DB``
+in conftest, derived from the test URI). They fall back to their own defaults
+("skeino" / "checkpointing_db") only for a pathless URI.
 """
 
 from pymongo import MongoClient
