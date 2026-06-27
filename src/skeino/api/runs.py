@@ -5,6 +5,7 @@ from uuid import UUID
 from fastapi import APIRouter, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
+from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model, run_location
 from skeino.schemas import RunCreateRequest, RunModel, RunStatus
 
@@ -12,6 +13,7 @@ router = APIRouter(prefix="/threads/{thread_id}")
 
 
 @router.post("/runs", response_model=RunModel)
+@request_model(RunCreateRequest)
 async def create_run(
     request: Request,
     response: Response,
@@ -28,6 +30,7 @@ async def create_run(
 
 
 @router.post("/runs/stream")
+@request_model(RunCreateRequest)
 async def stream_run(request: Request, thread_id: UUID) -> StreamingResponse:
     """Execute a run and stream output chunks using SSE."""
     payload = await parse_request_model(request, RunCreateRequest)

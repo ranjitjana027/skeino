@@ -73,10 +73,11 @@ Prefix: `/threads/{thread_id}`
 A curated quick-reference for the most-used fields. Every request and response
 model — including all remaining `RunCreateRequest` fields — carries a per-field
 description in the [Python API reference](python.md), which is the
-authoritative, always-current source. Response models additionally render those
-descriptions in the [API explorer](explorer.md) and `/docs`; request models are
-not yet part of the generated OpenAPI schema (tracked in
-[#67](https://github.com/ranjitjana027/skeino/issues/67)).
+authoritative, always-current source. Both request and response models also
+render those descriptions in the [API explorer](explorer.md) and `/docs`:
+although skeino parses request bodies by hand (to tolerate `text/plain`), their
+models are injected into the generated OpenAPI schema so the bodies are fully
+documented.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |

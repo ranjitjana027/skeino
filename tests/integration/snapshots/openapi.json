@@ -161,6 +161,159 @@
         "title": "AssistantModel",
         "type": "object"
       },
+      "AssistantSearchRequest": {
+        "description": "Payload for listing assistants.",
+        "properties": {
+          "graph_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by graph id.",
+            "title": "Graph Id"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Page size (1\u20131000).",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by exact metadata key/value matches.",
+            "title": "Metadata"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by assistant name.",
+            "title": "Name"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Number of results to skip.",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "select": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "assistant_id",
+                    "graph_id",
+                    "name",
+                    "description",
+                    "config",
+                    "context",
+                    "created_at",
+                    "updated_at",
+                    "metadata",
+                    "version"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Subset of fields to return per assistant.",
+            "title": "Select"
+          },
+          "sort_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "assistant_id",
+                  "created_at",
+                  "updated_at",
+                  "name",
+                  "graph_id"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Field to sort by.",
+            "title": "Sort By"
+          },
+          "sort_order": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sort direction.",
+            "title": "Sort Order"
+          }
+        },
+        "title": "AssistantSearchRequest",
+        "type": "object"
+      },
       "CheckpointConfigModel": {
         "description": "Checkpoint selector for thread state or run resumption.",
         "properties": {
@@ -241,6 +394,143 @@
           }
         },
         "title": "CheckpointConfigModel",
+        "type": "object"
+      },
+      "CommandModel": {
+        "description": "Serializable LangGraph command payload.",
+        "properties": {
+          "goto": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Node(s) to jump to when resuming the graph.",
+            "title": "Goto"
+          },
+          "resume": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Value to resume an interrupted graph with (the ``interrupt()`` return).",
+            "title": "Resume"
+          },
+          "update": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "State update to apply before resuming the graph.",
+            "title": "Update"
+          }
+        },
+        "title": "CommandModel",
         "type": "object"
       },
       "GraphSchemaModel": {
@@ -556,6 +846,343 @@
         "title": "InterruptModel",
         "type": "object"
       },
+      "RunCreateRequest": {
+        "description": "Payload for creating a run on an existing thread.",
+        "properties": {
+          "after_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "LangGraph Platform scheduled-run option accepted by the schema but rejected at runtime as out of scope for v1.",
+            "title": "After Seconds"
+          },
+          "assistant_id": {
+            "description": "Which assistant/graph to run (required).",
+            "title": "Assistant Id",
+            "type": "string"
+          },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointConfigModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Resume from a specific checkpoint."
+          },
+          "checkpoint_during": {
+            "default": false,
+            "description": "Whether to persist checkpoints during the run.",
+            "title": "Checkpoint During",
+            "type": "boolean"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Resume an interrupted graph (update/resume/goto). Takes precedence over ``input`` when both are given."
+          },
+          "config": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "items": {},
+                  "type": "array"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Config passed through to the graph invocation.",
+            "title": "Config",
+            "type": "object"
+          },
+          "context": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "items": {},
+                  "type": "array"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Context passed through to the graph invocation.",
+            "title": "Context",
+            "type": "object"
+          },
+          "durability": {
+            "default": "exit",
+            "description": "When checkpoints are written relative to graph steps.",
+            "enum": [
+              "sync",
+              "async",
+              "exit"
+            ],
+            "title": "Durability",
+            "type": "string"
+          },
+          "feedback_keys": {
+            "description": "Feedback keys to associate with the run.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Feedback Keys",
+            "type": "array"
+          },
+          "if_not_exists": {
+            "default": "reject",
+            "description": "Use ``\"create\"`` to auto-create a missing thread, ``\"reject\"`` to 404.",
+            "enum": [
+              "create",
+              "reject"
+            ],
+            "title": "If Not Exists",
+            "type": "string"
+          },
+          "input": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "New state to merge in; ``messages`` is converted to LangChain messages.",
+            "title": "Input"
+          },
+          "interrupt_after": {
+            "anyOf": [
+              {
+                "const": "*",
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Nodes to interrupt after; ``\"*\"`` for all.",
+            "title": "Interrupt After"
+          },
+          "interrupt_before": {
+            "anyOf": [
+              {
+                "const": "*",
+                "type": "string"
+              },
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Nodes to interrupt before; ``\"*\"`` for all.",
+            "title": "Interrupt Before"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "items": {},
+                  "type": "array"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Metadata passed through to the run.",
+            "title": "Metadata",
+            "type": "object"
+          },
+          "multitask_strategy": {
+            "default": "enqueue",
+            "description": "Behaviour when the thread is busy (enqueue/reject/rollback/interrupt).",
+            "enum": [
+              "reject",
+              "rollback",
+              "interrupt",
+              "enqueue"
+            ],
+            "title": "Multitask Strategy",
+            "type": "string"
+          },
+          "on_disconnect": {
+            "default": "continue",
+            "description": "What to do with the run if the stream client disconnects.",
+            "enum": [
+              "cancel",
+              "continue"
+            ],
+            "title": "On Disconnect",
+            "type": "string"
+          },
+          "stream_mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "values",
+                  "messages",
+                  "messages-tuple",
+                  "tasks",
+                  "checkpoints",
+                  "updates",
+                  "events",
+                  "debug",
+                  "custom"
+                ],
+                "type": "string"
+              },
+              {
+                "items": {
+                  "enum": [
+                    "values",
+                    "messages",
+                    "messages-tuple",
+                    "tasks",
+                    "checkpoints",
+                    "updates",
+                    "events",
+                    "debug",
+                    "custom"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            ],
+            "description": "Streaming mode(s) for the run; defaults to ``[\"values\"]``.",
+            "title": "Stream Mode"
+          },
+          "stream_resumable": {
+            "default": false,
+            "description": "Whether the stream can be resumed after disconnect.",
+            "title": "Stream Resumable",
+            "type": "boolean"
+          },
+          "stream_subgraphs": {
+            "default": false,
+            "description": "Whether to include subgraph events in the stream.",
+            "title": "Stream Subgraphs",
+            "type": "boolean"
+          },
+          "webhook": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "LangGraph Platform option accepted by the schema but rejected at runtime as out of scope for v1.",
+            "title": "Webhook"
+          }
+        },
+        "required": [
+          "assistant_id"
+        ],
+        "title": "RunCreateRequest",
+        "type": "object"
+      },
       "RunModel": {
         "description": "LangGraph-compatible run metadata.",
         "properties": {
@@ -712,6 +1339,89 @@
           "version"
         ],
         "title": "ServerInfoModel",
+        "type": "object"
+      },
+      "ThreadCreateRequest": {
+        "description": "Payload for creating a thread.",
+        "properties": {
+          "if_exists": {
+            "default": "raise",
+            "description": "Behaviour when the id already exists: ``raise`` (409) or ``do_nothing``.",
+            "enum": [
+              "raise",
+              "do_nothing"
+            ],
+            "title": "If Exists",
+            "type": "string"
+          },
+          "metadata": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "items": {},
+                  "type": "array"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "description": "Arbitrary metadata stored with the thread.",
+            "title": "Metadata",
+            "type": "object"
+          },
+          "supersteps": {
+            "description": "Optional initial state updates to seed the thread on creation.",
+            "items": {
+              "$ref": "#/components/schemas/ThreadSuperstep"
+            },
+            "title": "Supersteps",
+            "type": "array"
+          },
+          "thread_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional explicit thread id; generated if omitted.",
+            "title": "Thread Id"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ThreadTtlConfig"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Optional time-to-live configuration for the thread."
+          }
+        },
+        "title": "ThreadCreateRequest",
         "type": "object"
       },
       "ThreadModel": {
@@ -948,6 +1658,271 @@
         "title": "ThreadModel",
         "type": "object"
       },
+      "ThreadPatchRequest": {
+        "description": "Mutable fields updatable on an existing thread.\n\n``metadata`` is optional so an empty body is a no-op; send\n``{\"metadata\": {}}`` to intentionally clear a thread's metadata.",
+        "properties": {
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "New metadata; omit for a no-op, send ``{}`` to clear existing metadata.",
+            "title": "Metadata"
+          }
+        },
+        "title": "ThreadPatchRequest",
+        "type": "object"
+      },
+      "ThreadSearchRequest": {
+        "description": "Payload for listing or searching threads.",
+        "properties": {
+          "extract": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Map of output key to state path, extracted into each result's ``extracted``.",
+            "title": "Extract"
+          },
+          "ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Restrict results to these thread ids.",
+            "title": "Ids"
+          },
+          "limit": {
+            "default": 10,
+            "description": "Page size (1\u20131000).",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by exact metadata key/value matches.",
+            "title": "Metadata"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Number of results to skip.",
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "select": {
+            "anyOf": [
+              {
+                "items": {
+                  "enum": [
+                    "thread_id",
+                    "created_at",
+                    "updated_at",
+                    "state_updated_at",
+                    "metadata",
+                    "config",
+                    "status",
+                    "values",
+                    "interrupts"
+                  ],
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Subset of fields to return per thread.",
+            "title": "Select"
+          },
+          "sort_by": {
+            "anyOf": [
+              {
+                "enum": [
+                  "thread_id",
+                  "status",
+                  "created_at",
+                  "updated_at",
+                  "state_updated_at"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Field to sort by.",
+            "title": "Sort By"
+          },
+          "sort_order": {
+            "anyOf": [
+              {
+                "enum": [
+                  "asc",
+                  "desc"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Sort direction.",
+            "title": "Sort Order"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "idle",
+                  "busy",
+                  "interrupted",
+                  "error"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by thread status.",
+            "title": "Status"
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter by exact state-value matches.",
+            "title": "Values"
+          }
+        },
+        "title": "ThreadSearchRequest",
+        "type": "object"
+      },
       "ThreadStateModel": {
         "description": "Latest checkpointed state for a thread.",
         "properties": {
@@ -1137,6 +2112,302 @@
         "title": "ThreadStateModel",
         "type": "object"
       },
+      "ThreadStateSearchRequest": {
+        "description": "Payload for retrieving thread history.",
+        "properties": {
+          "before": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointConfigModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Return checkpoints recorded before this one."
+          },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointConfigModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Restrict history to this checkpoint's namespace."
+          },
+          "limit": {
+            "default": 1,
+            "description": "Maximum checkpoints to return (1\u20131000).",
+            "maximum": 1000,
+            "minimum": 1,
+            "title": "Limit",
+            "type": "integer"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Filter checkpoints by metadata key/value matches.",
+            "title": "Metadata"
+          }
+        },
+        "title": "ThreadStateSearchRequest",
+        "type": "object"
+      },
+      "ThreadStateUpdateRequest": {
+        "description": "Manually write/patch a thread's state (human-in-the-loop edit).",
+        "properties": {
+          "as_node": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Node the update is attributed to.",
+            "title": "As Node"
+          },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointConfigModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Checkpoint to branch the update from; latest if omitted."
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "State values to write into the new checkpoint.",
+            "title": "Values"
+          }
+        },
+        "title": "ThreadStateUpdateRequest",
+        "type": "object"
+      },
+      "ThreadSuperstep": {
+        "description": "A superstep container for thread bootstrap updates.",
+        "properties": {
+          "updates": {
+            "description": "Ordered state updates applied as one superstep.",
+            "items": {
+              "$ref": "#/components/schemas/ThreadSuperstepUpdate"
+            },
+            "title": "Updates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "updates"
+        ],
+        "title": "ThreadSuperstep",
+        "type": "object"
+      },
+      "ThreadSuperstepUpdate": {
+        "description": "Initial state update applied during thread creation.",
+        "properties": {
+          "as_node": {
+            "description": "Node the update is attributed to in the checkpoint graph.",
+            "title": "As Node",
+            "type": "string"
+          },
+          "command": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CommandModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Command to apply instead of (or alongside) values."
+          },
+          "values": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "additionalProperties": true,
+                      "type": "object"
+                    },
+                    {
+                      "items": {},
+                      "type": "array"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "State values to write as part of this update.",
+            "title": "Values"
+          }
+        },
+        "required": [
+          "as_node"
+        ],
+        "title": "ThreadSuperstepUpdate",
+        "type": "object"
+      },
       "ThreadTaskModel": {
         "description": "Serialized pending task entry.",
         "properties": {
@@ -1226,6 +2497,36 @@
           "name"
         ],
         "title": "ThreadTaskModel",
+        "type": "object"
+      },
+      "ThreadTtlConfig": {
+        "description": "Time-to-live settings for a thread.",
+        "properties": {
+          "strategy": {
+            "default": "delete",
+            "description": "What to do when the thread expires: delete it or keep only its latest checkpoint.",
+            "enum": [
+              "delete",
+              "keep_latest"
+            ],
+            "title": "Strategy",
+            "type": "string"
+          },
+          "ttl": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Time-to-live in minutes; ``None`` means no expiry.",
+            "title": "Ttl"
+          }
+        },
+        "title": "ThreadTtlConfig",
         "type": "object"
       },
       "ThreadTtlInfo": {
@@ -1350,6 +2651,16 @@
       "post": {
         "description": "Search or list assistants.",
         "operationId": "search_assistants_assistants_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssistantSearchRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -1580,6 +2891,16 @@
       "post": {
         "description": "Create a new persistent thread.",
         "operationId": "create_thread_threads_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCreateRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -1599,6 +2920,16 @@
       "post": {
         "description": "Search or list threads.",
         "operationId": "search_threads_threads_search_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadSearchRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -1705,6 +3036,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadPatchRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -1858,6 +3199,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadStateSearchRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -1992,6 +3343,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -2033,6 +3394,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {
@@ -2172,6 +3543,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadStateUpdateRequest"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {
@@ -2213,6 +3594,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckpointConfigModel"
+              }
+            }
+          },
+          "required": false
+        },
         "responses": {
           "200": {
             "content": {

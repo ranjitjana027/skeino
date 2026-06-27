@@ -22,6 +22,7 @@ from skeino.api import (
     runs_router,
     threads_router,
 )
+from skeino.api._openapi import install_request_body_openapi
 from skeino.api._request import SkeinoState
 from skeino.concurrency import ThreadLockManager
 from skeino.config import SkeinoSettings
@@ -253,4 +254,7 @@ def create_app(
     fastapi_app.include_router(assistants_router)
     fastapi_app.include_router(threads_router)
     fastapi_app.include_router(runs_router)
+    # Routers parse bodies by hand (text/plain tolerance), so FastAPI can't see
+    # their request models — patch the schema to document them (see #67).
+    install_request_body_openapi(fastapi_app)
     return fastapi_app
