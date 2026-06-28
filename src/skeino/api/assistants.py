@@ -4,6 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Query, Request
 
+from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model
 from skeino.schemas import (
     AssistantModel,
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/assistants")
 
 
 @router.post("/search", response_model=list[AssistantModel])
+@request_model(AssistantSearchRequest)
 async def search_assistants(request: Request) -> list[AssistantModel]:
     """Search or list assistants."""
     payload = await parse_request_model(request, AssistantSearchRequest)

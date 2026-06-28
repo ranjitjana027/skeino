@@ -4,6 +4,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Query, Request, status
 
+from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model
 from skeino.schemas import (
     CheckpointConfigModel,
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/threads")
 
 
 @router.post("", response_model=ThreadModel)
+@request_model(ThreadCreateRequest)
 async def create_thread(request: Request) -> ThreadModel:
     """Create a new persistent thread."""
     payload = await parse_request_model(request, ThreadCreateRequest)
@@ -28,6 +30,7 @@ async def create_thread(request: Request) -> ThreadModel:
 
 
 @router.post("/search", response_model=list[ThreadModel])
+@request_model(ThreadSearchRequest)
 async def search_threads(request: Request) -> list[ThreadModel]:
     """Search or list threads."""
     payload = await parse_request_model(request, ThreadSearchRequest)
@@ -43,6 +46,7 @@ async def get_thread(request: Request, thread_id: UUID) -> ThreadModel:
 
 
 @router.patch("/{thread_id}", response_model=ThreadModel)
+@request_model(ThreadPatchRequest)
 async def patch_thread(request: Request, thread_id: UUID) -> ThreadModel:
     """Update a thread's metadata."""
     payload = await parse_request_model(request, ThreadPatchRequest)
@@ -76,6 +80,7 @@ async def get_thread_state(
 
 
 @router.post("/{thread_id}/state", response_model=CheckpointConfigModel)
+@request_model(ThreadStateUpdateRequest)
 async def update_thread_state(
     request: Request, thread_id: UUID
 ) -> CheckpointConfigModel:
@@ -86,6 +91,7 @@ async def update_thread_state(
 
 
 @router.post("/{thread_id}/state/checkpoint", response_model=ThreadStateModel)
+@request_model(CheckpointConfigModel)
 async def get_thread_state_at_checkpoint(
     request: Request, thread_id: UUID
 ) -> ThreadStateModel:
@@ -130,6 +136,7 @@ async def get_thread_history(
 
 
 @router.post("/{thread_id}/history", response_model=list[ThreadStateModel])
+@request_model(ThreadStateSearchRequest)
 async def post_thread_history(
     request: Request, thread_id: UUID
 ) -> list[ThreadStateModel]:
