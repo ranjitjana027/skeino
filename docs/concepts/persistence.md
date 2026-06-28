@@ -40,10 +40,12 @@ scheme to `postgres` to use Postgres.
 
 ### Run-stamped checkpoints
 
-The Postgres checkpointer is wrapped so that, before each checkpoint is written,
-the current `run_id` is copied into the checkpoint metadata — that's what lets
-clients (and Studio) group a thread's checkpoints by the run that produced them.
-Other backends are used as-is, so this run-grouping is **Postgres-only** today.
+The Postgres, SQLite, and Redis checkpointers are wrapped so that, before each
+checkpoint is written, the current `run_id` is copied into the checkpoint
+metadata — that's what lets clients (and Studio) group a thread's checkpoints by
+the run that produced them. MongoDB's saver merges config metadata (including
+`run_id`) into checkpoint metadata natively, so it isn't wrapped. Run-grouping
+therefore works across **all durable backends**.
 
 !!! note "MongoDB specifics"
     The MongoDB checkpointer (`MongoDBSaver`) is backed by a **synchronous**
