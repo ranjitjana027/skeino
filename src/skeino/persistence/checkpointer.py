@@ -5,13 +5,18 @@ default ``memory``); the URI is only a connection string. Built-in schemes —
 the database ones import their driver lazily and need the matching extra:
 
 * ``memory`` (default) — in-process ``MemorySaver`` (bundled).
-* ``postgres`` / ``postgresql`` — async PostgreSQL saver, wrapped via
-  :func:`skeino.persistence.enriching.build_run_enriching_checkpointer` so
-  LangGraph Studio groups checkpoints by run. Extra: ``skeino[postgres]``.
+* ``postgres`` / ``postgresql`` — async PostgreSQL saver. Extra:
+  ``skeino[postgres]``.
 * ``sqlite`` / ``sqlite3`` — ``AsyncSqliteSaver``. Extra: ``skeino[sqlite]``.
 * ``mongodb`` / ``mongo`` — ``MongoDBSaver``. Extra: ``skeino[mongodb]``.
 * ``redis`` — ``AsyncRedisSaver`` (install ``langgraph-checkpoint-redis``
   yourself; it isn't a managed extra).
+
+The postgres, sqlite, and redis savers are wrapped via
+:func:`skeino.persistence.enriching.build_run_enriching_checkpointer` so each
+checkpoint carries its ``run_id`` and LangGraph Studio groups checkpoints by
+run. MongoDB's saver merges config metadata (and thus ``run_id``) natively, so
+it is left unwrapped.
 
 Additional backends can plug themselves in under a new scheme:
 
@@ -210,6 +215,8 @@ async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoint
                     if inspect.isawaitable(result):
                         await result
                     break
+        # MongoDBSaver merges config metadata (and run_id) into checkpoint
+        # metadata itself, so no run-enriching wrapper is needed here.
         yield saver
 
 
@@ -243,7 +250,7 @@ async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
             result = saver.setup()
             if inspect.isawaitable(result):
                 await result
-        yield saver
+        yield build_run_enriching_checkpointer(saver)
 
 
 @register_checkpointer("redis")
@@ -278,4 +285,4 @@ async def _build_redis(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSa
                     if inspect.isawaitable(result):
                         await result
                     break
-        yield saver
+        yield build_run_enriching_checkpointer(saver)
