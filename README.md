@@ -62,8 +62,10 @@ uvicorn app:app --reload --port 8000
   `GET /assistants/{id}/{schemas|graph|subgraphs}`
 - `POST /threads`, `GET /threads/{id}`, `POST /threads/search`,
   `GET /threads/{id}/state`, `GET|POST /threads/{id}/history`
-- `POST /threads/{id}/runs`, `POST /threads/{id}/runs/stream`,
-  `GET /threads/{id}/runs`, `GET /threads/{id}/runs/{run_id}`
+- `POST /threads/{id}/runs` (background), `POST /threads/{id}/runs/wait`,
+  `POST /threads/{id}/runs/stream`, `GET /threads/{id}/runs`,
+  `GET /threads/{id}/runs/{run_id}`, `GET /threads/{id}/runs/{run_id}/join`,
+  `POST /threads/{id}/runs/{run_id}/cancel`, `DELETE /threads/{id}/runs/{run_id}`
 
 Out of scope for v1: `/store/*`, `/runs/crons`, webhooks, auth.
 

@@ -1,18 +1,27 @@
-"""Run lifecycle: create (sync + streaming), list, get."""
+"""Run lifecycle: background create, wait, stream, join, cancel, delete, list, get.
+
+Every run executes inside a background :class:`asyncio.Task` tracked by the
+:class:`BackgroundRunRegistry`. ``create_run`` returns immediately with a
+``pending`` run; ``wait_run`` / ``join_run`` await the task; ``cancel_run`` and
+the interrupt/rollback multitask strategies cancel it. Streaming runs execute in
+the request (live SSE) but register with the same registry + execution lock so
+multitask admission stays uniform across paths.
+"""
 
 import asyncio
 from typing import Any, AsyncIterator, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
-from langchain_core.callbacks import UsageMetadataCallbackHandler
 
-from skeino.concurrency import ThreadLockManager
+from skeino.concurrency import BackgroundRunRegistry, ThreadLockManager
 from skeino.ops.assistants import AssistantOps
 from skeino.ops.threads import ThreadOps
 from skeino.persistence import MetadataStoreProtocol, RunRow
 from skeino.schemas import (
+    CancelAction,
     JsonValue,
+    MultitaskStrategy,
     RunCreateRequest,
     RunModel,
     RunStatus,
@@ -46,10 +55,13 @@ _RUN_RUNNING: Final[RunStatus] = "running"
 _RUN_SUCCESS: Final[RunStatus] = "success"
 _RUN_ERROR: Final[RunStatus] = "error"
 _RUN_INTERRUPTED: Final[RunStatus] = "interrupted"
+_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
+    {"success", "error", "interrupted", "timeout"}
+)
 
 
 class RunOps:
-    """Create, stream, and inspect runs against a single graph."""
+    """Create, stream, await, cancel, and inspect runs against a single graph."""
 
     def __init__(
         self,
@@ -60,6 +72,7 @@ class RunOps:
         thread_ops: ThreadOps,
         assistant_ops: AssistantOps,
         lock_manager: ThreadLockManager,
+        registry: BackgroundRunRegistry,
         logger: Any | None = None,
     ) -> None:
         """Capture every collaborator a run needs."""
@@ -69,100 +82,143 @@ class RunOps:
         self._thread_ops = thread_ops
         self._assistant_ops = assistant_ops
         self._lock_manager = lock_manager
+        self._registry = registry
         self._logger = logger
 
     async def create_run(self, thread_id: str, request: RunCreateRequest) -> RunModel:
-        """Execute a run to completion and return its metadata."""
-        await self._thread_ops.ensure_thread_for_run(thread_id, request.if_not_exists)
-        self._assistant_ops.ensure_supported(request.assistant_id)
-        self._validate_run_request(request)
-        lock = self._lock_manager.get(thread_id)
-        await self._lock_manager.acquire(lock, request.multitask_strategy, thread_id)
-        run_row = await self._metadata_store.create_run(
-            run_id=str(uuid4()),
-            thread_id=thread_id,
-            assistant_id=request.assistant_id,
-            metadata=request.metadata,
-            kwargs=self._build_run_kwargs(request),
-            multitask_strategy=request.multitask_strategy,
-        )
+        """Start a background run and return its (pending) metadata immediately."""
+        run_row, _task = await self._admit_and_spawn(thread_id, request)
+        return self._run_row_to_model(run_row)
+
+    async def wait_run(
+        self, thread_id: str, request: RunCreateRequest
+    ) -> tuple[JsonValue, int]:
+        """Start a run, wait for it to finish, and return its output + tokens.
+
+        Returns the final graph state values (the run output, matching the
+        LangGraph SDK ``runs.wait`` contract) and the run's total token count
+        for the ``X-Tokens-Used`` header.
+        """
+        run_row, task = await self._admit_and_spawn(thread_id, request)
         run_id = str(run_row["run_id"])
+        await asyncio.wait({task})
+        return await self._collect_terminal_output(thread_id, run_id, task)
 
-        try:
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_BUSY
-            )
-            await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
-            usage_handler = await self._execute_graph_run(
-                thread_id, request, run_id=run_id
-            )
-            await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
-            await self._metadata_store.update_thread(
-                thread_id,
-                status_value=_THREAD_IDLE,
-                mark_state_updated=True,
-            )
-            total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
-            if total_tokens == 0:
-                # Fallback for providers the callback handler can't see. Read
-                # while we still hold the lock; otherwise an enqueued run for
-                # this thread could advance the graph state between release
-                # and the read, yielding another run's totals.
-                total_tokens = await self._total_run_tokens(thread_id)
-        except HTTPException as exc:
-            self._log_error(
-                "Run %s failed for thread %s: %s",
-                run_id,
-                thread_id,
-                exc.detail,
-                exc=exc,
-            )
-            await self._mark_run_failed(run_id, thread_id, str(exc.detail))
-            raise
-        except Exception as exc:
-            self._log_error(
-                "Run %s failed for thread %s: %s", run_id, thread_id, exc, exc=exc
-            )
-            await self._mark_run_failed(run_id, thread_id, str(exc))
+    async def join_run(self, thread_id: str, run_id: str) -> JsonValue:
+        """Wait for a run to reach a terminal state and return its output.
+
+        Mirrors the LangGraph SDK ``runs.join`` contract (returns the final
+        graph state values). If the run is already terminal this returns at once.
+        """
+        run = await self.get_run(thread_id, run_id)  # 404 if unknown
+        task = self._registry.get(run_id)
+        if task is not None:
+            await asyncio.wait({task})
+        elif run.status not in _TERMINAL_STATUSES:
+            # No background task to await and the run is still in flight — a live
+            # streaming run has no joinable server-side handle in v1. Fail fast
+            # rather than return a non-terminal snapshot and break the contract.
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=str(exc),
-            ) from exc
-        finally:
-            lock.release()
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Run {run_id} is {run.status} with no joinable background "
+                    "task; live streaming runs cannot be joined in this version."
+                ),
+            )
+        output, _tokens = await self._collect_terminal_output(thread_id, run_id, task)
+        return output
 
-        run = await self.get_run(thread_id, run_id)
-        # Surface token usage so the gateway can record it against the user's
-        # rate-limit quota. The streaming path reports this via the 'end' event;
-        # here we attach it to the run metadata for the X-Tokens-Used header.
-        if isinstance(run.metadata, dict):
-            run.metadata["total_tokens"] = total_tokens
-        return run
+    async def cancel_run(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        action: CancelAction,
+        wait: bool,
+    ) -> None:
+        """Cancel an in-flight run.
+
+        ``action="interrupt"`` cancels the run and leaves it ``interrupted``;
+        ``action="rollback"`` cancels it and deletes the run row. Returns 409 if
+        the run is already terminal or cannot be cancelled (e.g. a live
+        streaming run, which is cancelled by client disconnect in v1).
+
+        ``rollback`` always waits for the task to fully unwind before deleting,
+        regardless of ``wait`` — otherwise a still-running task could keep
+        mutating thread state (and race the deletion with its own persistence)
+        after the row is already gone.
+        """
+        run = await self.get_run(thread_id, run_id)  # 404 if unknown
+        if run.status in _TERMINAL_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Run {run_id} is already {run.status}; nothing to cancel.",
+            )
+        cancel_wait = wait or action == "rollback"
+        cancelled = await self._registry.cancel(run_id, wait=cancel_wait)
+        if not cancelled:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Run {run_id} has no cancellable background task; "
+                    "live streaming runs are cancelled by client disconnect."
+                ),
+            )
+        if action == "rollback":
+            # rollback always waited above, so the task has fully unwound.
+            await self._metadata_store.delete_run(thread_id, run_id)
+        elif cancel_wait:
+            # We waited for the task to settle; persist ``interrupted`` as an
+            # idempotent backstop in case the task's own handler didn't (e.g. it
+            # was cancelled before its body ever ran).
+            await self._metadata_store.update_run_status(
+                run_id, _RUN_INTERRUPTED, error="Run cancelled."
+            )
+        # else (interrupt, wait=False): don't mark the run terminal eagerly —
+        # the task is still unwinding (and may still hold the execution lock).
+        # Its ``CancelledError`` handler persists ``interrupted`` as it exits.
+
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a terminal run row. Returns 409 if the run is still active."""
+        run = await self.get_run(thread_id, run_id)  # 404 if unknown
+        if run.status not in _TERMINAL_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Run {run_id} is {run.status}; cancel it before deleting.",
+            )
+        await self._metadata_store.delete_run(thread_id, run_id)
 
     async def create_streaming_run(
         self, thread_id: str, request: RunCreateRequest
     ) -> tuple[RunModel, AsyncIterator[str]]:
-        """Create a run and stream its output as SSE."""
+        """Create a run and stream its output as SSE (live, in-request)."""
         await self._thread_ops.ensure_thread_for_run(thread_id, request.if_not_exists)
         self._assistant_ops.ensure_supported(request.assistant_id)
         self._validate_run_request(request)
-        lock = self._lock_manager.get(thread_id)
         stream_modes = coerce_stream_modes(request.stream_mode)
         if "events" in stream_modes and len(stream_modes) > 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="'events' stream_mode cannot be combined with other modes.",
             )
-        # Acquire the lock (enforcing the multitask strategy) *before* creating
-        # the run row or returning the generator. Deferring the acquire into the
-        # generator would let concurrent streaming requests all pass a stale
-        # ``lock.locked()`` check and persist orphan 'pending' rows, silently
-        # degrading reject/rollback/interrupt to enqueue. This mirrors the
-        # sync ``create_run`` path.
-        await self._lock_manager.acquire(lock, request.multitask_strategy, thread_id)
+        run_id = str(uuid4())
+        lock = self._lock_manager.get(thread_id)
+        # Reserve the thread slot under the admission lock so concurrent creates
+        # (streaming or background) see this run as active and cannot silently
+        # degrade reject/rollback/interrupt to enqueue.
+        async with self._registry.admission(thread_id):
+            await self._resolve_multitask(thread_id, request.multitask_strategy)
+            self._registry.register_external(thread_id, run_id)
+        # Acquire the execution lock (``enqueue`` waits here). Unregister on any
+        # failure so a cancelled wait does not leak an active slot.
+        try:
+            await lock.acquire()
+        except BaseException:
+            self._registry.unregister_external(thread_id, run_id)
+            raise
         try:
             run_row = await self._metadata_store.create_run(
-                run_id=str(uuid4()),
+                run_id=run_id,
                 thread_id=thread_id,
                 assistant_id=request.assistant_id,
                 metadata=request.metadata,
@@ -172,6 +228,7 @@ class RunOps:
             run = self._run_row_to_model(run_row)
         except BaseException:
             lock.release()
+            self._registry.unregister_external(thread_id, run_id)
             raise
 
         async def event_stream() -> AsyncIterator[str]:
@@ -283,6 +340,7 @@ class RunOps:
             finally:
                 if lock.locked():
                     lock.release()
+                self._registry.unregister_external(thread_id, run_id)
 
         return run, event_stream()
 
@@ -320,9 +378,211 @@ class RunOps:
             )
         return self._run_row_to_model(row)
 
+    async def shutdown(self) -> None:
+        """Cancel all in-flight background runs (runtime shutdown).
+
+        A task cancelled before it ever started executing never runs its own
+        ``interrupted`` cleanup, so after cancelling we sweep the runs that were
+        active and persist ``interrupted`` for any still left non-terminal — no
+        run row is stranded at ``pending``/``running`` across a restart.
+        """
+        active = self._registry.all_active()
+        await self._registry.shutdown()
+        for thread_id, run_id in active:
+            row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+            if row is not None and str(row["status"]) not in _TERMINAL_STATUSES:
+                await self._mark_run_interrupted(run_id, thread_id)
+
+    # ------------------------------------------------------------------ helpers
+
+    async def _admit_and_spawn(
+        self, thread_id: str, request: RunCreateRequest
+    ) -> tuple[RunRow, asyncio.Task[Any]]:
+        """Admit a run (multitask policy), persist it, and spawn its task.
+
+        Holds the per-thread admission lock across the strategy check, the row
+        insert, and the spawn so the new run is registered as active before the
+        lock is released — no admission can race it.
+        """
+        await self._thread_ops.ensure_thread_for_run(thread_id, request.if_not_exists)
+        self._assistant_ops.ensure_supported(request.assistant_id)
+        self._validate_run_request(request)
+        run_id = str(uuid4())
+        async with self._registry.admission(thread_id):
+            await self._resolve_multitask(thread_id, request.multitask_strategy)
+            run_row = await self._metadata_store.create_run(
+                run_id=run_id,
+                thread_id=thread_id,
+                assistant_id=request.assistant_id,
+                metadata=request.metadata,
+                kwargs=self._build_run_kwargs(request),
+                multitask_strategy=request.multitask_strategy,
+            )
+            task = self._registry.spawn(
+                thread_id,
+                run_id,
+                self._run_to_completion(run_id, thread_id, request),
+            )
+        return run_row, task
+
+    async def _resolve_multitask(
+        self, thread_id: str, strategy: MultitaskStrategy
+    ) -> None:
+        """Apply the multitask strategy against the thread's active runs.
+
+        ``reject`` 409s when busy; ``interrupt`` cancels active background runs;
+        ``rollback`` cancels and deletes them; ``enqueue`` is a no-op (the new
+        run's task simply waits on the execution lock). Live streaming runs have
+        no cancellable task, so interrupt/rollback leave them running and the new
+        run queues behind them (resumable-stream cancellation is a follow-up).
+        """
+        active = self._registry.active_runs(thread_id)
+        if not active:
+            return
+        if strategy == "reject":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Thread {thread_id} already has an active run; "
+                    f"multitask strategy {strategy!r} rejected."
+                ),
+            )
+        if strategy in ("interrupt", "rollback"):
+            for run_id in active:
+                cancelled = await self._registry.cancel(run_id, wait=True)
+                if cancelled and strategy == "rollback":
+                    await self._metadata_store.delete_run(thread_id, run_id)
+
+    async def _run_to_completion(
+        self, run_id: str, thread_id: str, request: RunCreateRequest
+    ) -> int:
+        """Execute a run to completion in the background; return total tokens.
+
+        Acquires the execution lock for the duration (so ``enqueue`` runs
+        serialise — one at a time). Graph failures are persisted and swallowed —
+        the task has no awaiter in the background path, so a raised exception
+        would be logged by asyncio as "never retrieved". ``CancelledError`` is
+        persisted as ``interrupted`` and re-raised so the task is genuinely
+        cancelled.
+        """
+        lock = self._lock_manager.get(thread_id)
+        try:
+            await lock.acquire()
+        except asyncio.CancelledError:
+            # Cancelled while still queued for the lock (e.g. shutdown, or a
+            # superseding interrupt/rollback) before execution began. No lock is
+            # held to release; persist ``interrupted`` so the run row does not
+            # stay stuck at ``pending``.
+            self._log_warning(
+                "Queued run %s cancelled for thread %s", run_id, thread_id
+            )
+            await self._mark_run_interrupted(run_id, thread_id)
+            raise
+        try:
+            await self._metadata_store.update_thread(
+                thread_id, status_value=_THREAD_BUSY
+            )
+            await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
+            usage_handler = await self._execute_graph_run(
+                thread_id, request, run_id=run_id
+            )
+            await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
+            await self._metadata_store.update_thread(
+                thread_id,
+                status_value=_THREAD_IDLE,
+                mark_state_updated=True,
+            )
+            total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
+            if total_tokens == 0:
+                # Fallback for providers the callback handler can't see. Read
+                # while we still hold the lock; otherwise an enqueued run for
+                # this thread could advance the graph state between release and
+                # the read, yielding another run's totals.
+                total_tokens = await self._total_run_tokens(thread_id)
+            return total_tokens
+        except asyncio.CancelledError:
+            self._log_warning(
+                "Background run %s cancelled for thread %s", run_id, thread_id
+            )
+            await self._mark_run_interrupted(run_id, thread_id)
+            raise
+        except Exception as exc:
+            self._log_error(
+                "Run %s failed for thread %s: %s", run_id, thread_id, exc, exc=exc
+            )
+            await self._mark_run_failed(run_id, thread_id, str(exc))
+            return 0
+        finally:
+            lock.release()
+
+    async def _collect_terminal_output(
+        self, thread_id: str, run_id: str, task: asyncio.Task[Any] | None
+    ) -> tuple[JsonValue, int]:
+        """Return ``(output, tokens)`` for a finished run.
+
+        Raises 404 if the run row is gone (it can be deleted by a concurrent
+        ``cancel(action=rollback)`` or ``DELETE`` while a waiter/joiner is in
+        flight) and 500 if the run itself errored.
+        """
+        final = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        if final is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Run {run_id} not found for thread {thread_id}.",
+            )
+        if str(final["status"]) == _RUN_ERROR:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=final.get("error") or "Run failed.",
+            )
+        tokens = 0
+        if task is not None and not task.cancelled():
+            result = task.result()
+            tokens = result if isinstance(result, int) else 0
+        output = await self._final_state_values(thread_id, run_id)
+        return output, tokens
+
+    async def _final_state_values(self, thread_id: str, run_id: str) -> JsonValue:
+        """Return the requested run's final graph state values (its output).
+
+        Reads the most recent checkpoint tagged with this ``run_id`` so a
+        follow-on enqueued run — which can start the instant this run releases
+        the execution lock — cannot leak its own state into this waiter's output
+        (the LangGraph ``runs.wait``/``runs.join`` contract returns output for
+        the requested run). Falls back to the latest thread state when no
+        run-scoped checkpoint is available (e.g. no checkpointer).
+        """
+        config = {"configurable": {"thread_id": thread_id}}
+        get_history = getattr(self._graph, "aget_state_history", None)
+        if get_history is not None:
+            try:
+                async for snapshot in get_history(
+                    config, filter={"run_id": run_id}, limit=1
+                ):
+                    return serialize_value(getattr(snapshot, "values", None))
+            except Exception as exc:
+                # Run-scoped read is best-effort; fall back to the latest state.
+                self._log_warning(
+                    "Run-scoped state read failed for run %s; using latest "
+                    "thread state: %s",
+                    run_id,
+                    exc,
+                )
+        try:
+            snapshot = await self._graph.aget_state(config)
+        except Exception as exc:
+            self._log_error(
+                "Failed to read final state for thread %s: %s",
+                thread_id,
+                exc,
+                exc=exc,
+            )
+            return None
+        return serialize_value(getattr(snapshot, "values", None))
+
     async def _execute_graph_run(
         self, thread_id: str, request: RunCreateRequest, run_id: str | None = None
-    ) -> UsageMetadataCallbackHandler:
+    ) -> Any:
         """Execute a graph run without streaming; return its usage handler."""
         runnable_input = self._resolve_run_input(request)
         config = build_thread_config(
@@ -447,10 +707,10 @@ class RunOps:
             )
 
     async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> None:
-        """Persist client-disconnect state; best-effort, never raises."""
+        """Persist cancellation/disconnect state; best-effort, never raises."""
         try:
             await self._metadata_store.update_run_status(
-                run_id, _RUN_INTERRUPTED, error="Client disconnected."
+                run_id, _RUN_INTERRUPTED, error="Run interrupted."
             )
             await self._metadata_store.update_thread(
                 thread_id, status_value=_THREAD_IDLE

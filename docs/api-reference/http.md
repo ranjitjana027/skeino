@@ -63,10 +63,14 @@ Prefix: `/threads/{thread_id}`
 
 | Method | Path | Request | Response | Notes |
 | --- | --- | --- | --- | --- |
-| `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | Execute to completion. Headers: `Location`, `X-Tokens-Used`. |
+| `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | **Background** create — returns immediately with a `pending`/`running` run. Header: `Location`. |
+| `POST` | `/threads/{thread_id}/runs/wait` | `RunCreateRequest` | output values | Run to completion and return the final graph state values. Header: `X-Tokens-Used`. |
 | `POST` | `/threads/{thread_id}/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`). See [Streaming](../concepts/streaming.md). |
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
+| `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values. |
+| `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
+| `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 
 ### Key `RunCreateRequest` fields
 
