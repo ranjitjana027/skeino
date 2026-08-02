@@ -10,6 +10,20 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.1.1] - 2026-08-02
+
+### Fixed
+
+- Request bodies now appear in the generated OpenAPI schema (`/openapi.json`,
+  `/docs`, and the Scalar API explorer). skeino's routers parse JSON bodies by
+  hand to tolerate `text/plain` payloads, which previously kept their request
+  models (`RunCreateRequest`, `ThreadCreateRequest`, `ThreadSearchRequest`,
+  `ThreadStateUpdateRequest`, `ThreadStateSearchRequest`, `AssistantSearchRequest`,
+  `ThreadPatchRequest`, `CheckpointConfigModel`) — and their per-field
+  descriptions — out of the documented schema. The tolerant parsing and the 422
+  error contract are unchanged. ([#67](https://github.com/ranjitjana027/skeino/issues/67))
+
+
 ## [2.1.0] - 2026-06-26
 
 ### Changed
@@ -190,7 +204,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...v2.0.1
