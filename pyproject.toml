@@ -38,7 +38,7 @@ langgraph = "^1.0.0"
 langgraph-checkpoint = ">=2.0.0"
 langchain-core = "*"
 python-dotenv = ">=1.0.1"
-uvicorn = ">=0.41,<0.52"
+uvicorn = ">=0.41,<0.53"
 # All database backends are OPTIONAL extras, imported lazily so the default
 # install only ships the in-memory checkpointer. Pick a backend with the
 # matching extra: skeino[postgres], skeino[sqlite], or skeino[mongodb].
