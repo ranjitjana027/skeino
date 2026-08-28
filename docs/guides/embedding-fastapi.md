@@ -23,9 +23,11 @@ skeino_app = create_app(
 
 root = FastAPI()
 
+
 @root.get("/")
 def home():
     return {"service": "my-product"}
+
 
 # skeino's endpoints are now under /agent (e.g. /agent/threads, /agent/info)
 root.mount("/agent", skeino_app)
@@ -55,6 +57,7 @@ app = create_app(
     settings=SkeinoSettings(),
 )
 
+
 @app.get("/healthz")
 def healthz():
     return {"ok": True}
@@ -72,9 +75,11 @@ you control. With the mount pattern, you can guard the whole sub-app:
 ```python
 from fastapi import Depends, HTTPException, Request
 
+
 async def require_api_key(request: Request):
     if request.headers.get("x-api-key") != EXPECTED_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 root.mount("/agent", skeino_app)
 # Apply the dependency at the router/route level on `root`, or wrap skeino_app
