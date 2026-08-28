@@ -78,12 +78,19 @@ history.
 
 ## Run lifecycle
 
-A run is created against an existing thread:
+A run is created against an existing thread. Runs execute **in the background**:
+the graph runs in an `asyncio` task while the request returns. Pick how you want
+to consume the result:
 
-- `POST /threads/{id}/runs` — execute to completion and return the final
-  [`RunModel`][skeino.schemas.runs.RunModel].
+- `POST /threads/{id}/runs` — **background** create. Returns immediately with a
+  `pending`/`running` [`RunModel`][skeino.schemas.runs.RunModel]; poll
+  `GET .../runs/{run_id}` or join.
+- `POST /threads/{id}/runs/wait` — run to completion and return the final graph
+  state values (the run output, matching the LangGraph SDK `runs.wait`).
 - `POST /threads/{id}/runs/stream` — execute and stream events over SSE (see
   [Streaming](streaming.md)).
+- `GET /threads/{id}/runs/{run_id}/join` — wait for an in-flight run to reach a
+  terminal state and return its final graph state values.
 
 A run progresses through these statuses:
 
@@ -93,6 +100,18 @@ The run row records the `assistant_id`, the serialized invocation `kwargs`
 (input, config, checkpoint selection, stream options), the `multitask_strategy`,
 and — on failure — an `error` message. List a thread's runs with
 `GET /threads/{id}/runs` and fetch one with `GET /threads/{id}/runs/{run_id}`.
+
+### Cancel and delete
+
+- `POST /threads/{id}/runs/{run_id}/cancel?action=interrupt` cancels an in-flight
+  run and leaves it `interrupted`; `action=rollback` cancels it **and** deletes
+  the run row. Pass `wait=true` to block until the cancellation has settled.
+- `DELETE /threads/{id}/runs/{run_id}` removes a **terminal** run row (it returns
+  **409** while the run is still active — cancel it first).
+
+A live SSE stream (`/runs/stream`) is cancelled by the client disconnecting;
+cross-request cancellation of a streaming run (reconnect/resume) is a planned
+follow-up.
 
 ### Input vs. command
 
@@ -109,10 +128,11 @@ demand.
 
 ## Concurrency: one run at a time
 
-skeino enforces **at most one in-flight run per thread**. Each thread has its own
-lock, acquired before the run row is created (and, for streaming runs, before the
-SSE generator is returned — so a queued caller can't observe a stale "free"
-lock).
+skeino runs **at most one *executing* run per thread**. With the `enqueue`
+strategy, additional background runs can sit `pending`, queued behind the
+execution lock — only one runs at any moment. Each thread has its own execution
+lock held by the running task; admission decisions are serialized by a per-thread
+admission lock, so a queued caller can't observe a stale "free" slot.
 
 The `multitask_strategy` on the run request decides what happens when a thread is
 already busy:
@@ -121,8 +141,12 @@ already busy:
 | --- | --- |
 | `enqueue` (default) | Wait for the active run to finish, then proceed. |
 | `reject` | Fail immediately with **409 Conflict**. |
-| `rollback` | Fail immediately with **409 Conflict**. |
-| `interrupt` | Fail immediately with **409 Conflict**. |
+| `rollback` | Cancel **and delete** the active run, then start the new one. |
+| `interrupt` | Cancel the active run (left `interrupted`), then start the new one. |
+
+`interrupt`/`rollback` cancel active **background** runs. A live SSE streaming run
+has no cancellable server-side handle, so a new run queues behind it instead
+(consistent with `enqueue`) until resumable streaming lands.
 
 !!! info "Single-process scope"
     Locks are in-process `asyncio` locks, which is correct for a single-process

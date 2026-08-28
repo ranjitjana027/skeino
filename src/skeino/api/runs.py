@@ -1,13 +1,19 @@
-"""Run create, list, get, and streaming routes."""
+"""Run create (background), wait, join, cancel, delete, list, get, streaming."""
 
 from uuid import UUID
 
-from fastapi import APIRouter, Query, Request, Response
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 
 from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model, run_location
-from skeino.schemas import RunCreateRequest, RunModel, RunStatus
+from skeino.schemas import (
+    CancelAction,
+    JsonValue,
+    RunCreateRequest,
+    RunModel,
+    RunStatus,
+)
 
 router = APIRouter(prefix="/threads/{thread_id}")
 
@@ -19,14 +25,26 @@ async def create_run(
     response: Response,
     thread_id: UUID,
 ) -> RunModel:
-    """Execute a run to completion and return its metadata."""
+    """Start a background run and return its (pending) metadata immediately."""
     payload = await parse_request_model(request, RunCreateRequest)
     state = get_state(request)
     run = await state.run_ops.create_run(str(thread_id), payload)
     response.headers["Location"] = run_location(thread_id, run.run_id)
-    if isinstance(run.metadata, dict) and "total_tokens" in run.metadata:
-        response.headers["X-Tokens-Used"] = str(run.metadata["total_tokens"])
     return run
+
+
+@router.post("/runs/wait")
+async def wait_run(
+    request: Request,
+    response: Response,
+    thread_id: UUID,
+) -> JsonValue:
+    """Run to completion and return the final graph state values (output)."""
+    payload = await parse_request_model(request, RunCreateRequest)
+    state = get_state(request)
+    output, total_tokens = await state.run_ops.wait_run(str(thread_id), payload)
+    response.headers["X-Tokens-Used"] = str(total_tokens)
+    return output
 
 
 @router.post("/runs/stream")
@@ -69,3 +87,32 @@ async def get_run(request: Request, thread_id: UUID, run_id: UUID) -> RunModel:
     """Return a single run by ID."""
     state = get_state(request)
     return await state.run_ops.get_run(str(thread_id), str(run_id))
+
+
+@router.get("/runs/{run_id}/join")
+async def join_run(request: Request, thread_id: UUID, run_id: UUID) -> JsonValue:
+    """Wait for a run to finish and return the final graph state values."""
+    state = get_state(request)
+    return await state.run_ops.join_run(str(thread_id), str(run_id))
+
+
+@router.post("/runs/{run_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)
+async def cancel_run(
+    request: Request,
+    thread_id: UUID,
+    run_id: UUID,
+    action: CancelAction = Query(default="interrupt"),
+    wait: bool = Query(default=False),
+) -> None:
+    """Cancel an in-flight run (``interrupt`` keeps it, ``rollback`` deletes it)."""
+    state = get_state(request)
+    await state.run_ops.cancel_run(
+        str(thread_id), str(run_id), action=action, wait=wait
+    )
+
+
+@router.delete("/runs/{run_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_run(request: Request, thread_id: UUID, run_id: UUID) -> None:
+    """Delete a terminal run row."""
+    state = get_state(request)
+    await state.run_ops.delete_run(str(thread_id), str(run_id))

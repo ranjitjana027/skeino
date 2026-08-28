@@ -263,6 +263,10 @@ class MongoMetadataStore:
         cursor = self._runs.find(query).sort("created_at", -1).skip(offset).limit(limit)
         return [self._run_row(doc) async for doc in cursor]
 
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a single run document scoped to its thread."""
+        await self._runs.delete_one({"_id": run_id, "thread_id": thread_id})
+
     @staticmethod
     def _ttl_payload(
         ttl: ThreadTtlConfig | None, now: datetime

@@ -188,3 +188,9 @@ class InMemoryMetadataStore:
             rows = [r for r in rows if r["status"] == status_value]
         rows.sort(key=lambda r: r["created_at"], reverse=True)
         return rows[offset : offset + limit]
+
+    async def delete_run(self, thread_id: str, run_id: str) -> None:
+        """Delete a run row scoped to ``thread_id``."""
+        row = self._runs.get(run_id)
+        if row is not None and str(row["thread_id"]) == thread_id:
+            del self._runs[run_id]
