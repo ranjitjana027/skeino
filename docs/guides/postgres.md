@@ -78,6 +78,7 @@ async def build_graph(checkpointer):
     builder = StateGraph(...)
     return builder.compile(checkpointer=checkpointer)
 
+
 app = create_app(
     graphs={"my_agent": build_graph},
     settings=SkeinoSettings(

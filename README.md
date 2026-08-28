@@ -46,6 +46,7 @@ app = create_app(
 ```python
 # langgraph.json driven
 from skeino import from_langgraph_json
+
 app = from_langgraph_json("langgraph.json")
 ```
 
