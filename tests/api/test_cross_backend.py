@@ -101,15 +101,13 @@ def test_checkpoint_history_and_time_travel(any_backend: Backend) -> None:
         snapshots = history.json()
         assert len(snapshots) >= 2
 
-        # Postgres checkpoints are stamped with the run id by skeino's
-        # run-enriching wrapper; mongo's saver merges config metadata itself.
-        # The redis builder has neither, so its snapshots carry no run_id —
-        # pinned here as the current (known) gap.
+        # Every backend stamps checkpoints with their run id: postgres, sqlite,
+        # and redis via skeino's run-enriching wrapper; mongo's saver merges
+        # config metadata (and run_id) itself. So checkpoint->run grouping (e.g.
+        # for Studio) works uniformly.
         run_ids = {r["run_id"] for r in client.get(f"/threads/{thread_id}/runs").json()}
-        if any_backend.name == "redis":
-            assert all("run_id" not in s["metadata"] for s in snapshots)
-        else:
-            assert {s["metadata"]["run_id"] for s in snapshots} <= run_ids
+        assert {s["metadata"]["run_id"] for s in snapshots} <= run_ids
+        assert all(s["metadata"].get("run_id") for s in snapshots)
 
         # History is newest-first: the latest state has run two's echo, the
         # oldest checkpoint predates it. Exact counts are durability-dependent,
