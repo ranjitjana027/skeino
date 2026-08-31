@@ -12,8 +12,10 @@ closed by :meth:`MetadataStore.aclose` — see that method and
 ``_connection`` for why a connection *per operation* was untenable.
 """
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
@@ -93,6 +95,12 @@ _INDEXES: Final[tuple[tuple[str, str, str], ...]] = (
 # A concurrent build that fails leaves the index behind marked invalid, and
 # CREATE INDEX IF NOT EXISTS then skips it forever — the table would stay
 # silently unindexed. Detect that leftover so it can be dropped and rebuilt.
+#
+# indisvalid = false does NOT mean "interrupted", though: CREATE INDEX
+# CONCURRENTLY writes its catalog row invalid and only flips it at the end, so a
+# peer's in-progress build looks identical to a leftover. Dropping one would
+# blow up that peer's build. The advisory lock below is what makes the
+# distinction safe — inside it, no other skeino process is building.
 _INVALID_INDEX_SQL: Final[str] = """
 SELECT 1
 FROM pg_class c
@@ -100,11 +108,34 @@ JOIN pg_index i ON i.indexrelid = c.oid
 WHERE c.relname = %s AND NOT i.indisvalid
 """
 
+# Arbitrary but fixed application-wide key: every skeino process must pick the
+# same number for the lock to mean anything. Session-level, so it is held for
+# the whole probe/drop/create sequence and released in `finally` (and by the
+# server anyway when the connection closes).
+_INDEX_LOCK_KEY: Final[int] = 8_675_309_001
+_TRY_INDEX_LOCK_SQL: Final[str] = "SELECT pg_try_advisory_lock(%s)"
+_UNLOCK_INDEX_SQL: Final[str] = "SELECT pg_advisory_unlock(%s)"
+
+
+def _first_column(row: Any) -> Any:
+    """Return the single value of a one-column result row.
+
+    The index connection is opened without a row factory, so rows arrive as
+    tuples; this stays correct if one is ever configured.
+    """
+    if row is None:
+        return None
+    if isinstance(row, dict):
+        return next(iter(row.values()), None)
+    return row[0]
+
 
 def _utcnow() -> datetime:
     """Return the current UTC timestamp."""
     return datetime.now(UTC)
 
+
+logger = logging.getLogger(__name__)
 
 _POSTGRES_EXTRA_HINT: Final[str] = (
     "The 'postgres' metadata store requires the skeino[postgres] extra "
@@ -150,6 +181,11 @@ class MetadataStore:
         self._postgres_uri = postgres_uri
         self._pool_max_size = pool_max_size
         self._pool: Any | None = None
+        # Opening the pool awaits, so the None check and the assignment in
+        # _ensure_pool are not atomic on their own: concurrent first callers
+        # would each open a pool and all but the last would be unreachable —
+        # and therefore never closed. This serialises that one-time setup.
+        self._pool_lock = asyncio.Lock()
 
     async def _ensure_pool(self) -> Any:
         """Return the shared connection pool, opening it on first use.
@@ -171,25 +207,41 @@ class MetadataStore:
         prepares on the *first* execution — the opposite of disabling.
         Mirrors the checkpointer pool in ``checkpointer``.
         """
-        if self._pool is not None:
-            return self._pool
-        _, dict_row = _pg()
-        async_connection_pool = _pg_pool()
+        pool = self._pool
+        if pool is not None:
+            return pool
+        async with self._pool_lock:
+            # Re-read under the lock: another caller may have opened the pool
+            # while this one waited for it.
+            pool = self._pool
+            if pool is not None:
+                return pool
+            _, dict_row = _pg()
+            async_connection_pool = _pg_pool()
 
-        async def _check(conn: Any) -> None:
-            await conn.execute("SELECT 1")
+            async def _check(conn: Any) -> None:
+                await conn.execute("SELECT 1")
 
-        pool = async_connection_pool(
-            conninfo=self._postgres_uri,
-            min_size=1,
-            max_size=self._pool_max_size,
-            open=False,
-            check=_check,
-            kwargs={"prepare_threshold": None, "row_factory": dict_row},
-        )
-        await pool.open(wait=True)
-        self._pool = pool
-        return pool
+            pool = async_connection_pool(
+                conninfo=self._postgres_uri,
+                min_size=1,
+                max_size=self._pool_max_size,
+                open=False,
+                check=_check,
+                kwargs={"prepare_threshold": None, "row_factory": dict_row},
+            )
+            try:
+                await pool.open(wait=True)
+            except BaseException:
+                # Includes CancelledError and timeouts: open() may have brought
+                # connections up before failing, and this pool is about to
+                # become unreachable, so aclose() could never close it. Best
+                # effort — never mask the original failure with a close error.
+                with suppress(Exception):
+                    await pool.close()
+                raise
+            self._pool = pool
+            return pool
 
     @asynccontextmanager
     async def _connection(self) -> AsyncIterator[Any]:
@@ -229,18 +281,51 @@ class MetadataStore:
         An earlier build that failed leaves an invalid index that
         ``IF NOT EXISTS`` would skip forever, so any such leftover is dropped
         and rebuilt rather than silently tolerated.
+
+        The whole probe/drop/create sequence runs under a session-level
+        advisory lock, because ``indisvalid = false`` also describes an index a
+        *peer* is building right now — ``CREATE INDEX CONCURRENTLY`` publishes
+        its catalog row invalid and only flips it at the end. Without the lock,
+        two replicas starting together would let the second drop the first's
+        live build. The lock is tried, not waited on: a peer holding it is
+        already creating these exact indexes, and blocking would reintroduce
+        the startup stall this method exists to avoid.
         """
         psycopg, _ = _pg()
         conn = await psycopg.AsyncConnection.connect(
             self._postgres_uri, autocommit=True
         )
         try:
-            for name, create_sql, drop_sql in _INDEXES:
+            async with conn.cursor() as cursor:
+                await cursor.execute(_TRY_INDEX_LOCK_SQL, (_INDEX_LOCK_KEY,))
+                acquired = _first_column(await cursor.fetchone())
+            if not acquired:
+                # Another process holds it and is running this same sequence.
+                # Waiting would stall this instance's startup for the length of
+                # its build, which is the cost this whole change exists to
+                # avoid, and the indexes it creates are identical to ours.
+                logger.info(
+                    "Another process is building the metadata-store indexes; "
+                    "skipping index maintenance for this instance."
+                )
+                return
+            try:
+                for name, create_sql, drop_sql in _INDEXES:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(_INVALID_INDEX_SQL, (name,))
+                        if await cursor.fetchone() is not None:
+                            # Safe under the lock: no peer build is in flight,
+                            # so an invalid index really is an interrupted one.
+                            logger.warning(
+                                "Rebuilding invalid metadata-store index %s "
+                                "left behind by an interrupted build.",
+                                name,
+                            )
+                            await cursor.execute(drop_sql)
+                        await cursor.execute(create_sql)
+            finally:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(_INVALID_INDEX_SQL, (name,))
-                    if await cursor.fetchone() is not None:
-                        await cursor.execute(drop_sql)
-                    await cursor.execute(create_sql)
+                    await cursor.execute(_UNLOCK_INDEX_SQL, (_INDEX_LOCK_KEY,))
         finally:
             await conn.close()
 

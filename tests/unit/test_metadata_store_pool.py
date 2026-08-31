@@ -7,6 +7,7 @@ tests pin the pooling without needing a live server: psycopg and psycopg_pool
 are swapped for fakes that count what gets opened.
 """
 
+import asyncio
 from typing import Any
 from uuid import uuid4
 
@@ -74,6 +75,11 @@ class _FakePool:
         _FakePool.instances.append(self)
 
     async def open(self, wait: bool = False) -> None:
+        # Must actually suspend: bringing a real pool up awaits, and that is the
+        # window in which concurrent first callers each see `_pool is None`.
+        # Without a yield here the interleaving never happens and any test of
+        # it passes vacuously.
+        await asyncio.sleep(0)
         self.opened += 1
 
     async def close(self) -> None:
@@ -88,6 +94,7 @@ class _FakeDirectCursor:
 
     def __init__(self, conn: "_FakeDirectConnection") -> None:
         self._conn = conn
+        self._last = ""
 
     async def __aenter__(self) -> "_FakeDirectCursor":
         return self
@@ -96,9 +103,12 @@ class _FakeDirectCursor:
         return None
 
     async def execute(self, query: str, values: Any = None) -> None:
+        self._last = query
         self._conn.queries.append(query)
 
     async def fetchone(self) -> Any:
+        if "pg_try_advisory_lock" in self._last:
+            return (self._conn.lock_acquired,)
         # Stands in for the pg_index invalid-index probe.
         return (1,) if self._conn.invalid_indexes else None
 
@@ -114,6 +124,7 @@ class _FakeDirectConnection:
         self.queries: list[str] = []
         self.closed = 0
         self.invalid_indexes = False
+        self.lock_acquired = True
         _FakeDirectConnection.instances.append(self)
 
     def cursor(self) -> _FakeDirectCursor:
@@ -245,3 +256,95 @@ async def test_invalid_leftover_index_is_dropped_and_rebuilt(
     assert all("CONCURRENTLY" in q for q in dropped), dropped
     # Every drop must be followed by a rebuild, else the repair loses the index.
     assert len([q for q in queries if q.startswith("CREATE INDEX")]) == 2
+
+
+async def test_index_maintenance_holds_an_advisory_lock(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    # indisvalid = false also describes an index a peer is building right now:
+    # CREATE INDEX CONCURRENTLY publishes its catalog row invalid and flips it
+    # only at the end. Probing and dropping without a lock lets a second replica
+    # drop a first replica's live build.
+    await pooled_store.setup()
+
+    queries = _FakeDirectConnection.instances[0].queries
+    assert "pg_try_advisory_lock" in queries[0], (
+        f"index maintenance did not take the lock first: {queries[:2]}"
+    )
+    probe = next(i for i, q in enumerate(queries) if "indisvalid" in q)
+    assert probe > 0, "the invalid-index probe ran outside the lock"
+    assert any("pg_advisory_unlock" in q for q in queries), "lock never released"
+    assert (
+        queries.index(next(q for q in queries if "pg_advisory_unlock" in q)) > probe
+    ), "lock released before the probe/create sequence finished"
+
+
+async def test_index_maintenance_defers_to_the_lock_holder(
+    monkeypatch: pytest.MonkeyPatch, pooled_store: ms.MetadataStore
+) -> None:
+    # A peer already holds the lock and is creating these exact indexes.
+    # Touching the catalog anyway is what would kill its in-flight build.
+    original = _FakeDirectConnection.__init__
+
+    def _init(self: Any, conninfo: str, **kwargs: Any) -> None:
+        original(self, conninfo, **kwargs)
+        self.lock_acquired = False
+        self.invalid_indexes = True
+
+    monkeypatch.setattr(_FakeDirectConnection, "__init__", _init)
+
+    await pooled_store.setup()
+
+    queries = _FakeDirectConnection.instances[0].queries
+    assert not any("DROP INDEX" in q for q in queries), (
+        f"dropped an index while a peer held the build lock: {queries}"
+    )
+    assert not any(q.startswith("CREATE INDEX") for q in queries), queries
+    assert _FakeDirectConnection.instances[0].closed == 1
+
+
+async def test_concurrent_first_callers_open_exactly_one_pool(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    # Opening awaits, so the `_pool is None` check and the assignment are not
+    # atomic: every concurrent first caller would build its own pool and all but
+    # the last would be unreachable — and so never closed by aclose().
+    tid = str(uuid4())
+    await asyncio.gather(*(pooled_store.fetch_thread_row(tid) for _ in range(8)))
+
+    assert len(_FakePool.instances) == 1, (
+        f"{len(_FakePool.instances)} pools opened concurrently — all but one "
+        "are unreachable and leak their connections"
+    )
+
+    await pooled_store.aclose()
+    assert _FakePool.instances[0].closed == 1
+
+
+async def test_failed_open_closes_the_pool_it_abandoned(
+    monkeypatch: pytest.MonkeyPatch, pooled_store: ms.MetadataStore
+) -> None:
+    # open() can bring connections up before failing. That pool is about to go
+    # out of scope, so if it is not closed here nothing can ever close it.
+    # Fail only the first open. monkeypatch.undo() is not usable here: this
+    # fixture shares its monkeypatch with pooled_store, so undoing would also
+    # restore the real psycopg_pool.
+    opens = {"n": 0}
+
+    async def _boom_once(self: Any, wait: bool = False) -> None:
+        opens["n"] += 1
+        self.opened += 1
+        if opens["n"] == 1:
+            raise TimeoutError("pool did not come up in time")
+
+    monkeypatch.setattr(_FakePool, "open", _boom_once)
+
+    with pytest.raises(TimeoutError):
+        await pooled_store.fetch_thread_row(str(uuid4()))
+
+    assert _FakePool.instances[0].closed == 1, "abandoned pool was left open"
+
+    # A failed open must not poison the store: a later call retries cleanly.
+    await pooled_store.fetch_thread_row(str(uuid4()))
+    assert len(_FakePool.instances) == 2
+    assert _FakePool.instances[1].opened == 1
