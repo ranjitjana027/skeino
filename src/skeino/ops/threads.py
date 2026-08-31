@@ -1,7 +1,8 @@
 """Thread CRUD, state, and history operations."""
 
+import asyncio
 from datetime import datetime
-from typing import Any
+from typing import Any, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -27,6 +28,11 @@ from skeino.serialization import (
     serialize_state_snapshot,
     serialize_value,
 )
+
+# How many rows of a thread-search page are enriched with graph state at once.
+# Sized to sit under the default checkpointer pool (10 connections) so a search
+# burst cannot starve concurrent runs of a connection.
+_SEARCH_ENRICH_CONCURRENCY: Final[int] = 8
 
 
 def _to_isoformat(value: datetime | None) -> str | None:
@@ -204,17 +210,28 @@ class ThreadOps:
         return await self.build_model_from_row(row)
 
     async def search(self, request: ThreadSearchRequest) -> list[ThreadModel]:
-        """Return threads enriched with their latest LangGraph state."""
+        """Return threads enriched with their latest LangGraph state.
+
+        Enrichment is one checkpoint read per row, so it runs concurrently under
+        a semaphore rather than one round trip after another — a page of
+        ``limit`` threads used to cost ``limit`` serial reads. The bound keeps
+        the burst inside the checkpointer's connection pool; results keep the
+        order the store returned them in.
+        """
         rows = await self._metadata_store.search_thread_rows(request)
-        results: list[ThreadModel] = []
-        for row in rows:
-            if not _match_metadata_filters(row["metadata"], request.metadata):
-                continue
-            model = await self.build_model_from_row(row)
-            if not _match_value_filters(model.values, request.values):
-                continue
-            results.append(model)
-        return results
+        matched = [
+            row
+            for row in rows
+            if _match_metadata_filters(row["metadata"], request.metadata)
+        ]
+        semaphore = asyncio.Semaphore(_SEARCH_ENRICH_CONCURRENCY)
+
+        async def enrich(row: ThreadRow) -> ThreadModel:
+            async with semaphore:
+                return await self.build_model_from_row(row)
+
+        models = await asyncio.gather(*(enrich(row) for row in matched))
+        return [m for m in models if _match_value_filters(m.values, request.values)]
 
     async def get_state(
         self,
@@ -229,6 +246,24 @@ class ThreadOps:
         (time travel); otherwise the latest checkpoint is returned.
         """
         await self.ensure_exists(thread_id)
+        return await self._read_state(
+            thread_id, subgraphs=subgraphs, checkpoint=checkpoint
+        )
+
+    async def _read_state(
+        self,
+        thread_id: str,
+        *,
+        subgraphs: bool = False,
+        checkpoint: CheckpointConfigModel | None = None,
+    ) -> ThreadStateModel:
+        """Read thread state without re-proving the thread exists.
+
+        Callers that already hold the thread's metadata row have their answer;
+        making them pay ``ensure_exists`` again costs a second round trip per
+        thread, which is what turned ``search`` into an N+1 over the metadata
+        store.
+        """
         config = build_thread_config(thread_id, {}, checkpoint)
         snapshot = await self._graph.aget_state(config, subgraphs=subgraphs)
         return serialize_state_snapshot(snapshot)
@@ -327,7 +362,9 @@ class ThreadOps:
         values: dict[str, Any] = {}
         interrupts: Any = []
         try:
-            state = await self.get_state(thread_id)
+            # _read_state, not get_state: `row` is the existence proof, and this
+            # runs once per row in search().
+            state = await self._read_state(thread_id)
             resolved_values: dict[str, Any] = (
                 state.values
                 if isinstance(state.values, dict)
