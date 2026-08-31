@@ -83,12 +83,63 @@ class _FakePool:
         return _ConnectionCheckout(self)
 
 
+class _FakeDirectCursor:
+    """Cursor on the standalone connection used for index builds."""
+
+    def __init__(self, conn: "_FakeDirectConnection") -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> "_FakeDirectCursor":
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        return None
+
+    async def execute(self, query: str, values: Any = None) -> None:
+        self._conn.queries.append(query)
+
+    async def fetchone(self) -> Any:
+        # Stands in for the pg_index invalid-index probe.
+        return (1,) if self._conn.invalid_indexes else None
+
+
+class _FakeDirectConnection:
+    """Stands in for psycopg.AsyncConnection.connect()."""
+
+    instances: list["_FakeDirectConnection"] = []
+
+    def __init__(self, conninfo: str, **kwargs: Any) -> None:
+        self.conninfo = conninfo
+        self.kwargs = kwargs
+        self.queries: list[str] = []
+        self.closed = 0
+        self.invalid_indexes = False
+        _FakeDirectConnection.instances.append(self)
+
+    def cursor(self) -> _FakeDirectCursor:
+        return _FakeDirectCursor(self)
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
+class _FakeAsyncConnection:
+    @staticmethod
+    async def connect(conninfo: str, **kwargs: Any) -> _FakeDirectConnection:
+        return _FakeDirectConnection(conninfo, **kwargs)
+
+
+class _FakePsycopg:
+    AsyncConnection = _FakeAsyncConnection
+
+
 @pytest.fixture
 def pooled_store(monkeypatch: pytest.MonkeyPatch) -> ms.MetadataStore:
     """A MetadataStore whose psycopg imports are replaced with fakes."""
     _FakePool.instances.clear()
+    _FakeDirectConnection.instances.clear()
     monkeypatch.setattr(ms, "_pg_pool", lambda: _FakePool)
-    monkeypatch.setattr(ms, "_pg", lambda: (object(), object()))
+    monkeypatch.setattr(ms, "_pg", lambda: (_FakePsycopg, object()))
     return ms.MetadataStore("postgresql://fake/db")
 
 
@@ -119,7 +170,9 @@ async def test_pool_is_configured_for_a_transaction_mode_pooler(
     await pooled_store.fetch_thread_row(str(uuid4()))
 
     kwargs = _FakePool.instances[0].kwargs
-    assert kwargs["kwargs"]["prepare_threshold"] == 0
+    # None disables prepared statements; 0 would prepare on the FIRST
+    # execution, which is what breaks behind a transaction-mode pooler.
+    assert kwargs["kwargs"]["prepare_threshold"] is None
     assert kwargs["check"] is not None
     assert kwargs["max_size"] == 10
 
@@ -143,3 +196,52 @@ async def test_aclose_is_a_noop_when_nothing_was_opened(
     # app.py registers aclose *before* setup() so a failed setup still unwinds.
     await pooled_store.aclose()
     assert _FakePool.instances == []
+
+
+async def test_indexes_are_built_concurrently_outside_a_transaction(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    # A plain CREATE INDEX locks out writes for the whole scan, so rolling this
+    # out against an existing large app_threads would stall traffic on every
+    # instance's startup. CONCURRENTLY cannot run in a transaction, so it must
+    # go over its own autocommit connection rather than a pooled one.
+    await pooled_store.setup()
+
+    pooled = _FakePool.instances[0].conn.queries
+    assert not any("INDEX" in q for q in pooled), (
+        "indexes were built on the pooled (transactional) connection"
+    )
+
+    assert len(_FakeDirectConnection.instances) == 1
+    direct = _FakeDirectConnection.instances[0]
+    assert direct.kwargs.get("autocommit") is True, (
+        "CREATE INDEX CONCURRENTLY cannot run inside a transaction"
+    )
+    created = [q for q in direct.queries if q.startswith("CREATE INDEX")]
+    assert len(created) == 2
+    assert all("CONCURRENTLY" in q for q in created), created
+    assert direct.closed == 1, "the index connection was not closed"
+
+
+async def test_invalid_leftover_index_is_dropped_and_rebuilt(
+    monkeypatch: pytest.MonkeyPatch, pooled_store: ms.MetadataStore
+) -> None:
+    # A concurrent build that fails leaves an INVALID index behind. CREATE INDEX
+    # IF NOT EXISTS then skips it forever, so the table stays silently
+    # unindexed — the failure mode this repair exists to prevent.
+    original = _FakeDirectConnection.__init__
+
+    def _init(self: Any, conninfo: str, **kwargs: Any) -> None:
+        original(self, conninfo, **kwargs)
+        self.invalid_indexes = True
+
+    monkeypatch.setattr(_FakeDirectConnection, "__init__", _init)
+
+    await pooled_store.setup()
+
+    queries = _FakeDirectConnection.instances[0].queries
+    dropped = [q for q in queries if q.startswith("DROP INDEX")]
+    assert len(dropped) == 2, f"invalid indexes were not dropped: {queries}"
+    assert all("CONCURRENTLY" in q for q in dropped), dropped
+    # Every drop must be followed by a rebuild, else the repair loses the index.
+    assert len([q for q in queries if q.startswith("CREATE INDEX")]) == 2

@@ -66,16 +66,38 @@ CREATE TABLE IF NOT EXISTS app_runs (
 )
 """
 
-_CREATE_RUNS_THREAD_INDEX_SQL: Final[str] = """
-CREATE INDEX IF NOT EXISTS idx_app_runs_thread_created
-ON app_runs (thread_id, created_at DESC)
-"""
+# Indexes are built CONCURRENTLY, on a connection of their own. A plain CREATE
+# INDEX holds a lock that blocks writes for the whole table scan, so adding one
+# to an existing large table would stall traffic on every instance's startup —
+# precisely the deployments these indexes exist to speed up. CONCURRENTLY
+# cannot run inside a transaction, hence the separate autocommit connection in
+# ``_create_indexes``. Each entry is (name, create, drop); the drop is spelled
+# out rather than interpolated so no SQL here is ever built from a variable.
+_INDEXES: Final[tuple[tuple[str, str, str], ...]] = (
+    (
+        "idx_app_runs_thread_created",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_runs_thread_created "
+        "ON app_runs (thread_id, created_at DESC)",
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_app_runs_thread_created",
+    ),
+    (
+        # Thread search sorts by updated_at DESC by default (DEFAULT_SORT_BY);
+        # without this the paginated listing sorts the whole table per page.
+        "idx_app_threads_updated_at",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_threads_updated_at "
+        "ON app_threads (updated_at DESC)",
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_app_threads_updated_at",
+    ),
+)
 
-# Thread search sorts by updated_at DESC by default (DEFAULT_SORT_BY); without
-# this the paginated listing sorts the whole table on every page.
-_CREATE_THREADS_SORT_INDEX_SQL: Final[str] = """
-CREATE INDEX IF NOT EXISTS idx_app_threads_updated_at
-ON app_threads (updated_at DESC)
+# A concurrent build that fails leaves the index behind marked invalid, and
+# CREATE INDEX IF NOT EXISTS then skips it forever — the table would stay
+# silently unindexed. Detect that leftover so it can be dropped and rebuilt.
+_INVALID_INDEX_SQL: Final[str] = """
+SELECT 1
+FROM pg_class c
+JOIN pg_index i ON i.indexrelid = c.oid
+WHERE c.relname = %s AND NOT i.indisvalid
 """
 
 
@@ -141,10 +163,13 @@ class MetadataStore:
 
         ``check`` validates a pooled connection before checkout so one dropped
         by an idle-timeout or a recycling pooler is replaced rather than handed
-        out closed. ``prepare_threshold=0`` disables client-side prepared
+        out closed. ``prepare_threshold=None`` disables client-side prepared
         statements, which keeps the store correct behind a transaction-mode
         pooler (pgbouncer, Supabase) where a later query may land on a different
-        server-side session. Mirrors the checkpointer pool in ``checkpointer``.
+        server-side session. It must be ``None`` and not ``0``: psycopg prepares
+        a statement once its execution count reaches the threshold, so ``0``
+        prepares on the *first* execution — the opposite of disabling.
+        Mirrors the checkpointer pool in ``checkpointer``.
         """
         if self._pool is not None:
             return self._pool
@@ -160,7 +185,7 @@ class MetadataStore:
             max_size=self._pool_max_size,
             open=False,
             check=_check,
-            kwargs={"prepare_threshold": 0, "row_factory": dict_row},
+            kwargs={"prepare_threshold": None, "row_factory": dict_row},
         )
         await pool.open(wait=True)
         self._pool = pool
@@ -190,9 +215,34 @@ class MetadataStore:
             async with conn.cursor() as cursor:
                 await cursor.execute(_CREATE_THREADS_TABLE_SQL)
                 await cursor.execute(_CREATE_RUNS_TABLE_SQL)
-                await cursor.execute(_CREATE_RUNS_THREAD_INDEX_SQL)
-                await cursor.execute(_CREATE_THREADS_SORT_INDEX_SQL)
             await conn.commit()
+        await self._create_indexes()
+
+    async def _create_indexes(self) -> None:
+        """Build the search indexes without locking writes out of the tables.
+
+        ``CREATE INDEX CONCURRENTLY`` cannot run inside a transaction, so this
+        opens its own autocommit connection instead of borrowing a pooled one
+        (pool connections are transactional, and the pool's liveness ``check``
+        may already have opened a transaction on them).
+
+        An earlier build that failed leaves an invalid index that
+        ``IF NOT EXISTS`` would skip forever, so any such leftover is dropped
+        and rebuilt rather than silently tolerated.
+        """
+        psycopg, _ = _pg()
+        conn = await psycopg.AsyncConnection.connect(
+            self._postgres_uri, autocommit=True
+        )
+        try:
+            for name, create_sql, drop_sql in _INDEXES:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(_INVALID_INDEX_SQL, (name,))
+                    if await cursor.fetchone() is not None:
+                        await cursor.execute(drop_sql)
+                    await cursor.execute(create_sql)
+        finally:
+            await conn.close()
 
     @staticmethod
     async def _select_thread_row(conn: Any, thread_id: str) -> ThreadRow | None:

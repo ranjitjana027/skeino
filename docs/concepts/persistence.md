@@ -86,7 +86,10 @@ scheme**, and native implementations exist for the durable schemes:
   on first use. Connections are checked before checkout (a pooler's idle-timeout
   drop is replaced, not handed out closed) and client-side prepared statements
   are disabled so the store stays correct behind a transaction-mode pooler such
-  as pgbouncer or Supabase. Pool size is `pool_max_size` (default 10).
+  as pgbouncer or Supabase. Pool size is `pool_max_size` (default 10). Indexes
+  are built with `CREATE INDEX CONCURRENTLY` on a separate autocommit
+  connection, so starting up against an existing large table does not lock out
+  writes while the index builds.
 - **`SqliteMetadataStore`** (`sqlite`) — the same two tables over `aiosqlite`
   (a single shared connection, WAL mode + busy timeout so it can share a file
   with the SQLite checkpointer); a durable, serverless option.
