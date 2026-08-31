@@ -6,11 +6,14 @@ between a run and its parent thread. ``MetadataStore`` owns those two tables
 (``app_threads``, ``app_runs``) and exposes the CRUD surface the runtime needs.
 
 Postgres (psycopg) is an optional dependency (``skeino[postgres]``); it is
-imported lazily so importing this module never requires it. Connection
-management is intentionally simple: each operation opens a fresh
-``psycopg.AsyncConnection``.
+imported lazily so importing this module never requires it. Operations run over
+a shared :class:`~psycopg_pool.AsyncConnectionPool`, opened on first use and
+closed by :meth:`MetadataStore.aclose` — see that method and
+``_connection`` for why a connection *per operation* was untenable.
 """
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
@@ -68,6 +71,13 @@ CREATE INDEX IF NOT EXISTS idx_app_runs_thread_created
 ON app_runs (thread_id, created_at DESC)
 """
 
+# Thread search sorts by updated_at DESC by default (DEFAULT_SORT_BY); without
+# this the paginated listing sorts the whole table on every page.
+_CREATE_THREADS_SORT_INDEX_SQL: Final[str] = """
+CREATE INDEX IF NOT EXISTS idx_app_threads_updated_at
+ON app_threads (updated_at DESC)
+"""
+
 
 def _utcnow() -> datetime:
     """Return the current UTC timestamp."""
@@ -90,6 +100,15 @@ def _pg() -> tuple[Any, Any]:
     return psycopg, dict_row
 
 
+def _pg_pool() -> Any:
+    """Lazily import psycopg_pool (optional dependency: skeino[postgres])."""
+    try:
+        from psycopg_pool import AsyncConnectionPool
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
+    return AsyncConnectionPool
+
+
 def _to_jsonb(payload: dict[str, JsonValue] | None) -> Any:
     """Wrap a JSON-serializable dictionary for psycopg JSONB parameters."""
     if payload is None:
@@ -104,41 +123,100 @@ def _to_jsonb(payload: dict[str, JsonValue] | None) -> Any:
 class MetadataStore:
     """Persist thread and run metadata alongside LangGraph checkpoints."""
 
-    def __init__(self, postgres_uri: str) -> None:
+    def __init__(self, postgres_uri: str, *, pool_max_size: int = 10) -> None:
         """Store the PostgreSQL connection string used for metadata operations."""
         self._postgres_uri = postgres_uri
+        self._pool_max_size = pool_max_size
+        self._pool: Any | None = None
+
+    async def _ensure_pool(self) -> Any:
+        """Return the shared connection pool, opening it on first use.
+
+        Every operation used to open its own ``AsyncConnection``, which meant a
+        TCP connect, a TLS handshake and a SCRAM exchange per *query*. Against a
+        managed Postgres in another region that is several round trips of pure
+        latency before any row moves, and the cost multiplies with the number of
+        queries a request makes — ``GET``-style listings that read one row per
+        result paid it once per row.
+
+        ``check`` validates a pooled connection before checkout so one dropped
+        by an idle-timeout or a recycling pooler is replaced rather than handed
+        out closed. ``prepare_threshold=0`` disables client-side prepared
+        statements, which keeps the store correct behind a transaction-mode
+        pooler (pgbouncer, Supabase) where a later query may land on a different
+        server-side session. Mirrors the checkpointer pool in ``checkpointer``.
+        """
+        if self._pool is not None:
+            return self._pool
+        _, dict_row = _pg()
+        async_connection_pool = _pg_pool()
+
+        async def _check(conn: Any) -> None:
+            await conn.execute("SELECT 1")
+
+        pool = async_connection_pool(
+            conninfo=self._postgres_uri,
+            min_size=1,
+            max_size=self._pool_max_size,
+            open=False,
+            check=_check,
+            kwargs={"prepare_threshold": 0, "row_factory": dict_row},
+        )
+        await pool.open(wait=True)
+        self._pool = pool
+        return pool
+
+    @asynccontextmanager
+    async def _connection(self) -> AsyncIterator[Any]:
+        """Check a connection out of the pool for the duration of the block.
+
+        ``pool.connection()`` commits on a clean exit and rolls back on an
+        exception, so callers keep their explicit ``commit()`` only where they
+        need the write visible before the block ends.
+        """
+        pool = await self._ensure_pool()
+        async with pool.connection() as conn:
+            yield conn
+
+    async def aclose(self) -> None:
+        """Close the connection pool (called on app shutdown)."""
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
 
     async def setup(self) -> None:
-        """Create the metadata tables if they do not already exist."""
-        psycopg, _ = _pg()
-        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+        """Create the metadata tables and indexes if they do not already exist."""
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(_CREATE_THREADS_TABLE_SQL)
                 await cursor.execute(_CREATE_RUNS_TABLE_SQL)
                 await cursor.execute(_CREATE_RUNS_THREAD_INDEX_SQL)
+                await cursor.execute(_CREATE_THREADS_SORT_INDEX_SQL)
             await conn.commit()
+
+    @staticmethod
+    async def _select_thread_row(conn: Any, thread_id: str) -> ThreadRow | None:
+        """Read one thread row on an already-checked-out connection."""
+        async with conn.cursor() as cursor:
+            # The SELECT/RETURNING column lists in this module exactly
+            # mirror ThreadRow/RunRow — that is what makes the dict_row →
+            # TypedDict annotations below sound.
+            await cursor.execute(
+                """
+                SELECT thread_id, created_at, updated_at, state_updated_at,
+                       metadata, config, status, ttl
+                FROM app_threads
+                WHERE thread_id = %s
+                """,
+                (thread_id,),
+            )
+            row: ThreadRow | None = await cursor.fetchone()
+            return row
 
     async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored metadata row for a thread."""
-        psycopg, dict_row = _pg()
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
-            async with conn.cursor() as cursor:
-                # The SELECT/RETURNING column lists in this module exactly
-                # mirror ThreadRow/RunRow — that is what makes the dict_row →
-                # TypedDict annotations below sound.
-                await cursor.execute(
-                    """
-                    SELECT thread_id, created_at, updated_at, state_updated_at,
-                           metadata, config, status, ttl
-                    FROM app_threads
-                    WHERE thread_id = %s
-                    """,
-                    (thread_id,),
-                )
-                row: ThreadRow | None = await cursor.fetchone()
-                return row
+        async with self._connection() as conn:
+            return await self._select_thread_row(conn, thread_id)
 
     async def create_thread(
         self,
@@ -150,11 +228,9 @@ class MetadataStore:
         if_exists: ThreadIfExists,
     ) -> ThreadRow:
         """Insert a thread row and return the stored record."""
-        psycopg, dict_row = _pg()
+        psycopg, _ = _pg()
         ttl_payload = self._build_ttl_payload(ttl)
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 try:
                     await cursor.execute(
@@ -176,7 +252,11 @@ class MetadataStore:
                 except psycopg.errors.UniqueViolation as exc:
                     await conn.rollback()
                     if if_exists == "do_nothing":
-                        existing_row = await self.fetch_thread_row(thread_id)
+                        # Re-read on *this* connection. Calling the public
+                        # fetch_thread_row here would check a second connection
+                        # out of the pool while still holding this one, which
+                        # deadlocks once the pool is saturated.
+                        existing_row = await self._select_thread_row(conn, thread_id)
                         if existing_row is None:
                             raise HTTPException(
                                 status_code=status.HTTP_409_CONFLICT,
@@ -225,7 +305,6 @@ class MetadataStore:
             return
 
         values.append(thread_id)
-        psycopg, _ = _pg()
         # nosec B608: `assignments` holds only hardcoded "column = %s"/NOW()
         # fragments built above; every user value is bound via %s parameters.
         query = f"""
@@ -233,15 +312,14 @@ class MetadataStore:
             SET {", ".join(assignments)}
             WHERE thread_id = %s
         """  # nosec B608
-        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(query, values)
             await conn.commit()
 
     async def delete_thread(self, thread_id: str) -> None:
         """Delete a thread row and its run rows."""
-        psycopg, _ = _pg()
-        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     "DELETE FROM app_runs WHERE thread_id = %s", (thread_id,)
@@ -286,10 +364,7 @@ class MetadataStore:
             OFFSET %s
         """  # nosec B608
         values.extend([request.limit, request.offset])
-        psycopg, dict_row = _pg()
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(query, values)
                 rows = await cursor.fetchall()
@@ -305,10 +380,7 @@ class MetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> RunRow:
         """Insert a run row and return it."""
-        psycopg, dict_row = _pg()
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     """
@@ -346,8 +418,7 @@ class MetadataStore:
         error: str | None = None,
     ) -> None:
         """Update the persisted run status."""
-        psycopg, _ = _pg()
-        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     """
@@ -361,10 +432,7 @@ class MetadataStore:
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a single run row for a thread."""
-        psycopg, dict_row = _pg()
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     """
@@ -405,10 +473,7 @@ class MetadataStore:
             OFFSET %s
         """  # nosec B608
         values.extend([limit, offset])
-        psycopg, dict_row = _pg()
-        async with await psycopg.AsyncConnection.connect(
-            self._postgres_uri, row_factory=dict_row
-        ) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(query, values)
                 rows = await cursor.fetchall()
