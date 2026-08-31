@@ -77,11 +77,17 @@ class ThreadOps:
         graph: Any,
         metadata_store: MetadataStoreProtocol,
         logger: Any | None = None,
+        search_enrich_concurrency: int = _SEARCH_ENRICH_CONCURRENCY,
     ) -> None:
         """Capture the graph and metadata store backing this ops layer."""
         self._graph = graph
         self._metadata_store = metadata_store
         self._logger = logger
+        # Shared by every search on this instance (``create_app`` builds one per
+        # app), so the bound is on checkpoint reads *in aggregate*. A per-call
+        # semaphore would let N concurrent searches run N x limit reads and
+        # saturate the checkpointer pool no matter how small the bound.
+        self._search_semaphore = asyncio.Semaphore(search_enrich_concurrency)
 
     async def create(self, request: ThreadCreateRequest) -> ThreadModel:
         """Create a thread and optionally seed it with initial state."""
@@ -214,9 +220,10 @@ class ThreadOps:
 
         Enrichment is one checkpoint read per row, so it runs concurrently under
         a semaphore rather than one round trip after another — a page of
-        ``limit`` threads used to cost ``limit`` serial reads. The bound keeps
-        the burst inside the checkpointer's connection pool; results keep the
-        order the store returned them in.
+        ``limit`` threads used to cost ``limit`` serial reads. The bound is
+        instance-wide, so concurrent searches share it and the burst stays
+        inside the checkpointer's connection pool however many land at once;
+        results keep the order the store returned them in.
         """
         rows = await self._metadata_store.search_thread_rows(request)
         matched = [
@@ -224,10 +231,9 @@ class ThreadOps:
             for row in rows
             if _match_metadata_filters(row["metadata"], request.metadata)
         ]
-        semaphore = asyncio.Semaphore(_SEARCH_ENRICH_CONCURRENCY)
 
         async def enrich(row: ThreadRow) -> ThreadModel:
-            async with semaphore:
+            async with self._search_semaphore:
                 return await self.build_model_from_row(row)
 
         models = await asyncio.gather(*(enrich(row) for row in matched))

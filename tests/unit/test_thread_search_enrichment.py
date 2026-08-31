@@ -129,3 +129,40 @@ async def test_search_preserves_store_ordering() -> None:
     results = await ops.search(ThreadSearchRequest(limit=10, offset=0))
 
     assert [str(r.thread_id) for r in results] == [str(r["thread_id"]) for r in rows]
+
+
+async def test_concurrent_searches_share_one_bound() -> None:
+    # The bound exists to keep enrichment inside the checkpointer's connection
+    # pool. A semaphore built per call does not do that: three simultaneous
+    # searches would each get their own allowance and run 3 x the bound deep,
+    # saturating the pool and starving live runs. The bound must be aggregate.
+    store = InMemoryMetadataStore()
+    await _seed(store, 12)
+    graph = _StateGraph(delay=0.01)
+    ops = ThreadOps(graph=graph, metadata_store=store, search_enrich_concurrency=4)
+
+    await asyncio.gather(
+        *(ops.search(ThreadSearchRequest(limit=20, offset=0)) for _ in range(3))
+    )
+
+    assert graph.peak_in_flight <= 4, (
+        f"three concurrent searches peaked at {graph.peak_in_flight} state "
+        "reads against a bound of 4 — the semaphore is not shared across calls"
+    )
+
+
+async def test_concurrent_searches_still_run_concurrently() -> None:
+    # Guard the fix against being "passed" by serialising everything: sharing
+    # one semaphore must not collapse enrichment back to one read at a time.
+    store = InMemoryMetadataStore()
+    await _seed(store, 12)
+    graph = _StateGraph(delay=0.01)
+    ops = ThreadOps(graph=graph, metadata_store=store, search_enrich_concurrency=4)
+
+    await asyncio.gather(
+        *(ops.search(ThreadSearchRequest(limit=20, offset=0)) for _ in range(3))
+    )
+
+    assert graph.peak_in_flight > 1, (
+        f"state reads ran one at a time (peak in flight {graph.peak_in_flight})"
+    )
