@@ -64,6 +64,7 @@ Register an async-context-manager builder against one or more schemes:
 from contextlib import asynccontextmanager
 from skeino.persistence import register_checkpointer, CheckpointerSpec
 
+
 @register_checkpointer("mydb")
 @asynccontextmanager
 async def build_mydb(spec: CheckpointerSpec):

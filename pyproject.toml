@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "skeino"
-version = "2.1.0"
+version = "2.1.1"
 description = "Reusable, embeddable replacement for the langgraph dev HTTP server: threads, runs, streaming, and assistants over any LangGraph graph."
 authors = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
 maintainers = ["Ranjit Jana <40226912+ranjitjana027@users.noreply.github.com>"]
@@ -38,7 +38,7 @@ langgraph = "^1.0.0"
 langgraph-checkpoint = ">=2.0.0"
 langchain-core = "*"
 python-dotenv = ">=1.0.1"
-uvicorn = ">=0.41,<0.50"
+uvicorn = ">=0.41,<0.53"
 # All database backends are OPTIONAL extras, imported lazily so the default
 # install only ships the in-memory checkpointer. Pick a backend with the
 # matching extra: skeino[postgres], skeino[sqlite], or skeino[mongodb].

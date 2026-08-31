@@ -17,11 +17,12 @@ from contextlib import asynccontextmanager
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from skeino.persistence import register_checkpointer, CheckpointerSpec
 
-@register_checkpointer("redis")            # one or more schemes
+
+@register_checkpointer("redis")  # one or more schemes
 @asynccontextmanager
 async def build_redis(spec: CheckpointerSpec):
     setup = bool(spec.options.get("setup_schema", True))
-    async with open_redis_saver(spec.uri) as saver:   # your saver
+    async with open_redis_saver(spec.uri) as saver:  # your saver
         if setup and hasattr(saver, "setup"):
             await saver.setup()
         yield saver
