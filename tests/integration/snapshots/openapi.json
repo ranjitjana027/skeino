@@ -2887,6 +2887,110 @@
         "summary": "Get Server Info"
       }
     },
+    "/runs": {
+      "post": {
+        "description": "Execute a run on an ephemeral thread and return its metadata.",
+        "operationId": "create_stateless_run_runs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunModel"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Create Stateless Run"
+      }
+    },
+    "/runs/batch": {
+      "post": {
+        "description": "Execute several stateless runs and return their final states, in order.\n\nThe body is a JSON array of run payloads. Parsed by hand rather than\ndeclared, for the same reason every other run route is: the LangGraph SDK\nsends JSON under a ``text/plain`` content-type to dodge CORS preflight, and\nFastAPI's body binding rejects that.",
+        "operationId": "run_stateless_batch_runs_batch_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Run Stateless Batch Runs Batch Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Run Stateless Batch"
+      }
+    },
+    "/runs/stream": {
+      "post": {
+        "description": "Execute a run on an ephemeral thread and stream its output as SSE.",
+        "operationId": "stream_stateless_run_runs_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Stream Stateless Run"
+      }
+    },
+    "/runs/wait": {
+      "post": {
+        "description": "Execute a run on an ephemeral thread and return the graph's final state.",
+        "operationId": "wait_stateless_run_runs_wait_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "title": "Response Wait Stateless Run Runs Wait Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Wait Stateless Run"
+      }
+    },
     "/threads": {
       "post": {
         "description": "Create a new persistent thread.",
