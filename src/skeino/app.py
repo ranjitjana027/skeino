@@ -20,6 +20,7 @@ from skeino.api import (
     assistants_router,
     health_router,
     runs_router,
+    stateless_runs_router,
     threads_router,
 )
 from skeino.api._openapi import install_request_body_openapi
@@ -254,6 +255,7 @@ def create_app(
     fastapi_app.include_router(assistants_router)
     fastapi_app.include_router(threads_router)
     fastapi_app.include_router(runs_router)
+    fastapi_app.include_router(stateless_runs_router)
     # Routers parse bodies by hand (text/plain tolerance), so FastAPI can't see
     # their request models — patch the schema to document them (see #67).
     install_request_body_openapi(fastapi_app)

@@ -94,6 +94,26 @@ The run row records the `assistant_id`, the serialized invocation `kwargs`
 and — on failure — an `error` message. List a thread's runs with
 `GET /threads/{id}/runs` and fetch one with `GET /threads/{id}/runs/{run_id}`.
 
+## Stateless runs
+
+When there is nothing to continue — a one-shot question, a scheduled job, a
+report generated in a single pass — a thread is overhead the caller has to
+manage and then remember to clean up. The top-level routes do that for you:
+
+- `POST /runs` — execute to completion, return the `RunModel`.
+- `POST /runs/wait` — execute to completion, return the graph's final state.
+- `POST /runs/stream` — execute and stream events over SSE.
+- `POST /runs/batch` — execute a list of payloads, return their outputs in order.
+
+Each runs against a thread created for it and deleted on the way out, together
+with its checkpoints — on success, on failure, and when a stream is abandoned
+part-way. The thread id never reaches the caller, so `checkpoint` is rejected
+with a 400 and `if_not_exists` is ignored: there is no prior history to resume,
+and no thread the caller could have created.
+
+Anything you might want to resume, inspect, or continue belongs on a thread
+instead.
+
 ### Input vs. command
 
 A run is driven by **either** an `input` payload (new state to merge in) **or** a
