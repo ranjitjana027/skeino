@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+import pytest
+
 from skeino.ops.threads import ThreadOps
 from skeino.persistence import InMemoryMetadataStore
 from skeino.schemas import ThreadSearchRequest
@@ -166,3 +168,30 @@ async def test_concurrent_searches_still_run_concurrently() -> None:
     assert graph.peak_in_flight > 1, (
         f"state reads ran one at a time (peak in flight {graph.peak_in_flight})"
     )
+
+
+async def test_zero_enrichment_bound_is_rejected() -> None:
+    # asyncio.Semaphore rejects negatives but accepts 0, and Semaphore(0) is
+    # never acquirable — every search would wait on it forever with no error
+    # raised and nothing logged. A silent hang is the worst failure mode here,
+    # so construction must reject it.
+    store = InMemoryMetadataStore()
+
+    with pytest.raises(ValueError, match="at least 1"):
+        ThreadOps(
+            graph=_StateGraph(), metadata_store=store, search_enrich_concurrency=0
+        )
+
+
+async def test_a_bound_of_one_is_still_allowed() -> None:
+    # 1 is degenerate but legitimate (fully serial enrichment); only values
+    # below 1 are unusable, so the guard must not over-reject.
+    store = InMemoryMetadataStore()
+    await _seed(store, 3)
+    graph = _StateGraph()
+    ops = ThreadOps(graph=graph, metadata_store=store, search_enrich_concurrency=1)
+
+    results = await ops.search(ThreadSearchRequest(limit=10, offset=0))
+
+    assert len(results) == 3
+    assert graph.peak_in_flight == 1

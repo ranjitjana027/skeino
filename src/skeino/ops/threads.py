@@ -79,7 +79,21 @@ class ThreadOps:
         logger: Any | None = None,
         search_enrich_concurrency: int = _SEARCH_ENRICH_CONCURRENCY,
     ) -> None:
-        """Capture the graph and metadata store backing this ops layer."""
+        """Capture the graph and metadata store backing this ops layer.
+
+        Raises:
+            ValueError: if ``search_enrich_concurrency`` is below 1.
+
+        """
+        if search_enrich_concurrency < 1:
+            # asyncio.Semaphore rejects negatives but accepts 0, and a bound of
+            # 0 is never acquirable: every search would wait on it forever with
+            # no error. Fail loudly at construction rather than hang at request
+            # time.
+            raise ValueError(
+                "search_enrich_concurrency must be at least 1, got "
+                f"{search_enrich_concurrency}"
+            )
         self._graph = graph
         self._metadata_store = metadata_store
         self._logger = logger
