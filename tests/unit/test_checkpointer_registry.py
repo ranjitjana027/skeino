@@ -81,6 +81,11 @@ async def test_mongodb_builder_keeps_default_db_for_pathless_uri(
 class _FakePool:
     """Records construction kwargs; opens/closes are tracked, no real DB."""
 
+    @staticmethod
+    async def check_connection(conn: object) -> None:
+        """Stands in for AsyncConnectionPool.check_connection."""
+        return None
+
     instances: list["_FakePool"] = []
 
     def __class_getitem__(cls, _item: object) -> type["_FakePool"]:
@@ -149,7 +154,9 @@ async def test_postgres_builder_uses_checked_pool(
     assert callable(pool.kwargs["check"])
     # Pooler-safety: prepared statements off, autocommit on (saver requirement).
     conn_kwargs = pool.kwargs["kwargs"]
-    assert conn_kwargs["prepare_threshold"] == 0
+    # None disables prepared statements; 0 would prepare on the FIRST
+    # execution, which is what breaks behind a transaction-mode pooler.
+    assert conn_kwargs["prepare_threshold"] is None
     assert conn_kwargs["autocommit"] is True
 
 

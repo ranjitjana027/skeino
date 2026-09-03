@@ -124,8 +124,11 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
     recycle) is then detected and replaced on checkout, instead of wedging
     *every* subsequent checkpoint read with ``OperationalError: the connection
     is closed``. ``check=check_connection`` validates a connection before each
-    checkout; ``prepare_threshold=0`` disables client-side prepared statements,
-    which also keeps the saver correct behind a transaction-mode pooler.
+    checkout; ``prepare_threshold=None`` disables client-side prepared
+    statements, which also keeps the saver correct behind a transaction-mode
+    pooler. The value must be ``None`` and not ``0``: psycopg prepares a
+    statement once its execution count reaches the threshold, so ``0`` prepares
+    on the *first* execution — the opposite of disabling.
 
     ``pool_max_size`` (default 10) is read from ``spec.options``.
     """
@@ -145,21 +148,19 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
     setup_schema = bool(spec.options.get("setup_schema", True))
     max_size = int(spec.options.get("pool_max_size", 10))
 
-    async def _check(conn: AsyncConnection[DictRow]) -> None:
-        # Validate a pooled connection before checkout; raising discards it so
-        # the pool reconnects instead of handing out a dropped socket.
-        await conn.execute("SELECT 1")
-
     async with AsyncExitStack() as stack:
         pool = AsyncConnectionPool[AsyncConnection[DictRow]](
             conninfo=spec.uri,
             min_size=1,
             max_size=max_size,
             open=False,
-            check=_check,
+            # Validate before checkout; raising discards the connection so the
+            # pool reconnects instead of handing out a dropped socket. The pool's
+            # own primitive keeps the probe from leaving a transaction open.
+            check=AsyncConnectionPool.check_connection,
             kwargs={
                 "autocommit": True,
-                "prepare_threshold": 0,
+                "prepare_threshold": None,
                 "row_factory": dict_row,
             },
         )
