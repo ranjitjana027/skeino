@@ -74,6 +74,11 @@ class _FakePool:
         self.conn = _FakeConnection()
         _FakePool.instances.append(self)
 
+    @staticmethod
+    async def check_connection(conn: Any) -> None:
+        """Stands in for AsyncConnectionPool.check_connection."""
+        return None
+
     async def open(self, wait: bool = False) -> None:
         # Must actually suspend: bringing a real pool up awaits, and that is the
         # window in which concurrent first callers each see `_pool is None`.
@@ -184,7 +189,11 @@ async def test_pool_is_configured_for_a_transaction_mode_pooler(
     # None disables prepared statements; 0 would prepare on the FIRST
     # execution, which is what breaks behind a transaction-mode pooler.
     assert kwargs["kwargs"]["prepare_threshold"] is None
-    assert kwargs["check"] is not None
+    # Must be the pool's own primitive, not a hand-rolled `execute("SELECT 1")`:
+    # these connections are not autocommit, so a bare probe opens a transaction
+    # and the connection is handed out INTRANS. (Fakes cannot observe the
+    # transaction itself, so this pins the delegation that prevents it.)
+    assert kwargs["check"] is _FakePool.check_connection
     assert kwargs["max_size"] == 10
 
 
@@ -348,3 +357,40 @@ async def test_failed_open_closes_the_pool_it_abandoned(
     await pooled_store.fetch_thread_row(str(uuid4()))
     assert len(_FakePool.instances) == 2
     assert _FakePool.instances[1].opened == 1
+
+
+async def test_unlock_failure_does_not_mask_the_real_error(
+    monkeypatch: pytest.MonkeyPatch, pooled_store: ms.MetadataStore
+) -> None:
+    # The advisory unlock runs in a finally. If it raises, it would replace the
+    # exception that actually explains what went wrong, and the operator would
+    # debug the unlock instead of the failed index build. Closing the connection
+    # releases the session lock anyway, so the unlock must be best-effort.
+    def _init(self: Any, conninfo: str, **kwargs: Any) -> None:
+        _FakeDirectConnection.instances.append(self)
+        self.conninfo = conninfo
+        self.kwargs = kwargs
+        self.queries = []
+        self.closed = 0
+        self.invalid_indexes = False
+        self.lock_acquired = True
+
+    monkeypatch.setattr(_FakeDirectConnection, "__init__", _init)
+
+    async def _execute(self: Any, query: str, values: Any = None) -> None:
+        # _last drives fetchone's routing; dropping it would make the lock
+        # probe read falsy and silently skip all index maintenance.
+        self._last = query
+        self._conn.queries.append(query)
+        if query.startswith("CREATE INDEX"):
+            raise RuntimeError("index build blew up")
+        if "pg_advisory_unlock" in query:
+            raise RuntimeError("unlock also blew up")
+
+    monkeypatch.setattr(_FakeDirectCursor, "execute", _execute)
+
+    with pytest.raises(RuntimeError, match="index build blew up"):
+        await pooled_store.setup()
+
+    # And the connection is still closed, so the lock is not leaked.
+    assert _FakeDirectConnection.instances[0].closed == 1

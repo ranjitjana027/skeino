@@ -219,15 +219,18 @@ class MetadataStore:
             _, dict_row = _pg()
             async_connection_pool = _pg_pool()
 
-            async def _check(conn: Any) -> None:
-                await conn.execute("SELECT 1")
-
             pool = async_connection_pool(
                 conninfo=self._postgres_uri,
                 min_size=1,
                 max_size=self._pool_max_size,
                 open=False,
-                check=_check,
+                # The pool's own primitive rather than a hand-rolled probe:
+                # these connections are not autocommit, so a bare
+                # ``execute("SELECT 1")`` would open a transaction and hand the
+                # connection out sitting INTRANS. ``check_connection`` toggles
+                # autocommit around the probe so the connection comes back
+                # clean.
+                check=async_connection_pool.check_connection,
                 kwargs={"prepare_threshold": None, "row_factory": dict_row},
             )
             try:
@@ -324,8 +327,12 @@ class MetadataStore:
                             await cursor.execute(drop_sql)
                         await cursor.execute(create_sql)
             finally:
-                async with conn.cursor() as cursor:
-                    await cursor.execute(_UNLOCK_INDEX_SQL, (_INDEX_LOCK_KEY,))
+                # Best effort: closing the connection below releases the
+                # session-level lock server-side regardless, so a failure here
+                # must not replace an in-flight index-maintenance exception.
+                with suppress(Exception):
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(_UNLOCK_INDEX_SQL, (_INDEX_LOCK_KEY,))
         finally:
             await conn.close()
 

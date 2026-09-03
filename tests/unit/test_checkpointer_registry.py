@@ -81,6 +81,11 @@ async def test_mongodb_builder_keeps_default_db_for_pathless_uri(
 class _FakePool:
     """Records construction kwargs; opens/closes are tracked, no real DB."""
 
+    @staticmethod
+    async def check_connection(conn: object) -> None:
+        """Stands in for AsyncConnectionPool.check_connection."""
+        return None
+
     instances: list["_FakePool"] = []
 
     def __class_getitem__(cls, _item: object) -> type["_FakePool"]:
