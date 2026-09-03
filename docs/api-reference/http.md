@@ -68,6 +68,23 @@ Prefix: `/threads/{thread_id}`
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
 
+### Stateless runs
+
+No prefix. One-shot invocations that keep nothing: each runs against a thread
+created and deleted inside the request, so no thread id is needed and none is
+returned.
+
+| Method | Path | Request | Response | Notes |
+| --- | --- | --- | --- | --- |
+| `POST` | `/runs` | `RunCreateRequest` | `RunModel` | Execute to completion, return run metadata. Header: `X-Tokens-Used`. Runs synchronously — skeino has no background executor, so this differs from the Platform, where `POST /runs` returns immediately. No `Location` header: the run's thread no longer exists. |
+| `POST` | `/runs/wait` | `RunCreateRequest` | graph state | Execute to completion, return the graph's final state. |
+| `POST` | `/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`), same event sequence as the thread-scoped form. |
+| `POST` | `/runs/batch` | `list[RunCreateRequest]` | `list[graph state]` | Execute each payload on its own ephemeral thread, sequentially, and return the outputs in order. |
+
+`checkpoint` is rejected with a 400 on these routes — a stateless run has no
+history to resume from. Use the thread-scoped routes for anything that needs to
+be resumed, inspected, or continued.
+
 ### Key `RunCreateRequest` fields
 
 A curated quick-reference for the most-used fields. Every request and response

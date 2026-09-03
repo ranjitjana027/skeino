@@ -93,7 +93,7 @@ class RunOps:
                 thread_id, status_value=_THREAD_BUSY
             )
             await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
-            usage_handler = await self._execute_graph_run(
+            usage_handler, _ = await self._execute_graph_run(
                 thread_id, request, run_id=run_id
             )
             await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
@@ -286,6 +286,135 @@ class RunOps:
 
         return run, event_stream()
 
+    # ------------------------------------------------------------------
+    # Stateless runs
+    #
+    # The Platform exposes top-level /runs, /runs/wait, /runs/stream and
+    # /runs/batch for one-shot invocations where no checkpoint history is
+    # wanted. skeino had only the thread-scoped forms, so every caller that
+    # wanted a one-shot run had to open a thread, run against it, and delete it
+    # — the same three steps, repeated in each client, in whatever language it
+    # happened to be written in.
+    #
+    # These do that once, here. The thread is an implementation detail: it
+    # exists for the duration of the run because the checkpointer needs
+    # somewhere to write, and it is deleted on the way out, successful run or
+    # not. Nothing about it reaches the caller.
+    # ------------------------------------------------------------------
+
+    async def create_stateless_run(self, request: RunCreateRequest) -> RunModel:
+        """Run to completion on an ephemeral thread; return the run metadata.
+
+        Mirrors the thread-scoped ``POST /threads/{id}/runs``, which also runs
+        synchronously. The Platform's stateless ``POST /runs`` returns
+        immediately and executes in the background; skeino has no background
+        executor yet, so this blocks. Documented rather than silently differing.
+        """
+        payload = self._as_stateless(request)
+        thread_id = str(uuid4())
+        try:
+            return await self.create_run(thread_id, payload)
+        finally:
+            await self._discard_thread(thread_id)
+
+    async def wait_stateless_run(self, request: RunCreateRequest) -> Any:
+        """Run to completion on an ephemeral thread; return the final state.
+
+        The output is captured from the graph invocation rather than read back
+        afterwards: by the time this returns, the thread and its checkpoints
+        are gone, so there is nothing left to read.
+        """
+        payload = self._as_stateless(request)
+        thread_id = str(uuid4())
+        run_id = str(uuid4())
+        try:
+            await self._thread_ops.ensure_thread_for_run(
+                thread_id, payload.if_not_exists
+            )
+            self._assistant_ops.ensure_supported(payload.assistant_id)
+            self._validate_run_request(payload)
+            _, result = await self._execute_graph_run(thread_id, payload, run_id=run_id)
+            return serialize_value(result)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            self._log_error("Stateless run failed: %s", exc, exc=exc)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=str(exc),
+            ) from exc
+        finally:
+            await self._discard_thread(thread_id)
+
+    async def create_stateless_streaming_run(
+        self, request: RunCreateRequest
+    ) -> tuple[RunModel, AsyncIterator[str]]:
+        """Stream a run on an ephemeral thread, deleting it once the stream ends."""
+        payload = self._as_stateless(request)
+        thread_id = str(uuid4())
+        try:
+            run, stream = await self.create_streaming_run(thread_id, payload)
+        except BaseException:
+            # The run never started, so nothing will consume the stream and
+            # trigger the cleanup below.
+            await self._discard_thread(thread_id)
+            raise
+
+        async def cleanup_after(inner: AsyncIterator[str]) -> AsyncIterator[str]:
+            # Cleanup belongs after the stream is exhausted, not after this
+            # function returns: the response is sent as soon as the generator is
+            # handed to Starlette, and deleting the thread at that point would
+            # pull the checkpointer out from under a run still in progress.
+            try:
+                async for chunk in inner:
+                    yield chunk
+            finally:
+                # Also covers the client disconnecting mid-stream, which
+                # unwinds the generator via GeneratorExit/CancelledError.
+                await self._discard_thread(thread_id)
+
+        return run, cleanup_after(stream)
+
+    async def run_stateless_batch(self, requests: list[RunCreateRequest]) -> list[Any]:
+        """Run each payload on its own ephemeral thread; return outputs in order.
+
+        Sequential, not concurrent. Each run holds a graph and a model for the
+        length of its execution, so a batch of them fanned out in parallel is a
+        load multiplier a caller cannot see coming. A caller who wants
+        concurrency can issue concurrent requests and choose its own width.
+        """
+        return [await self.wait_stateless_run(request) for request in requests]
+
+    def _as_stateless(self, request: RunCreateRequest) -> RunCreateRequest:
+        """Adapt a run payload to a thread that does not exist yet."""
+        if request.checkpoint is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "A stateless run has no checkpoint history to resume from. "
+                    "Use POST /threads/{thread_id}/runs/... instead."
+                ),
+            )
+        # if_not_exists is forced rather than honoured: the caller never sees
+        # the thread id, so it cannot have created it, and the default
+        # ("reject") would 404 every stateless run.
+        return request.model_copy(update={"if_not_exists": "create"})
+
+    async def _discard_thread(self, thread_id: str) -> None:
+        """Delete an ephemeral thread and its checkpoints, best-effort.
+
+        A thread that outlives its run is litter, not a fault: the caller
+        already has its answer, and the run itself succeeded or failed on its
+        own terms. Failing the request over the cleanup would convert a
+        successful run into an error the caller cannot act on.
+        """
+        try:
+            await self._thread_ops.delete(thread_id)
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask the run
+            self._log_warning(
+                "Could not delete ephemeral thread %s: %s", thread_id, exc
+            )
+
     async def list_runs(
         self,
         thread_id: str,
@@ -322,14 +451,20 @@ class RunOps:
 
     async def _execute_graph_run(
         self, thread_id: str, request: RunCreateRequest, run_id: str | None = None
-    ) -> UsageMetadataCallbackHandler:
-        """Execute a graph run without streaming; return its usage handler."""
+    ) -> tuple[UsageMetadataCallbackHandler, Any]:
+        """Execute a graph run without streaming.
+
+        Returns the usage handler and the graph's final state. The state is
+        what ``POST /runs/wait`` answers with: a stateless run deletes its
+        thread on the way out, so the output has to be captured here rather
+        than read back from a checkpoint that will no longer exist.
+        """
         runnable_input = self._resolve_run_input(request)
         config = build_thread_config(
             thread_id, request.config, request.checkpoint, run_id=run_id
         )
         usage_handler = attach_usage_handler(config)
-        await self._graph.ainvoke(
+        result = await self._graph.ainvoke(
             runnable_input,
             config,
             context=normalize_input_payload(request.context),
@@ -338,7 +473,7 @@ class RunOps:
             interrupt_after=request.interrupt_after,
             durability=request.durability,
         )
-        return usage_handler
+        return usage_handler, result
 
     async def _total_run_tokens(self, thread_id: str) -> int:
         """Fallback token count: sum usage over the final checkpoint's messages.

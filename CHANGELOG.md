@@ -10,6 +10,22 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.2.0] - 2026-09-02
+
+### Added
+
+- Stateless runs: `POST /runs`, `/runs/wait`, `/runs/stream`, and `/runs/batch`
+  execute against a thread created and deleted inside the request, so a one-shot
+  invocation needs no thread lifecycle from the caller. Previously every client
+  that wanted one open-coded the same three steps — create a thread, run, delete
+  it — and a client that skipped the cleanup leaked a thread per request. The
+  ephemeral thread and its checkpoints are removed whether the run succeeds,
+  fails, or the stream is abandoned mid-flight. `POST /runs` runs synchronously
+  rather than in the background (skeino has no background executor yet), and a
+  stateless run rejects `checkpoint` with a 400: there is no history to resume
+  from. ([#21](https://github.com/ranjitjana027/skeino/issues/21))
+
+
 ## [2.1.1] - 2026-08-02
 
 ### Fixed
