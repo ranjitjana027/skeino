@@ -10,6 +10,69 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [3.0.0] - 2026-09-20
+
+### Added
+
+- Background (async) runs. `POST /threads/{id}/runs` now starts the graph in a background task and returns immediately with a `pending`/`running` run. New endpoints to consume them: `POST /threads/{id}/runs/wait` (run to completion, returns the final state values), `GET /threads/{id}/runs/{rid}/join` (wait for a terminal state), `POST /threads/{id}/runs/{rid}/cancel` (`action=interrupt|rollback`, optional `wait`), and `DELETE /threads/{id}/runs/{rid}`. The `rollback` and `interrupt` multitask strategies are now implemented (cancel — and, for rollback, delete — the active run) instead of all returning 409 like `reject`. ([#18](https://github.com/ranjitjana027/skeino/issues/18))
+
+### Changed
+
+- **Breaking:** `POST /threads/{id}/runs` is now a background create that returns immediately with a non-terminal `RunModel`, instead of blocking until the graph finished. To run synchronously and get the output back, call the new `POST /threads/{id}/runs/wait` (which returns the final graph state values and the `X-Tokens-Used` header). ([#18](https://github.com/ranjitjana027/skeino/issues/18))
+
+### Fixed
+
+- Metadata-store indexes are now built with `CREATE INDEX CONCURRENTLY` on their
+  own autocommit connection instead of inside `setup()`'s transaction. A plain
+  `CREATE INDEX` holds a lock that blocks writes for the whole table scan, so
+  starting an instance against an existing large `app_threads` or `app_runs` could
+  stall traffic until the build finished. An index left invalid by an interrupted
+  build is dropped and rebuilt rather than skipped forever by `IF NOT EXISTS`.
+  Index maintenance runs under a Postgres advisory lock, so replicas starting
+  together cannot mistake a peer's in-progress build for an invalid leftover and
+  drop it; an instance that does not get the lock skips the work its peer is
+  already doing rather than blocking startup behind it. ([#concurrent-index-build](https://github.com/ranjitjana027/skeino/issues/concurrent-index-build))
+- Pooled metadata-store connections are no longer handed out inside an open
+  transaction. The pool's liveness probe ran `SELECT 1` on a connection that is
+  not in autocommit, which starts a transaction, so every checkout could arrive
+  `INTRANS`. Both the metadata store and the checkpointer now use
+  `AsyncConnectionPool.check_connection`, which toggles autocommit around the
+  probe so the connection comes back clean. A failure of the metadata-store index
+  advisory unlock also no longer masks the index-maintenance error that caused it. ([#pool-check-connection](https://github.com/ranjitjana027/skeino/issues/pool-check-connection))
+- The Postgres metadata store now runs over a shared `AsyncConnectionPool` instead
+  of opening a fresh connection for every operation. A connect + TLS handshake +
+  SCRAM exchange per query dominated request latency against a managed Postgres in
+  another region, and the cost scaled with the number of queries a request made.
+  Connections are validated before checkout and prepared statements are disabled,
+  so the store also stays correct behind a transaction-mode pooler. ([#pool-metadata-store](https://github.com/ranjitjana027/skeino/issues/pool-metadata-store))
+- The Postgres checkpointer and metadata store now genuinely disable client-side
+  prepared statements behind a transaction-mode pooler. Both pools passed
+  `prepare_threshold=0`, which psycopg reads as *prepare on the first execution* —
+  the opposite of the intent — so a query could still be prepared and then fail
+  with `prepared statement "_pg3_0" does not exist` once pgbouncer or Supabase
+  routed a later call to a different server-side session. The value is now `None`,
+  which is what actually turns preparation off. ([#prepare-threshold-disable](https://github.com/ranjitjana027/skeino/issues/prepare-threshold-disable))
+- `ThreadOps` now rejects a `search_enrich_concurrency` below 1 instead of
+  accepting it and hanging. `asyncio.Semaphore` rejects negative values but
+  accepts `0`, and a bound of `0` is never acquirable — every thread search would
+  have waited on it forever, raising nothing and logging nothing. Construction
+  now fails loudly with a `ValueError`. ([#search-bound-validation](https://github.com/ranjitjana027/skeino/issues/search-bound-validation))
+- `POST /threads/search` no longer costs an extra metadata round trip and a serial
+  graph-state read per result. Rows returned by the store are their own existence
+  proof, so the per-row `ensure_exists` re-read is gone — a page now costs the one
+  page-level metadata query rather than that query plus a lookup per row — and
+  state enrichment runs concurrently under a bound shared by every search, rather
+  than one row after another. `app_threads` also gains an index on `updated_at`,
+  the default search sort. ([#thread-search-enrichment](https://github.com/ranjitjana027/skeino/issues/thread-search-enrichment))
+- Redis (and SQLite) checkpoints now carry their `run_id`, so checkpoint→run
+  grouping (e.g. in LangGraph Studio) works on every durable backend, not just
+  Postgres. The run-enriching checkpointer wrapper was Postgres-only — it
+  subclassed `AsyncPostgresSaver` — so Redis and SQLite snapshots were written
+  with no `run_id`. It is now a backend-agnostic delegating wrapper applied to the
+  Postgres, SQLite, and Redis builders; MongoDB already merges `run_id` natively
+  and is left unwrapped. ([#49](https://github.com/ranjitjana027/skeino/issues/49))
+
+
 ## [2.2.0] - 2026-09-02
 
 ### Added
@@ -220,7 +283,9 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...HEAD
+[3.0.0]: https://github.com/ranjitjana027/skeino/compare/v2.2.0...v3.0.0
+[2.2.0]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...v2.0.2
