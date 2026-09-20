@@ -82,7 +82,14 @@ Thread and run rows — status, metadata, config, kwargs, TTL, errors — live i
 scheme**, and native implementations exist for the durable schemes:
 
 - **`MetadataStore`** (`postgres`) — two tables, `app_threads` and `app_runs`
-  (the latter `ON DELETE CASCADE`), a fresh async connection per operation.
+  (the latter `ON DELETE CASCADE`), over a shared `AsyncConnectionPool` opened
+  on first use. Connections are checked before checkout (a pooler's idle-timeout
+  drop is replaced, not handed out closed) and client-side prepared statements
+  are disabled so the store stays correct behind a transaction-mode pooler such
+  as pgbouncer or Supabase. Pool size is `pool_max_size` (default 10). Indexes
+  are built with `CREATE INDEX CONCURRENTLY` on a separate autocommit
+  connection, so starting up against an existing large table does not lock out
+  writes while the index builds.
 - **`SqliteMetadataStore`** (`sqlite`) — the same two tables over `aiosqlite`
   (a single shared connection, WAL mode + busy timeout so it can share a file
   with the SQLite checkpointer); a durable, serverless option.
