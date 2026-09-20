@@ -52,6 +52,7 @@ from skeino.usage import (
 _THREAD_BUSY: Final[ThreadStatus] = "busy"
 _THREAD_IDLE: Final[ThreadStatus] = "idle"
 _THREAD_ERROR: Final[ThreadStatus] = "error"
+_THREAD_INTERRUPTED: Final[ThreadStatus] = "interrupted"
 _RUN_RUNNING: Final[RunStatus] = "running"
 _RUN_SUCCESS: Final[RunStatus] = "success"
 _RUN_ERROR: Final[RunStatus] = "error"
@@ -300,7 +301,7 @@ class RunOps:
                 )
                 await self._metadata_store.update_thread(
                     thread_id,
-                    status_value=_THREAD_IDLE,
+                    status_value=await self._settled_thread_status(thread_id),
                     mark_state_updated=True,
                 )
                 total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
@@ -621,7 +622,7 @@ class RunOps:
             await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
             await self._metadata_store.update_thread(
                 thread_id,
-                status_value=_THREAD_IDLE,
+                status_value=await self._settled_thread_status(thread_id),
                 mark_state_updated=True,
             )
             total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
@@ -737,6 +738,42 @@ class RunOps:
             durability=request.durability,
         )
         return usage_handler, result
+
+    async def _settled_thread_status(self, thread_id: str) -> ThreadStatus:
+        """Return the status a thread settles into once its run finishes cleanly.
+
+        A run that ends on ``interrupt()`` finishes without error but leaves the
+        graph parked mid-execution waiting for a human decision. LangGraph
+        Platform reports that thread as ``interrupted``, and clients lean on it
+        — it is how a thread list shows what is waiting on the customer, and how
+        a UI decides to offer a resume rather than a fresh turn. Reported
+        ``idle``, such a thread is indistinguishable from one that has nothing
+        pending.
+
+        A read failure falls back to ``idle``: the run did succeed, and the
+        checkpoint is the authority on what is pending either way.
+        """
+        try:
+            snapshot = await self._graph.aget_state(
+                {"configurable": {"thread_id": thread_id}}
+            )
+        except Exception as exc:
+            self._log_warning(
+                "Failed to read state for thread %s after its run; reporting idle: %s",
+                thread_id,
+                exc,
+            )
+            return _THREAD_IDLE
+        if snapshot is None:
+            return _THREAD_IDLE
+        interrupts = getattr(snapshot, "interrupts", ()) or ()
+        if interrupts:
+            return _THREAD_INTERRUPTED
+        # Older LangGraph snapshots expose pending interrupts only via tasks.
+        for task in getattr(snapshot, "tasks", ()) or ():
+            if getattr(task, "interrupts", ()) or ():
+                return _THREAD_INTERRUPTED
+        return _THREAD_IDLE
 
     async def _total_run_tokens(self, thread_id: str) -> int:
         """Fallback token count: sum usage over the final checkpoint's messages.

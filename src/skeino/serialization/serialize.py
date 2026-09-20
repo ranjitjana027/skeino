@@ -1,5 +1,6 @@
 """Outbound serializers that turn runtime objects into JSON-safe payloads."""
 
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -128,6 +129,16 @@ def serialize_value(value: Any) -> JsonValue:
     if isinstance(value, (list, tuple)):
         return [serialize_value(item) for item in value]
 
+    if is_dataclass(value) and not isinstance(value, type):
+        # LangGraph hands back slotted dataclasses — ``Interrupt`` above all,
+        # which rides the ``__interrupt__`` channel in ``values``/``updates``
+        # events. They expose neither ``_asdict`` nor ``__dict__``, so without
+        # this they fell through to ``str(value)`` and a client received the
+        # Python repr of an interrupt instead of ``{"value": ..., "id": ...}``.
+        # Read the declared fields rather than ``asdict()``: no deep copy, and
+        # nested messages still take the branch above.
+        return serialize_value({f.name: getattr(value, f.name) for f in fields(value)})
+
     if hasattr(value, "_asdict"):
         return serialize_value(value._asdict())
 
@@ -199,6 +210,12 @@ def serialize_snapshot_value(value: Any) -> JsonValue:
 
     if isinstance(value, (list, tuple)):
         return [serialize_snapshot_value(item) for item in value]
+
+    if is_dataclass(value) and not isinstance(value, type):
+        # Same slotted-dataclass case as in ``serialize_value``.
+        return serialize_snapshot_value(
+            {f.name: getattr(value, f.name) for f in fields(value)}
+        )
 
     if hasattr(value, "_asdict"):
         return serialize_snapshot_value(value._asdict())

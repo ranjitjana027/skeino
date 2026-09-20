@@ -90,3 +90,25 @@ def test_build_thread_config_sets_thread_id_and_run_id() -> None:
     assert cfg["run_id"] == UUID(run_id)
     assert cfg["metadata"]["run_id"] == run_id
     assert cfg["metadata"]["thread_id"] == "abc"
+
+
+def test_interrupt_serializes_to_its_fields_not_its_repr() -> None:
+    # LangGraph's ``Interrupt`` is a slotted dataclass: no ``_asdict``, no
+    # ``__dict__``. Serialized as a string, the client sees a Python repr where
+    # it expects ``{"value": ..., "id": ...}`` — and an approval UI that reads
+    # ``interrupt.value.action_requests`` finds nothing to render.
+    from langgraph.types import Interrupt
+
+    serialized = serialize_value(
+        {
+            "__interrupt__": (
+                Interrupt(value={"action_requests": [{"name": "link_account"}]}),
+            )
+        }
+    )
+
+    assert isinstance(serialized, dict)
+    interrupts = serialized["__interrupt__"]
+    assert isinstance(interrupts, list)
+    assert interrupts[0]["value"] == {"action_requests": [{"name": "link_account"}]}
+    assert "id" in interrupts[0]

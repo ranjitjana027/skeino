@@ -10,6 +10,9 @@
 
 State-bearing events (``values`` and ``updates``) are passed through a
 fail-closed output-key filter so internal pipeline fields never leak to clients.
+LangGraph's own reserved channels (``__interrupt__`` and friends) are exempt:
+they are protocol, not graph state, and a client that never sees
+``__interrupt__`` cannot tell that a run paused for human input.
 
 The runner is intentionally stateless across calls; per-stream state lives in
 locals of the async generator.
@@ -61,11 +64,24 @@ class Streamer:
         )
         return frozenset()
 
+    def _is_allowed(self, key: str) -> bool:
+        """Whether a state key may be streamed to clients.
+
+        ``__interrupt__`` (and any other reserved dunder channel LangGraph adds)
+        rides in the same payload as graph state but is not graph state: it is
+        how a paused run reports what it is waiting for, and the SDK's
+        ``useStream`` reads it straight off the ``values`` event. Dropping it
+        would leave the client with a run that simply stopped.
+        """
+        if key.startswith("__") and key.endswith("__"):
+            return True
+        return self._output_keys is None or key in self._output_keys
+
     def _filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         """Drop non-output keys from a ``values`` (full-state) snapshot."""
         if self._output_keys is None:
             return payload
-        return {k: v for k, v in payload.items() if k in self._output_keys}
+        return {k: v for k, v in payload.items() if self._is_allowed(k)}
 
     def _filter_updates(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         """Drop non-output keys from each node's delta in an ``updates`` event.
@@ -78,9 +94,12 @@ class Streamer:
             return payload
         filtered: dict[str, JsonValue] = {}
         for node, update in payload.items():
-            if isinstance(update, dict):
+            if node.startswith("__") and node.endswith("__"):
+                # Reserved channel (e.g. ``__interrupt__``), not a node delta.
+                filtered[node] = update
+            elif isinstance(update, dict):
                 filtered[node] = {
-                    k: v for k, v in update.items() if k in self._output_keys
+                    k: v for k, v in update.items() if self._is_allowed(k)
                 }
             else:
                 # Non-dict node update (rare); pass through unchanged — it

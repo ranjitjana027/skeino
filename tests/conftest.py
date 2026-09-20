@@ -69,6 +69,11 @@ class FakeGraph:
         # completion immediately (the default cooperative behaviour).
         self.invoke_gate: asyncio.Event | None = None
         self.invoke_started: asyncio.Event = asyncio.Event()
+        # --- Paused-for-human-input mode ---
+        # Interrupts reported by every snapshot, as a real graph does while it
+        # waits on ``interrupt()``. Lets tests exercise what a run that ends
+        # parked (rather than finished) does to the thread's status.
+        self.pending_interrupts: tuple[Any, ...] = ()
 
     async def aupdate_state(
         self,
@@ -310,7 +315,7 @@ class FakeGraph:
             metadata={},
             created_at=_utcnow(),
             parent_config=None,
-            interrupts=(),
+            interrupts=self.pending_interrupts,
         )
 
 

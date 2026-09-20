@@ -53,7 +53,11 @@ A thread is created with `POST /threads`. The request can:
 - seed initial state via `supersteps` (a list of node updates applied before any
   run executes).
 
-Thread status is one of `idle`, `busy`, `interrupted`, or `error`. You can read
+Thread status is one of `idle`, `busy`, `interrupted`, or `error`. A thread
+reports `interrupted` once a run ends parked on a graph `interrupt()`,
+waiting for a human decision; the pending request rides the `__interrupt__`
+channel of the run's `values`/`updates` events and stays readable on the
+thread afterwards, and the next run resumes it with `command.resume`. You can read
 a thread's metadata-plus-latest-values with `GET /threads/{id}`, its full latest
 checkpoint with `GET /threads/{id}/state`, and walk its checkpoint history with
 `GET`/`POST /threads/{id}/history`. To read state at a specific point in time,
