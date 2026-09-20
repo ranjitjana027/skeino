@@ -10,6 +10,47 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [2.2.0] - 2026-09-02
+
+### Added
+
+- Stateless runs: `POST /runs`, `/runs/wait`, `/runs/stream`, and `/runs/batch`
+  execute against a thread created and deleted inside the request, so a one-shot
+  invocation needs no thread lifecycle from the caller. Previously every client
+  that wanted one open-coded the same three steps — create a thread, run, delete
+  it — and a client that skipped the cleanup leaked a thread per request. The
+  ephemeral thread and its checkpoints are removed whether the run succeeds,
+  fails, or the stream is abandoned mid-flight. `POST /runs` runs synchronously
+  rather than in the background (skeino has no background executor yet), and a
+  stateless run rejects `checkpoint` with a 400: there is no history to resume
+  from. ([#21](https://github.com/ranjitjana027/skeino/issues/21))
+
+
+## [2.1.1] - 2026-08-02
+
+### Fixed
+
+- Request bodies now appear in the generated OpenAPI schema (`/openapi.json`,
+  `/docs`, and the Scalar API explorer). skeino's routers parse JSON bodies by
+  hand to tolerate `text/plain` payloads, which previously kept their request
+  models (`RunCreateRequest`, `ThreadCreateRequest`, `ThreadSearchRequest`,
+  `ThreadStateUpdateRequest`, `ThreadStateSearchRequest`, `AssistantSearchRequest`,
+  `ThreadPatchRequest`, `CheckpointConfigModel`) — and their per-field
+  descriptions — out of the documented schema. The tolerant parsing and the 422
+  error contract are unchanged. ([#67](https://github.com/ranjitjana027/skeino/issues/67))
+
+
+## [2.1.0] - 2026-06-26
+
+### Changed
+
+- Every request/response schema field now carries a description. These render in the Python API reference for all models; response models additionally surface them in the generated OpenAPI schema, Swagger UI (`/docs`), and the API explorer. ([#68](https://github.com/ranjitjana027/skeino/issues/68))
+
+### Fixed
+
+- Postgres checkpointer now runs over a liveness-checked `AsyncConnectionPool` instead of a single long-lived connection. A connection dropped by the server or a connection pooler (e.g. a Supabase/pgbouncer idle-timeout or recycle) is now detected and replaced on checkout, instead of wedging every subsequent checkpoint read with `OperationalError: the connection is closed`. Prepared statements are disabled (`prepare_threshold=0`) so the saver is also correct behind a transaction-mode pooler; pool size is configurable via the `pool_max_size` checkpointer option (default 10). ([#70](https://github.com/ranjitjana027/skeino/issues/70))
+
+
 ## [2.0.2] - 2026-06-20
 
 ### Security
@@ -179,7 +220,9 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...HEAD
+[2.1.1]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...v2.1.1
+[2.1.0]: https://github.com/ranjitjana027/skeino/compare/v2.0.2...v2.1.0
 [2.0.2]: https://github.com/ranjitjana027/skeino/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/ranjitjana027/skeino/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/ranjitjana027/skeino/compare/v1.1.0...v2.0.0

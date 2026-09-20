@@ -1,1 +1,0 @@
-Every request/response schema field now carries a description. These render in the Python API reference for all models; response models additionally surface them in the generated OpenAPI schema, Swagger UI (`/docs`), and the API explorer.

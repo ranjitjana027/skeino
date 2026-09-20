@@ -29,6 +29,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from skeino import SkeinoSettings, create_app
+from skeino.persistence.uri import mongo_db_from_uri
 
 POSTGRES_URI = os.environ.get(
     "SKEINO_TEST_POSTGRES_URI", "postgresql://skeino:skeino@localhost:5433/skeino_test"
@@ -38,11 +39,14 @@ MONGODB_URI = os.environ.get(
 )
 REDIS_URI = os.environ.get("SKEINO_TEST_REDIS_URI", "redis://localhost:6380/0")
 
-# Where mongo data actually lands. Neither consumer honours the db named in
-# the URI path: MongoMetadataStore defaults to db "skeino" and langgraph's
-# MongoDBSaver to "checkpointing_db".
-MONGO_METADATA_DB = "skeino"
-MONGO_CHECKPOINT_DB = "checkpointing_db"
+# Where mongo data actually lands. Both consumers honour the db named in the
+# URI path (``mongo_db_from_uri``), so metadata and checkpoints share the
+# operator's chosen database. They fall back to their own defaults only for a
+# pathless URI: MongoMetadataStore -> "skeino", langgraph's MongoDBSaver ->
+# "checkpointing_db".
+_MONGO_URI_DB = mongo_db_from_uri(MONGODB_URI)
+MONGO_METADATA_DB = _MONGO_URI_DB or "skeino"
+MONGO_CHECKPOINT_DB = _MONGO_URI_DB or "checkpointing_db"
 
 # Tables owned by skeino (app_*) and by the langgraph postgres saver.
 POSTGRES_TABLES = (
@@ -177,9 +181,9 @@ def reset_backend(backend: Backend) -> None:
     elif backend.name == "mongodb":
         from pymongo import MongoClient
 
-        # The URI path is ignored by both mongo consumers: MongoMetadataStore
-        # hardcodes db "skeino" and the langgraph MongoDBSaver defaults to
-        # "checkpointing_db". Drop both (see MONGO_METADATA_DB/MONGO_CHECKPOINT_DB).
+        # Both mongo consumers honour the db named in the URI path; for this
+        # suite's URI that resolves to a single db (see MONGO_METADATA_DB /
+        # MONGO_CHECKPOINT_DB). Drop both in case an override splits them.
         client: Any = MongoClient(backend.uri)
         client.drop_database(MONGO_METADATA_DB)
         client.drop_database(MONGO_CHECKPOINT_DB)

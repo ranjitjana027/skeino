@@ -40,10 +40,12 @@ scheme to `postgres` to use Postgres.
 
 ### Run-stamped checkpoints
 
-The Postgres checkpointer is wrapped so that, before each checkpoint is written,
-the current `run_id` is copied into the checkpoint metadata — that's what lets
-clients (and Studio) group a thread's checkpoints by the run that produced them.
-Other backends are used as-is, so this run-grouping is **Postgres-only** today.
+The Postgres, SQLite, and Redis checkpointers are wrapped so that, before each
+checkpoint is written, the current `run_id` is copied into the checkpoint
+metadata — that's what lets clients (and Studio) group a thread's checkpoints by
+the run that produced them. MongoDB's saver merges config metadata (including
+`run_id`) into checkpoint metadata natively, so it isn't wrapped. Run-grouping
+therefore works across **all durable backends**.
 
 !!! note "MongoDB specifics"
     The MongoDB checkpointer (`MongoDBSaver`) is backed by a **synchronous**
@@ -61,6 +63,7 @@ Register an async-context-manager builder against one or more schemes:
 ```python
 from contextlib import asynccontextmanager
 from skeino.persistence import register_checkpointer, CheckpointerSpec
+
 
 @register_checkpointer("mydb")
 @asynccontextmanager
@@ -81,7 +84,14 @@ Thread and run rows — status, metadata, config, kwargs, TTL, errors — live i
 scheme**, and native implementations exist for the durable schemes:
 
 - **`MetadataStore`** (`postgres`) — two tables, `app_threads` and `app_runs`
-  (the latter `ON DELETE CASCADE`), a fresh async connection per operation.
+  (the latter `ON DELETE CASCADE`), over a shared `AsyncConnectionPool` opened
+  on first use. Connections are checked before checkout (a pooler's idle-timeout
+  drop is replaced, not handed out closed) and client-side prepared statements
+  are disabled so the store stays correct behind a transaction-mode pooler such
+  as pgbouncer or Supabase. Pool size is `pool_max_size` (default 10). Indexes
+  are built with `CREATE INDEX CONCURRENTLY` on a separate autocommit
+  connection, so starting up against an existing large table does not lock out
+  writes while the index builds.
 - **`SqliteMetadataStore`** (`sqlite`) — the same two tables over `aiosqlite`
   (a single shared connection, WAL mode + busy timeout so it can share a file
   with the SQLite checkpointer); a durable, serverless option.

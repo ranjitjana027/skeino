@@ -18,9 +18,11 @@ use `pydantic-settings` in your own project and pass the result in:
 from pydantic_settings import BaseSettings
 from skeino import SkeinoSettings, create_app
 
+
 class Env(BaseSettings):
     checkpointer_scheme: str = "memory"
     checkpointer_uri: str | None = None
+
 
 env = Env()  # reads CHECKPOINTER_SCHEME / CHECKPOINTER_URI from the environment
 app = create_app(

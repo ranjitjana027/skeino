@@ -72,15 +72,33 @@ Prefix: `/threads/{thread_id}`
 | `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
 | `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 
+### Stateless runs
+
+No prefix. One-shot invocations that keep nothing: each runs against a thread
+created and deleted inside the request, so no thread id is needed and none is
+returned.
+
+| Method | Path | Request | Response | Notes |
+| --- | --- | --- | --- | --- |
+| `POST` | `/runs` | `RunCreateRequest` | `RunModel` | Execute to completion, return run metadata. Header: `X-Tokens-Used`. Runs synchronously and unlike the thread-scoped background form, since the thread is deleted before the response is returned — there would be nothing left to poll or join against. No `Location` header: the run's thread no longer exists. |
+| `POST` | `/runs/wait` | `RunCreateRequest` | graph state | Execute to completion, return the graph's final state. |
+| `POST` | `/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`), same event sequence as the thread-scoped form. |
+| `POST` | `/runs/batch` | `list[RunCreateRequest]` | `list[graph state]` | Execute each payload on its own ephemeral thread, sequentially, and return the outputs in order. |
+
+`checkpoint` is rejected with a 400 on these routes — a stateless run has no
+history to resume from. Use the thread-scoped routes for anything that needs to
+be resumed, inspected, or continued.
+
 ### Key `RunCreateRequest` fields
 
 A curated quick-reference for the most-used fields. Every request and response
 model — including all remaining `RunCreateRequest` fields — carries a per-field
 description in the [Python API reference](python.md), which is the
-authoritative, always-current source. Response models additionally render those
-descriptions in the [API explorer](explorer.md) and `/docs`; request models are
-not yet part of the generated OpenAPI schema (tracked in
-[#67](https://github.com/ranjitjana027/skeino/issues/67)).
+authoritative, always-current source. Both request and response models also
+render those descriptions in the [API explorer](explorer.md) and `/docs`:
+although skeino parses request bodies by hand (to tolerate `text/plain`), their
+models are injected into the generated OpenAPI schema so the bodies are fully
+documented.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
