@@ -63,10 +63,14 @@ Prefix: `/threads/{thread_id}`
 
 | Method | Path | Request | Response | Notes |
 | --- | --- | --- | --- | --- |
-| `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | Execute to completion. Headers: `Location`, `X-Tokens-Used`. |
+| `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | **Background** create — returns immediately with a `pending`/`running` run. Header: `Location`. |
+| `POST` | `/threads/{thread_id}/runs/wait` | `RunCreateRequest` | output values | Run to completion and return the final graph state values. Header: `X-Tokens-Used`. |
 | `POST` | `/threads/{thread_id}/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`). See [Streaming](../concepts/streaming.md). |
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
+| `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values. |
+| `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
+| `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 
 ### Stateless runs
 
@@ -76,7 +80,7 @@ returned.
 
 | Method | Path | Request | Response | Notes |
 | --- | --- | --- | --- | --- |
-| `POST` | `/runs` | `RunCreateRequest` | `RunModel` | Execute to completion, return run metadata. Header: `X-Tokens-Used`. Runs synchronously — skeino has no background executor, so this differs from the Platform, where `POST /runs` returns immediately. No `Location` header: the run's thread no longer exists. |
+| `POST` | `/runs` | `RunCreateRequest` | `RunModel` | Execute to completion, return run metadata. Header: `X-Tokens-Used`. Runs synchronously and unlike the thread-scoped background form, since the thread is deleted before the response is returned — there would be nothing left to poll or join against. No `Location` header: the run's thread no longer exists. |
 | `POST` | `/runs/wait` | `RunCreateRequest` | graph state | Execute to completion, return the graph's final state. |
 | `POST` | `/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`), same event sequence as the thread-scoped form. |
 | `POST` | `/runs/batch` | `list[RunCreateRequest]` | `list[graph state]` | Execute each payload on its own ephemeral thread, sequentially, and return the outputs in order. |

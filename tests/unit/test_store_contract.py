@@ -100,3 +100,22 @@ async def test_run_rows_match_contract_keys_through_error_lifecycle(
     rows = await store.list_run_rows(tid, limit=10, offset=0, status_value=None)
     assert [set(row) for row in rows] == [RUN_KEYS]
     assert rows[0]["error"] is None
+
+
+async def test_delete_run_removes_only_the_target(
+    store: MetadataStoreProtocol,
+) -> None:
+    tid, keep, drop = str(uuid4()), str(uuid4()), str(uuid4())
+    await store.create_thread(tid, metadata={}, config={}, ttl=None, if_exists="raise")
+    for rid in (keep, drop):
+        await store.create_run(
+            rid, tid, "agent", metadata={}, kwargs={}, multitask_strategy="enqueue"
+        )
+
+    await store.delete_run(tid, drop)
+    assert await store.fetch_run_row(tid, drop) is None
+    assert await store.fetch_run_row(tid, keep) is not None
+
+    # Wrong thread scope must not delete the row.
+    await store.delete_run(str(uuid4()), keep)
+    assert await store.fetch_run_row(tid, keep) is not None

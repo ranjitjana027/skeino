@@ -45,8 +45,10 @@ def test_failed_sync_run_releases_lock_and_records_error() -> None:
     with TestClient(app) as client:
         thread_id = _new_thread(client)
         graph.invoke_error = RuntimeError("graph boom")
+        # /runs/wait awaits the background task, so the graph failure surfaces
+        # to the caller as a 500.
         r = client.post(
-            f"/threads/{thread_id}/runs",
+            f"/threads/{thread_id}/runs/wait",
             json={"assistant_id": "test_agent", "input": {"messages": []}},
         )
         assert r.status_code == 500

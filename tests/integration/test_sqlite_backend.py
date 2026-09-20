@@ -67,18 +67,18 @@ def test_sqlite_backend_end_to_end() -> None:
         assert got.status_code == 200
         assert got.json()["metadata"]["t"] == "x"
 
-        run = client.post(
-            f"/threads/{thread_id}/runs",
+        out = client.post(
+            f"/threads/{thread_id}/runs/wait",
             json={
                 "assistant_id": "test_agent",
                 "input": {"messages": [{"role": "user", "content": "hi"}]},
             },
         )
-        assert run.status_code == 200
-        assert run.json()["status"] == "success"
+        assert out.status_code == 200
 
         listed = client.get(f"/threads/{thread_id}/runs").json()
-        assert any(r["run_id"] == run.json()["run_id"] for r in listed)
+        assert len(listed) == 1
+        assert listed[0]["status"] == "success"
 
 
 def test_sqlite_scheme_without_uri_defaults_to_memory() -> None:
@@ -111,13 +111,12 @@ def test_sqlite_file_shared_by_checkpointer_and_metadata_store(tmp_path: Path) -
         thread_id = client.post("/threads", json={"metadata": {"t": "x"}}).json()[
             "thread_id"
         ]
-        run = client.post(
-            f"/threads/{thread_id}/runs",
+        out = client.post(
+            f"/threads/{thread_id}/runs/wait",
             json={
                 "assistant_id": "test_agent",
                 "input": {"messages": [{"role": "user", "content": "hi"}]},
             },
         )
-        assert run.status_code == 200
-        assert run.json()["status"] == "success"
+        assert out.status_code == 200
     assert db_path.exists()
