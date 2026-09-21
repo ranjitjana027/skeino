@@ -24,11 +24,18 @@ from skeino.schemas.common import (
     ThreadIfExists,
     ThreadStatus,
 )
-from skeino.schemas.runs import CommandModel, RunCreateRequest, RunModel
+from skeino.schemas.runs import (
+    CommandModel,
+    LangSmithTracerModel,
+    RunCreateRequest,
+    RunModel,
+)
 from skeino.schemas.server import (
     ErrorResponse,
     HealthResponse,
     InitialMessageResponse,
+    ServerFlagsModel,
+    ServerHostModel,
     ServerInfoModel,
 )
 from skeino.schemas.threads import (
@@ -63,10 +70,13 @@ __all__ = [
     "JsonObject",
     "JsonValue",
     "MultitaskStrategy",
+    "LangSmithTracerModel",
     "RunCreateRequest",
     "RunIfNotExists",
     "RunModel",
     "RunStatus",
+    "ServerFlagsModel",
+    "ServerHostModel",
     "ServerInfoModel",
     "StreamMode",
     "ThreadCreateRequest",

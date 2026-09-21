@@ -846,6 +846,39 @@
         "title": "InterruptModel",
         "type": "object"
       },
+      "LangSmithTracerModel": {
+        "description": "Per-run LangSmith destination, as LangGraph Studio sends it.\n\nWhen tracing is enabled, the run's trace is written to ``project_name`` as\nwell as to the server's default project, and \u2014 with ``example_id`` \u2014 linked\nto that dataset example.",
+        "properties": {
+          "example_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Dataset example the run's trace is a result for.",
+            "title": "Example Id"
+          },
+          "project_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "LangSmith project (session) to trace this run into.",
+            "title": "Project Name"
+          }
+        },
+        "title": "LangSmithTracerModel",
+        "type": "object"
+      },
       "RunCreateRequest": {
         "description": "Payload for creating a run on an existing thread.",
         "properties": {
@@ -1060,6 +1093,18 @@
             "description": "Nodes to interrupt before; ``\"*\"`` for all.",
             "title": "Interrupt Before"
           },
+          "langsmith_tracer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LangSmithTracerModel"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Also trace this run into the given LangSmith project (LangGraph Studio sets it). Ignored when tracing is not enabled."
+          },
           "metadata": {
             "additionalProperties": {
               "anyOf": [
@@ -1228,6 +1273,18 @@
             "title": "Kwargs",
             "type": "object"
           },
+          "langsmith_session_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "LangSmith project (session) the run's trace was written to; ``null`` when tracing was not enabled.",
+            "title": "Langsmith Session Name"
+          },
           "metadata": {
             "additionalProperties": {
               "anyOf": [
@@ -1314,9 +1371,129 @@
         "title": "RunModel",
         "type": "object"
       },
-      "ServerInfoModel": {
-        "description": "Minimal system information exposed by the server.",
+      "ServerFlagsModel": {
+        "description": "Capabilities advertised to clients, in langgraph-api's ``/info`` shape.\n\nLangGraph Studio reads these to decide what it can do against the server \u2014\ntracing above all: without ``langsmith_tracing_session_on_runs`` it refuses\nto show in-Studio traces.",
         "properties": {
+          "assistants": {
+            "default": true,
+            "description": "Assistant endpoints are served.",
+            "title": "Assistants",
+            "type": "boolean"
+          },
+          "crons": {
+            "default": false,
+            "description": "Cron endpoints are served (skeino has none).",
+            "title": "Crons",
+            "type": "boolean"
+          },
+          "langsmith": {
+            "description": "LangSmith tracing is configured for this server's runs.",
+            "title": "Langsmith",
+            "type": "boolean"
+          },
+          "langsmith_tracing_replicas": {
+            "default": true,
+            "description": "A run can write its trace to more than one LangSmith project.",
+            "title": "Langsmith Tracing Replicas",
+            "type": "boolean"
+          },
+          "langsmith_tracing_session_on_runs": {
+            "default": true,
+            "description": "Runs accept ``langsmith_tracer.project_name`` and report the ``langsmith_session_name`` their trace was written to.",
+            "title": "Langsmith Tracing Session On Runs",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "langsmith"
+        ],
+        "title": "ServerFlagsModel",
+        "type": "object"
+      },
+      "ServerHostModel": {
+        "description": "Where the server runs, in langgraph-api's ``/info`` shape.",
+        "properties": {
+          "host_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Host revision id.",
+            "title": "Host Revision Id"
+          },
+          "kind": {
+            "default": "self-hosted",
+            "description": "Hosting kind; skeino is always self-hosted.",
+            "title": "Kind",
+            "type": "string"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "LangSmith deployment id.",
+            "title": "Project Id"
+          },
+          "revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Deployment revision id.",
+            "title": "Revision Id"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "LangSmith tenant id.",
+            "title": "Tenant Id"
+          }
+        },
+        "title": "ServerHostModel",
+        "type": "object"
+      },
+      "ServerInfoModel": {
+        "description": "System information exposed by the server.\n\n``status``/``name``/``version`` are skeino's own; ``langgraph_py_version``,\n``flags`` and ``host`` follow langgraph-api so LangGraph Studio and SDK\nclients can read the server's capabilities.",
+        "properties": {
+          "flags": {
+            "$ref": "#/components/schemas/ServerFlagsModel",
+            "description": "Capabilities the server supports."
+          },
+          "host": {
+            "$ref": "#/components/schemas/ServerHostModel",
+            "description": "Hosting details."
+          },
+          "langgraph_py_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Installed ``langgraph`` library version.",
+            "title": "Langgraph Py Version"
+          },
           "name": {
             "description": "Server identity reported to SDK clients.",
             "title": "Name",
@@ -1328,7 +1505,7 @@
             "type": "string"
           },
           "version": {
-            "description": "Running skeino version.",
+            "description": "Server version (``SkeinoSettings.server_version``).",
             "title": "Version",
             "type": "string"
           }
@@ -1336,7 +1513,8 @@
         "required": [
           "status",
           "name",
-          "version"
+          "version",
+          "flags"
         ],
         "title": "ServerInfoModel",
         "type": "object"

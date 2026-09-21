@@ -43,6 +43,7 @@ from skeino.streaming import (
     is_retriable_stream_error,
     sse_event,
 )
+from skeino.tracing import resolve_session_name, run_tracing_context
 from skeino.usage import (
     attach_usage_handler,
     total_tokens_from_messages,
@@ -60,6 +61,15 @@ _RUN_INTERRUPTED: Final[RunStatus] = "interrupted"
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"success", "error", "interrupted", "timeout"}
 )
+
+
+def _session_name_of(kwargs: Any) -> str | None:
+    """Read the LangSmith session a stored run was traced into, if any."""
+    if isinstance(kwargs, dict):
+        value = kwargs.get("langsmith_session_name")
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 class RunOps:
@@ -264,37 +274,41 @@ class RunOps:
                 # One handler for all retry attempts: tokens consumed by a
                 # failed attempt were still consumed, so they count.
                 usage_handler = attach_usage_handler(config)
-                for attempt in range(STREAM_MAX_RETRIES):
-                    try:
-                        async for event_name, payload in self._streamer.stream(
-                            runnable_input, config, request, stream_modes
-                        ):
-                            yield sse_event(event_name, payload, event_id)
-                            event_id += 1
-                            emitted_data = True
-                        break
-                    except Exception as exc:
-                        # Only retry while nothing has reached the client. Graph
-                        # execution is not idempotent, so replaying a partially
-                        # streamed run would duplicate output and re-invoke the
-                        # model. ``CancelledError`` is a BaseException and is
-                        # deliberately not caught here so client disconnects
-                        # propagate to the cancellation handler below.
-                        if (
-                            attempt < STREAM_MAX_RETRIES - 1
-                            and not emitted_data
-                            and is_retriable_stream_error(exc)
-                        ):
-                            backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
-                            self._log_warning(
-                                "Stream attempt %s failed (retrying in %.1fs): %s",
-                                attempt + 1,
-                                backoff,
-                                exc,
-                            )
-                            await asyncio.sleep(backoff)
-                        else:
-                            raise
+                # Route the run's trace to its requested LangSmith project too
+                # (skeino.tracing). Around the whole attempt loop, so a retried
+                # attempt traces to the same projects as the first.
+                with run_tracing_context(request.langsmith_tracer):
+                    for attempt in range(STREAM_MAX_RETRIES):
+                        try:
+                            async for event_name, payload in self._streamer.stream(
+                                runnable_input, config, request, stream_modes
+                            ):
+                                yield sse_event(event_name, payload, event_id)
+                                event_id += 1
+                                emitted_data = True
+                            break
+                        except Exception as exc:
+                            # Only retry while nothing has reached the client. Graph
+                            # execution is not idempotent, so replaying a partially
+                            # streamed run would duplicate output and re-invoke the
+                            # model. ``CancelledError`` is a BaseException and is
+                            # deliberately not caught here so client disconnects
+                            # propagate to the cancellation handler below.
+                            if (
+                                attempt < STREAM_MAX_RETRIES - 1
+                                and not emitted_data
+                                and is_retriable_stream_error(exc)
+                            ):
+                                backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
+                                self._log_warning(
+                                    "Stream attempt %s failed (retrying in %.1fs): %s",
+                                    attempt + 1,
+                                    backoff,
+                                    exc,
+                                )
+                                await asyncio.sleep(backoff)
+                            else:
+                                raise
 
                 await self._metadata_store.update_run_status(
                     str(run.run_id), _RUN_SUCCESS
@@ -728,15 +742,16 @@ class RunOps:
             thread_id, request.config, request.checkpoint, run_id=run_id
         )
         usage_handler = attach_usage_handler(config)
-        result = await self._graph.ainvoke(
-            runnable_input,
-            config,
-            context=normalize_input_payload(request.context),
-            stream_mode="values",
-            interrupt_before=request.interrupt_before,
-            interrupt_after=request.interrupt_after,
-            durability=request.durability,
-        )
+        with run_tracing_context(request.langsmith_tracer):
+            result = await self._graph.ainvoke(
+                runnable_input,
+                config,
+                context=normalize_input_payload(request.context),
+                stream_mode="values",
+                interrupt_before=request.interrupt_before,
+                interrupt_after=request.interrupt_after,
+                durability=request.durability,
+            )
         return usage_handler, result
 
     async def _settled_thread_status(self, thread_id: str) -> ThreadStatus:
@@ -820,6 +835,7 @@ class RunOps:
             metadata=serialize_mapping(row["metadata"]),
             kwargs=serialize_mapping(row["kwargs"]),
             multitask_strategy=row["multitask_strategy"],
+            langsmith_session_name=_session_name_of(row["kwargs"]),
         )
 
     def _resolve_run_input(self, request: RunCreateRequest) -> Any:
@@ -860,6 +876,15 @@ class RunOps:
             "interrupt_after": serialize_value(request.interrupt_after),
             "on_disconnect": request.on_disconnect,
             "durability": request.durability,
+            # Stored with the run rather than in a new column, so the session
+            # name survives without a metadata-store migration. Resolved at
+            # creation: it records where this run's trace was sent.
+            "langsmith_tracer": (
+                serialize_mapping(request.langsmith_tracer.model_dump(mode="python"))
+                if request.langsmith_tracer is not None
+                else None
+            ),
+            "langsmith_session_name": resolve_session_name(request.langsmith_tracer),
         }
 
     async def _mark_run_failed(self, run_id: str, thread_id: str, error: str) -> None:

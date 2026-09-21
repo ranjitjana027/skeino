@@ -29,6 +29,15 @@ Run     (run_id, belongs to a thread)
   skeino stamps each checkpoint's metadata with the `run_id` that produced it, so
   clients (including LangGraph Studio) can group checkpoints by run.
 
+**Tracing a run into LangGraph Studio.** When LangSmith tracing is enabled for
+the server, a run may carry `langsmith_tracer: {project_name, example_id}` —
+LangGraph Studio sets it on every run it starts. The run's whole trace is then
+written to that project *and* to the server's default project (LangSmith write
+replicas), linked to the dataset example when `example_id` is given, and the run
+reports where it went as `langsmith_session_name`. `GET /info` advertises this
+as `flags.langsmith_tracing_session_on_runs`; Studio will not show in-app traces
+without it. With tracing off the field is accepted and ignored.
+
 ### Two stores, two responsibilities
 
 State is deliberately split across two backends:
