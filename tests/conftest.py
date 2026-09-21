@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
+from langsmith import run_helpers
 
 from skeino import SkeinoSettings, create_app
 
@@ -74,6 +75,11 @@ class FakeGraph:
         # waits on ``interrupt()``. Lets tests exercise what a run that ends
         # parked (rather than finished) does to the thread's status.
         self.pending_interrupts: tuple[Any, ...] = ()
+        # --- LangSmith tracing context observed at execution time ---
+        # Each ainvoke/astream records the tracing context it ran under, so
+        # tests can assert *where* a run's trace would have been written
+        # rather than only that a field was accepted.
+        self.tracing_seen: list[dict[str, Any]] = []
 
     async def aupdate_state(
         self,
@@ -156,6 +162,7 @@ class FakeGraph:
         durability: str | None = None,
     ) -> dict[str, Any]:
         del context, stream_mode, interrupt_before, interrupt_after, durability
+        self.tracing_seen.append(dict(run_helpers.get_tracing_context()))
         if self.invoke_error is not None:
             raise self.invoke_error
         if self.invoke_gate is not None:
@@ -198,6 +205,7 @@ class FakeGraph:
         debug: bool | None = None,
     ):
         del context, interrupt_before, interrupt_after, durability, subgraphs, debug
+        self.tracing_seen.append(dict(run_helpers.get_tracing_context()))
         thread_id = str(config["configurable"]["thread_id"])
         state = self.state_by_thread.setdefault(thread_id, {})
         messages: list[Any] = []

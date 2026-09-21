@@ -31,6 +31,22 @@ class CommandModel(BaseModel):
     )
 
 
+class LangSmithTracerModel(BaseModel):
+    """Per-run LangSmith destination, as LangGraph Studio sends it.
+
+    When tracing is enabled, the run's trace is written to ``project_name`` as
+    well as to the server's default project, and — with ``example_id`` — linked
+    to that dataset example.
+    """
+
+    project_name: str | None = Field(
+        default=None, description="LangSmith project (session) to trace this run into."
+    )
+    example_id: str | None = Field(
+        default=None, description="Dataset example the run's trace is a result for."
+    )
+
+
 class RunCreateRequest(BaseModel):
     """Payload for creating a run on an existing thread."""
 
@@ -105,6 +121,13 @@ class RunCreateRequest(BaseModel):
         default="exit",
         description="When checkpoints are written relative to graph steps.",
     )
+    langsmith_tracer: LangSmithTracerModel | None = Field(
+        default=None,
+        description=(
+            "Also trace this run into the given LangSmith project (LangGraph "
+            "Studio sets it). Ignored when tracing is not enabled."
+        ),
+    )
 
 
 class RunModel(BaseModel):
@@ -128,4 +151,11 @@ class RunModel(BaseModel):
     )
     multitask_strategy: MultitaskStrategy = Field(
         description="Multitask strategy the run was created with."
+    )
+    langsmith_session_name: str | None = Field(
+        default=None,
+        description=(
+            "LangSmith project (session) the run's trace was written to; "
+            "``null`` when tracing was not enabled."
+        ),
     )

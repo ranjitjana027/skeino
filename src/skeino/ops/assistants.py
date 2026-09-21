@@ -11,11 +11,13 @@ from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from fastapi import HTTPException, status
+from langgraph import version as langgraph_version
 
 from skeino.schemas import (
     AssistantModel,
     AssistantSearchRequest,
     GraphSchemaModel,
+    ServerFlagsModel,
     ServerInfoModel,
 )
 from skeino.serialization import (
@@ -23,6 +25,7 @@ from skeino.serialization import (
     serialize_optional_mapping,
     serialize_value,
 )
+from skeino.tracing import tracing_enabled
 
 
 class AssistantOps:
@@ -65,11 +68,18 @@ class AssistantOps:
         return self._default_assistant_id
 
     def get_server_info(self, server_version: str) -> ServerInfoModel:
-        """Return minimal system information for the standalone server."""
+        """Return server information, including langgraph-api's capability flags.
+
+        ``flags.langsmith`` is live: it reflects whether this process traces to
+        LangSmith right now. The session flags are always on, because runs
+        always accept ``langsmith_tracer`` (skeino.tracing).
+        """
         return ServerInfoModel(
             status="ok",
             name=self._default_assistant_id,
             version=server_version,
+            langgraph_py_version=langgraph_version.__version__,
+            flags=ServerFlagsModel(langsmith=tracing_enabled()),
         )
 
     def matches(self, assistant_id: str) -> bool:
