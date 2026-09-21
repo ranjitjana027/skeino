@@ -117,7 +117,10 @@ are accepted by the schema but rejected at runtime as out of scope for v1.
 
 ## Status values
 
-- **Thread status:** `idle`, `busy`, `interrupted`, `error`.
+- **Thread status:** `idle`, `busy`, `interrupted`, `error`. A thread is
+  `interrupted` while its graph waits on an `interrupt()` — the pending
+  request is in `interrupts` on the thread and on its state's tasks, and the
+  next run resumes it with `command.resume`.
 - **Run status:** `pending`, `running`, `success`, `error`, `timeout`,
   `interrupted`.
 

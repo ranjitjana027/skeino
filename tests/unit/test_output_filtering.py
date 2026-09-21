@@ -66,3 +66,39 @@ def test_updates_filter_no_schema_passes_through() -> None:
     streamer = Streamer(SimpleNamespace())
     payload = {"node": {"messages": [{"id": "a"}], "anything": 1}}
     assert streamer._filter_updates(payload) == payload
+
+
+def test_values_filter_keeps_the_interrupt_channel() -> None:
+    # ``__interrupt__`` rides in the ``values`` payload when a graph pauses for
+    # human input. It is protocol, not graph state, so the output-schema filter
+    # must not strip it: the SDK's ``useStream`` reads the pending interrupt
+    # straight off this key, and without it a paused run looks like a run that
+    # stopped for no reason.
+    streamer = Streamer(SimpleNamespace(output_schema=_OutputSchema))
+    filtered = streamer._filter_values(
+        {
+            "messages": [{"id": "a"}],
+            "evidence": "internal-secret",
+            "__interrupt__": [{"value": {"action_requests": []}, "id": "i1"}],
+        }
+    )
+    assert filtered == {
+        "messages": [{"id": "a"}],
+        "__interrupt__": [{"value": {"action_requests": []}, "id": "i1"}],
+    }
+
+
+def test_updates_filter_keeps_the_interrupt_channel() -> None:
+    # Same for ``updates``, where ``__interrupt__`` sits where a node name would
+    # and its payload is a list of interrupts rather than a state delta.
+    streamer = Streamer(SimpleNamespace(output_schema=_OutputSchema))
+    filtered = streamer._filter_updates(
+        {
+            "simple": {"messages": [{"id": "a"}], "final_report_raw": "leak"},
+            "__interrupt__": [{"value": {"action_requests": []}, "id": "i1"}],
+        }
+    )
+    assert filtered == {
+        "simple": {"messages": [{"id": "a"}]},
+        "__interrupt__": [{"value": {"action_requests": []}, "id": "i1"}],
+    }
