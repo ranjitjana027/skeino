@@ -10,6 +10,23 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [3.1.0] - 2026-09-22
+
+### Added
+
+- LangGraph Studio can now show traces for runs on a skeino server. Studio only
+  does so when `GET /info` advertises session-name tracing, and skeino reported
+  nothing but `{status, name, version}` — so Studio refused ("Studio tracing
+  requires langgraph-api 0.11.0 or later with session-name tracing enabled").
+  `/info` now also returns langgraph-api's `langgraph_py_version`, `flags`
+  (`langsmith_tracing_session_on_runs`, `langsmith_tracing_replicas`, a live
+  `langsmith` flag, `crons: false`) and `host`. Runs accept
+  `langsmith_tracer: {project_name, example_id}` and, when tracing is enabled,
+  execute inside a LangSmith tracing context that writes the trace to that project
+  as well as the server's default one; each run reports the project as
+  `langsmith_session_name`. With tracing off, the field is accepted and ignored. ([#106](https://github.com/ranjitjana027/skeino/issues/106))
+
+
 ## [3.0.1] - 2026-09-22
 
 ### Fixed
@@ -306,7 +323,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.0.1...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.1.0...HEAD
+[3.1.0]: https://github.com/ranjitjana027/skeino/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/ranjitjana027/skeino/compare/v2.2.0...v3.0.0
 [2.2.0]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...v2.2.0
