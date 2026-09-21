@@ -10,6 +10,29 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [3.0.1] - 2026-09-22
+
+### Fixed
+
+- Interrupts now reach clients as data instead of as text. LangGraph's `Interrupt`
+  is a slotted dataclass, which the outbound serializer could not introspect, so
+  it fell back to `str()` and streamed the Python repr — an approval UI reading
+  `interrupt.value` found a string. Dataclasses are now serialized from their
+  declared fields, in both the streaming and state-snapshot serializers. ([#104](https://github.com/ranjitjana027/skeino/issues/104))
+- A thread parked on an `interrupt()` now reports `status: "interrupted"` instead
+  of `"idle"`, matching LangGraph Platform. The status was written from the run's
+  outcome alone, and a run that ends waiting for a human decision ends
+  successfully — so a thread waiting on an approval was indistinguishable from one
+  with nothing pending. The status is now read from the checkpoint after the run
+  settles; an unreadable checkpoint still falls back to `"idle"`. ([#104](https://github.com/ranjitjana027/skeino/issues/104))
+- A paused run now reaches the client. The output-schema filter treated
+  LangGraph's reserved `__interrupt__` channel as ordinary graph state and
+  stripped it from `values` events, so a graph that called `interrupt()` looked to
+  the SDK like a run that simply stopped — no approval prompt, no way to resume.
+  Reserved dunder channels are now exempt from the filter in both `values` and
+  `updates` events; graph state is still filtered exactly as before. ([#104](https://github.com/ranjitjana027/skeino/issues/104))
+
+
 ## [3.0.0] - 2026-09-20
 
 ### Added
@@ -283,7 +306,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.0.1...HEAD
+[3.0.1]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/ranjitjana027/skeino/compare/v2.2.0...v3.0.0
 [2.2.0]: https://github.com/ranjitjana027/skeino/compare/v2.1.1...v2.2.0
 [2.1.1]: https://github.com/ranjitjana027/skeino/compare/v2.1.0...v2.1.1
