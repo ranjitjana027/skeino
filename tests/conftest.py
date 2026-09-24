@@ -75,6 +75,10 @@ class FakeGraph:
         # waits on ``interrupt()``. Lets tests exercise what a run that ends
         # parked (rather than finished) does to the thread's status.
         self.pending_interrupts: tuple[Any, ...] = ()
+        # Older LangGraph snapshots report a pause only on the snapshot's
+        # pending *tasks*, with nothing on the snapshot itself. Set this
+        # instead of ``pending_interrupts`` to exercise that shape.
+        self.pending_task_interrupts: tuple[Any, ...] = ()
         # --- LangSmith tracing context observed at execution time ---
         # Each ainvoke/astream records the tracing context it ran under, so
         # tests can assert *where* a run's trace would have been written
@@ -315,10 +319,22 @@ class FakeGraph:
         configurable: dict[str, Any] = {"thread_id": thread_id}
         if checkpoint_id is not None:
             configurable["checkpoint_id"] = checkpoint_id
+        tasks: tuple[Any, ...] = ()
+        if self.pending_task_interrupts:
+            tasks = (
+                SimpleNamespace(
+                    id="task-1",
+                    name="paused_node",
+                    error=None,
+                    interrupts=self.pending_task_interrupts,
+                    checkpoint=None,
+                    state=None,
+                ),
+            )
         return SimpleNamespace(
             values=dict(values),
             next=(),
-            tasks=(),
+            tasks=tasks,
             config={"configurable": configurable},
             metadata={},
             created_at=_utcnow(),

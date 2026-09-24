@@ -61,6 +61,23 @@ _RUN_INTERRUPTED: Final[RunStatus] = "interrupted"
 _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"success", "error", "interrupted", "timeout"}
 )
+_INTERRUPT_CHANNEL: Final[str] = "__interrupt__"
+
+
+def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
+    """Return the interrupts a state snapshot is parked on.
+
+    ``StateSnapshot.interrupts`` is where LangGraph keeps them; older
+    snapshots expose pending interrupts only per task, so fall back to
+    walking ``tasks``. Empty when the graph is not waiting on anything.
+    """
+    interrupts = getattr(snapshot, "interrupts", ()) or ()
+    if interrupts:
+        return tuple(interrupts)
+    from_tasks: list[Any] = []
+    for task in getattr(snapshot, "tasks", ()) or ():
+        from_tasks.extend(getattr(task, "interrupts", ()) or ())
+    return tuple(from_tasks)
 
 
 def _session_name_of(kwargs: Any) -> str | None:
@@ -698,6 +715,9 @@ class RunOps:
         (the LangGraph ``runs.wait``/``runs.join`` contract returns output for
         the requested run). Falls back to the latest thread state when no
         run-scoped checkpoint is available (e.g. no checkpointer).
+
+        Whatever checkpoint answers, a run parked on ``interrupt()`` reports it
+        — see :meth:`_output_with_interrupts`.
         """
         config = {"configurable": {"thread_id": thread_id}}
         get_history = getattr(self._graph, "aget_state_history", None)
@@ -706,7 +726,7 @@ class RunOps:
                 async for snapshot in get_history(
                     config, filter={"run_id": run_id}, limit=1
                 ):
-                    return serialize_value(getattr(snapshot, "values", None))
+                    return self._output_with_interrupts(snapshot)
             except Exception as exc:
                 # Run-scoped read is best-effort; fall back to the latest state.
                 self._log_warning(
@@ -725,7 +745,41 @@ class RunOps:
                 exc=exc,
             )
             return None
-        return serialize_value(getattr(snapshot, "values", None))
+        return self._output_with_interrupts(snapshot)
+
+    def _output_with_interrupts(self, snapshot: Any) -> JsonValue:
+        """Serialize a snapshot's values, carrying its pending interrupts along.
+
+        A run that ends on ``interrupt()`` finishes without error, so its state
+        values alone are indistinguishable from a finished run's: the tool call
+        awaiting a decision sits in ``messages`` with no result after it, and
+        nothing in the output says a human is being waited on. Interrupts are
+        not part of ``values`` — they live on the snapshot (and, on older
+        LangGraph, per task) — so merge them onto the reserved
+        ``__interrupt__`` channel, which is where the streaming path, LangGraph
+        Platform's ``runs.wait``, and the SDK's ``useStream`` all expect them.
+        """
+        output = serialize_value(getattr(snapshot, "values", None))
+        interrupts = _pending_interrupts(snapshot)
+        if not interrupts:
+            return output
+        if not isinstance(output, dict):
+            # Non-mapping graph state has no channel to carry them on. Log
+            # loudly rather than drop the pause silently: the client is about
+            # to read a parked run as a completed one.
+            self._log_warning(
+                "Paused run output is %s, not a mapping; cannot report %s",
+                type(output).__name__,
+                _INTERRUPT_CHANNEL,
+            )
+            return output
+        if output.get(_INTERRUPT_CHANNEL):
+            # Already on the channel (a graph that writes it as state, or a
+            # LangGraph version that surfaces it in ``values``) — don't
+            # second-guess it.
+            return output
+        output[_INTERRUPT_CHANNEL] = serialize_value(interrupts)
+        return output
 
     async def _execute_graph_run(
         self, thread_id: str, request: RunCreateRequest, run_id: str | None = None
@@ -781,13 +835,8 @@ class RunOps:
             return _THREAD_IDLE
         if snapshot is None:
             return _THREAD_IDLE
-        interrupts = getattr(snapshot, "interrupts", ()) or ()
-        if interrupts:
+        if _pending_interrupts(snapshot):
             return _THREAD_INTERRUPTED
-        # Older LangGraph snapshots expose pending interrupts only via tasks.
-        for task in getattr(snapshot, "tasks", ()) or ():
-            if getattr(task, "interrupts", ()) or ():
-                return _THREAD_INTERRUPTED
         return _THREAD_IDLE
 
     async def _total_run_tokens(self, thread_id: str) -> int:
