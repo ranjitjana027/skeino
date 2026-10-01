@@ -217,7 +217,11 @@ def test_interrupt_passes_through_state_events(mode: str) -> None:
     interrupts = [
         d["__interrupt__"] for d in _data(events, mode) if "__interrupt__" in d
     ]
-    assert interrupts == [[{"value": "approve?", "id": interrupts[0][0]["id"]}]]
+    # Assert the contract fields only: LangGraph adds fields to Interrupt over
+    # time (e.g. ``response_schema`` in 1.2.12).
+    assert len(interrupts) == 1 and len(interrupts[0]) == 1
+    assert interrupts[0][0]["value"] == "approve?"
+    assert interrupts[0][0]["id"]
     # Upstream semantics: pausing on interrupt() is a *successful* run; the
     # pause lives on the thread. Run status ``interrupted`` means cancelled.
     assert events[-1][1]["status"] == "success"
