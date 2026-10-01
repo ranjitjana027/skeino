@@ -143,9 +143,9 @@ class RunEventStream:
             return
         self.closed_at = now
         for queue in tuple(self._subscribers):
-            if queue.full():
-                self._detach(queue)
-            else:
+            # A full queue contains valid events, not an overflow. Its drain
+            # observes closed state once those events have all been consumed.
+            if not queue.full():
                 queue.put_nowait(None)
 
     def _detach(
@@ -193,7 +193,10 @@ class RunEventStream:
         try:
             for event in replay:
                 yield event
-            while (event_or_end := await queue.get()) is not None:
+            while not (self.closed and queue.empty()):
+                event_or_end = await queue.get()
+                if event_or_end is None:
+                    break
                 if isinstance(event_or_end, SubscriberOverflowError):
                     raise event_or_end
                 yield event_or_end

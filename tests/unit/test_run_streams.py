@@ -123,16 +123,18 @@ async def test_slow_subscriber_is_detached_when_its_bounded_queue_fills() -> Non
         await slow.__anext__()
 
 
-async def test_close_detaches_subscriber_when_its_queue_is_full() -> None:
+async def test_close_preserves_all_events_when_queue_is_exactly_full() -> None:
     stream = RunEventStream("t", "r", resumable=False)
     slow = stream.subscribe(after=None)
-    for _ in range(256):
+    for _ in range(255):
         stream.publish("values", {})
+    stream.publish("end", {"status": "success"})
 
     stream.close(now=0.0)
+    events = [event async for event in slow]
+    assert [event.event_id for event in events] == list(range(1, 257))
+    assert events[-1].event == "end"
     assert stream.subscriber_count == 0
-    with pytest.raises(SubscriberOverflowError):
-        await slow.__anext__()
 
 
 def test_publish_after_close_fails_loudly() -> None:
