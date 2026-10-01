@@ -12,7 +12,7 @@ beyond what ``ThreadRow``/``RunRow`` declare. Behavioural comparisons go
 through ``_norm`` (UTC, millisecond precision) so a timestamp-precision gap
 fails only the dedicated timestamp tests, never masking an unrelated
 regression; ``test_timestamps_round_trip_exactly`` and
-``test_row_types_match_the_declared_contract`` pin exactness and types.
+``test_timestamps_are_timezone_aware`` pin exactness and offsets.
 """
 
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _sort_key(value: Any) -> tuple[int, Any]:
 MONGO_TIMESTAMP_GAPS = {
     name: "#135: Mongo returns naive, ms-truncated timestamps"
     for name in (
-        "test_row_types_match_the_declared_contract",
+        "test_timestamps_are_timezone_aware",
         "test_timestamps_round_trip_exactly",
     )
 }
@@ -162,9 +162,10 @@ class StoreContract:
         assert row["created_at"] == row["updated_at"]
         assert await self._get(store, tid) == row
 
-    async def test_row_types_match_the_declared_contract(
+    async def _typed_rows(
         self, store: MetadataStoreProtocol
-    ) -> None:
+    ) -> tuple[ThreadRow, RunRow, RunRow]:
+        """A thread with every timestamp set, plus a run as created and as read."""
         tid, rid = _tid(), _tid()
         await self._thread(store, tid)
         created = await store.create_run(rid, tid, "agent", {}, {}, "enqueue")
@@ -172,10 +173,19 @@ class StoreContract:
         thread = await store.fetch_thread_row(tid)
         run = await store.fetch_run_row(tid, rid)
         assert thread is not None and run is not None
+        return thread, created, run
+
+    async def test_row_ids_are_uuids(self, store: MetadataStoreProtocol) -> None:
+        thread, created, run = await self._typed_rows(store)
         assert isinstance(thread["thread_id"], UUID)
         for row in (created, run):
             assert isinstance(row["run_id"], UUID)
             assert isinstance(row["thread_id"], UUID)
+
+    async def test_timestamps_are_timezone_aware(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        thread, created, run = await self._typed_rows(store)
         for stamp in (
             thread["created_at"],
             thread["updated_at"],
