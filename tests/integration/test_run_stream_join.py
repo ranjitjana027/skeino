@@ -24,6 +24,7 @@ import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -503,6 +504,31 @@ async def test_burst_stream_does_not_detach_a_subscriber_that_can_drain() -> Non
         frames = parse_frames(await _drain(events))
 
         assert len([name for _, name, _ in frames if name == "custom"]) == 300
+
+
+async def test_join_refreshes_status_when_local_handles_have_disappeared() -> None:
+    async with running_app() as (app, _graph, _client):
+        run_ops = app.state.skeino.run_ops
+        run, events = await run_ops.create_streaming_run(
+            _THREAD, _request(stream_resumable=False)
+        )
+        await _drain(events)
+        await asyncio.sleep(0)
+        final = await run_ops.get_run(_THREAD, str(run.run_id))
+        run_ops.get_run = AsyncMock(
+            side_effect=[final.model_copy(update={"status": "running"}), final]
+        )
+        joined = await run_ops.join_run_stream(
+            _THREAD,
+            str(run.run_id),
+            stream_modes=[],
+            last_event_id=None,
+            cancel_on_disconnect=False,
+        )
+        frames = parse_frames(await _drain(joined))
+        assert frames[-1][1] == "end"
+        assert frames[-1][2]["status"] == "success"
+        assert run_ops.get_run.await_count == 2
 
 
 async def test_cancel_before_stream_task_starts_runs_stateless_cleanup() -> None:

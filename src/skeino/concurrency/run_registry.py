@@ -14,6 +14,7 @@ before spawning a new run.
 """
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Coroutine
 
@@ -24,6 +25,8 @@ class BackgroundRunRegistry:
     def __init__(self) -> None:
         """Initialise empty task / active-run / admission-lock maps."""
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._completion: dict[str, asyncio.Future[None]] = {}
+        self._finalizer_tasks: set[asyncio.Task[None]] = set()
         self._active_by_thread: dict[str, set[str]] = {}
         self._admission_locks: dict[str, asyncio.Lock] = {}
 
@@ -57,7 +60,7 @@ class BackgroundRunRegistry:
         active: set[str] = set()
         for run_id in list(run_ids):
             task = self._tasks.get(run_id)
-            if task is not None and task.done():
+            if task is not None and task.done() and run_id not in self._completion:
                 self._forget(thread_id, run_id)
                 continue
             active.add(run_id)
@@ -76,7 +79,12 @@ class BackgroundRunRegistry:
         return self._tasks.get(run_id)
 
     def spawn(
-        self, thread_id: str, run_id: str, coro: Coroutine[Any, Any, Any]
+        self,
+        thread_id: str,
+        run_id: str,
+        coro: Coroutine[Any, Any, Any],
+        *,
+        finalize: Callable[[], Awaitable[None]] | None = None,
     ) -> asyncio.Task[Any]:
         """Schedule ``coro`` as a tracked background task and return it.
 
@@ -86,7 +94,29 @@ class BackgroundRunRegistry:
         task = asyncio.create_task(coro)
         self._tasks[run_id] = task
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
-        task.add_done_callback(lambda _t: self._forget(thread_id, run_id))
+        if finalize is None:
+            task.add_done_callback(lambda _t: self._forget(thread_id, run_id))
+        else:
+            completion = asyncio.get_running_loop().create_future()
+            self._completion[run_id] = completion
+
+            async def finish() -> None:
+                try:
+                    await finalize()
+                except BaseException as exc:
+                    completion.set_exception(exc)
+                else:
+                    completion.set_result(None)
+                finally:
+                    self._completion.pop(run_id, None)
+                    self._forget(thread_id, run_id)
+
+            def start_finalizer(_task: asyncio.Task[Any]) -> None:
+                cleanup = asyncio.create_task(finish())
+                self._finalizer_tasks.add(cleanup)
+                cleanup.add_done_callback(self._finalizer_tasks.discard)
+
+            task.add_done_callback(start_finalizer)
         return task
 
     def register_external(self, thread_id: str, run_id: str) -> None:
@@ -119,17 +149,23 @@ class BackgroundRunRegistry:
         into this coroutine.
         """
         task = self._tasks.get(run_id)
+        completion = self._completion.get(run_id)
         if task is None:
             return False
         task.cancel()
         if wait:
             await asyncio.wait({task})
+            if completion is not None:
+                await asyncio.shield(completion)
         return True
 
     async def shutdown(self) -> None:
         """Cancel and await every tracked task (runtime shutdown)."""
         tasks = list(self._tasks.values())
+        completions = list(self._completion.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.wait(set(tasks))
+        if completions:
+            await asyncio.gather(*completions)

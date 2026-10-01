@@ -334,34 +334,22 @@ class RunOps:
                 request,
                 stream_modes,
                 stream,
-                finish=finish,
                 mark_finalized=mark_finalized,
-                after_run=after_run,
             ),
+            finalize=lambda: finalize_run(),
         )
 
-        async def finalize_prestart_cancellation() -> None:
-            """Persist and clean up if cancellation beat the coroutine's start."""
+        async def finalize_run() -> None:
+            """Complete cleanup within the registry's awaited lifecycle."""
             nonlocal finalized
-            if finalized:
-                return
-            finalized = True
-            await self._mark_run_interrupted(run_id, thread_id)
-            if not stream.closed:
+            if not finalized:
+                finalized = True
+                await self._mark_run_interrupted(run_id, thread_id)
                 stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
             finish()
             if after_run is not None:
                 await after_run()
 
-        def task_done(done: asyncio.Task[Any]) -> None:
-            if finalized:
-                return
-            if done.cancelled():
-                asyncio.create_task(finalize_prestart_cancellation())
-            else:
-                finish()
-
-        task.add_done_callback(task_done)
         return run, self._relay(
             events,
             task,
@@ -413,6 +401,10 @@ class RunOps:
                 stream_modes=stream_modes,
                 cancel_on_disconnect=cancel_on_disconnect,
             )
+        if task is None:
+            # An async status read may have raced with the run finishing and
+            # its local handles being removed. Use a fresh persisted status.
+            run = await self.get_run(thread_id, run_id)
         if task is None and run.status not in _TERMINAL_STATUSES:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -436,9 +428,7 @@ class RunOps:
         stream_modes: list[str],
         stream: RunEventStream,
         *,
-        finish: Callable[[], None],
         mark_finalized: Callable[[], None],
-        after_run: Callable[[], Awaitable[None]] | None,
     ) -> int:
         """Execute a streaming run, publishing its events; return total tokens.
 
@@ -549,9 +539,6 @@ class RunOps:
             return 0
         finally:
             mark_finalized()
-            finish()
-            if after_run is not None:
-                await after_run()
 
     async def _relay(
         self,

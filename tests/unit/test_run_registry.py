@@ -7,6 +7,32 @@ import pytest
 from skeino.concurrency import BackgroundRunRegistry
 
 
+@pytest.mark.parametrize("shutdown", [False, True])
+async def test_prestart_finalization_is_awaited(shutdown: bool) -> None:
+    reg = BackgroundRunRegistry()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def work() -> None:
+        await asyncio.sleep(100)
+
+    async def finalize() -> None:
+        entered.set()
+        await release.wait()
+
+    task = reg.spawn("t", "r", work(), finalize=finalize)
+    task.cancel()
+    if shutdown:
+        waiting = asyncio.create_task(reg.shutdown())
+    else:
+        waiting = asyncio.create_task(reg.cancel("r", wait=True))
+    await entered.wait()
+    assert not waiting.done()
+    assert reg.active_runs("t") == {"r"}
+    release.set()
+    await waiting
+    assert reg.active_runs("t") == set()
+
+
 async def test_spawn_tracks_then_forgets_on_completion() -> None:
     reg = BackgroundRunRegistry()
 
