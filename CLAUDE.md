@@ -90,6 +90,13 @@ see `review-and-merge-prs`; to ship a release, see `cut-release`.
 - Prefer **integration tests** through `TestClient`; assert on response
   shape/status, not internals. `asyncio_mode = "auto"` — async tests need **no**
   `@pytest.mark.asyncio`.
+- For wire-shape behaviour (stream chunks, output filtering, interrupts), also
+  test against a **real compiled graph** from `tests/real_graphs.py`
+  (`real_client("<graph>")`, in-memory, no services). `FakeGraph` only emits the
+  shapes someone gave it; that gap is how #113 shipped.
+- A new test that exposes a known, not-yet-fixed bug lands as
+  `@pytest.mark.xfail(strict=True, reason="#<issue>: …")`. The fix PR removes
+  the marker; `strict` fails CI if a fix lands without removing it.
 - Tests must be **non-vacuous**: a test that still passes when the feature is
   broken is worthless. If a behaviour can't be exercised (e.g. failure
   injection, checkpoint selection), extend `FakeGraph` so it can.
