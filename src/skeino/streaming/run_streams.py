@@ -224,6 +224,7 @@ class RunStreamRegistry:
         self._max_history_bytes = max_history_bytes
         self._clock = clock
         self._streams: dict[str, RunEventStream] = {}
+        self._expiry: deque[RunEventStream] = deque()
 
     def open(self, thread_id: str, run_id: str, *, resumable: bool) -> RunEventStream:
         """Register and return a fresh stream for a run that is about to start."""
@@ -252,18 +253,20 @@ class RunStreamRegistry:
 
     def close(self, stream: RunEventStream) -> None:
         """Finish a stream, keeping it for replay only if it has history."""
+        was_closed = stream.closed
         stream.close(self._clock())
         if not stream.resumable or self._retention <= 0:
             self._streams.pop(stream.run_id, None)
+        elif not was_closed:
+            self._expiry.append(stream)
         self._sweep()
 
     def _sweep(self) -> None:
         now = self._clock()
-        expired = [
-            run_id
-            for run_id, stream in self._streams.items()
-            if stream.closed_at is not None
-            and now - stream.closed_at >= self._retention
-        ]
-        for run_id in expired:
-            del self._streams[run_id]
+        while self._expiry:
+            stream = self._expiry[0]
+            if stream.closed_at is None or now - stream.closed_at < self._retention:
+                break
+            self._expiry.popleft()
+            if self._streams.get(stream.run_id) is stream:
+                del self._streams[stream.run_id]

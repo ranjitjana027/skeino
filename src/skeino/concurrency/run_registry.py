@@ -140,6 +140,15 @@ class BackgroundRunRegistry:
             if not active:
                 del self._active_by_thread[thread_id]
 
+    async def wait(self, run_id: str) -> None:
+        """Wait for execution and finalization without cancelling either."""
+        task = self._tasks.get(run_id)
+        completion = self._completion.get(run_id)
+        if task is not None:
+            await asyncio.wait({task})
+        if completion is not None:
+            await asyncio.shield(completion)
+
     async def cancel(self, run_id: str, *, wait: bool) -> bool:
         """Cancel a live run task. Return whether one existed.
 
@@ -152,7 +161,8 @@ class BackgroundRunRegistry:
         completion = self._completion.get(run_id)
         if task is None:
             return False
-        task.cancel()
+        if not task.cancelling():
+            task.cancel()
         if wait:
             await asyncio.wait({task})
             if completion is not None:
@@ -164,7 +174,8 @@ class BackgroundRunRegistry:
         tasks = list(self._tasks.values())
         completions = list(self._completion.values())
         for task in tasks:
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
         if tasks:
             await asyncio.wait(set(tasks))
         if completions:

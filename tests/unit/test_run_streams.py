@@ -180,3 +180,20 @@ def test_zero_retention_drops_streams_on_close() -> None:
     stream = registry.open("t", "r", resumable=True)
     registry.close(stream)
     assert registry.get("t", "r") is None
+
+
+def test_expiry_tracks_close_order_and_ignores_repeated_close() -> None:
+    clock = _Clock()
+    registry = RunStreamRegistry(retention_seconds=10, clock=clock)
+    first = registry.open("t", "first", resumable=True)
+    second = registry.open("t", "second", resumable=True)
+    registry.close(second)
+    registry.close(second)
+    clock.now += 5
+    registry.close(first)
+    assert len(registry._expiry) == 2
+    clock.now += 5
+    assert registry.get("t", "second") is None
+    assert registry.get("t", "first") is first
+    clock.now += 5
+    assert registry.get("t", "first") is None

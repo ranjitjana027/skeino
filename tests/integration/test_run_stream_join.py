@@ -593,6 +593,46 @@ async def test_cancel_before_stream_task_starts_runs_stateless_cleanup() -> None
         assert str(run.run_id) not in run_ops._streams._streams
 
 
+async def test_overflow_cancels_once_while_interruption_write_is_pending() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        graph.stream_gate = asyncio.Event()
+        entered, release = asyncio.Event(), asyncio.Event()
+        persist = ops._mark_run_interrupted
+
+        async def delayed_interrupt(run_id: str, thread_id: str) -> None:
+            entered.set()
+            await release.wait()
+            await persist(run_id, thread_id)
+
+        ops._mark_run_interrupted = delayed_interrupt
+        run, events = await ops.create_streaming_run(
+            _THREAD, _request(on_disconnect="cancel")
+        )
+        await events.__anext__()
+        await graph.stream_started.wait()
+        task = ops._registry.get(str(run.run_id))
+        assert task is not None
+        stream = ops._streams.get(_THREAD, str(run.run_id))
+        assert stream is not None
+        for index in range(257):
+            stream.publish("custom", {"index": index})
+        observer = stream.subscribe(after=None)
+        assert "subscriber_overflow" in await events.__anext__()
+        await entered.wait()
+        joining = asyncio.create_task(ops.join_run(_THREAD, str(run.run_id)))
+        await asyncio.sleep(0)
+        assert not joining.done()
+        await events.aclose()
+        assert task.cancelling() == 1
+        release.set()
+        await ops._registry.wait(str(run.run_id))
+        await joining
+        terminal = [event async for event in observer]
+        assert [event.event for event in terminal] == ["end"]
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "interrupted"
+
+
 async def test_streaming_run_is_superseded_by_interrupt_strategy() -> None:
     async with running_app() as (app, graph, client):
         run_id, task = await _start_and_leave(app, graph)

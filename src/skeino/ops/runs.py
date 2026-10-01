@@ -174,7 +174,7 @@ class RunOps:
         run = await self.get_run(thread_id, run_id)  # 404 if unknown
         task = self._registry.get(run_id)
         if task is not None:
-            await asyncio.wait({task})
+            await self._registry.wait(run_id)
         elif run.status not in _TERMINAL_STATUSES:
             # No task to await and the run is still in flight — it is not
             # running in this process (e.g. another worker, or a row stranded
@@ -311,21 +311,15 @@ class RunOps:
         )
         events = stream.subscribe(after=None)
         released = False
-        finalized = False
 
         def finish() -> None:
-            # Idempotent: runs from the task's ``finally`` and again from its
-            # done-callback, which also covers a task cancelled before its
-            # body ever ran (so no ``finally`` executed).
+            # Release resources in the tracked finalizer, including when
+            # cancellation prevented the producer from ever starting.
             nonlocal released
             if not released:
                 released = True
                 lock.release()
             self._streams.close(stream)
-
-        def mark_finalized() -> None:
-            nonlocal finalized
-            finalized = True
 
         task = self._registry.spawn(
             thread_id,
@@ -335,16 +329,13 @@ class RunOps:
                 request,
                 stream_modes,
                 stream,
-                mark_finalized=mark_finalized,
             ),
             finalize=lambda: finalize_run(),
         )
 
         async def finalize_run() -> None:
             """Complete cleanup within the registry's awaited lifecycle."""
-            nonlocal finalized
-            if not finalized:
-                finalized = True
+            if task.cancelled():
                 await self._mark_run_interrupted(run_id, thread_id)
                 stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
             finish()
@@ -428,8 +419,6 @@ class RunOps:
         request: RunCreateRequest,
         stream_modes: list[str],
         stream: RunEventStream,
-        *,
-        mark_finalized: Callable[[], None],
     ) -> int:
         """Execute a streaming run, publishing its events; return total tokens.
 
@@ -522,8 +511,6 @@ class RunOps:
             self._log_warning(
                 "Streaming run %s cancelled for thread %s", run_id, thread_id
             )
-            await self._mark_run_interrupted(run_id, thread_id)
-            stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
             raise
         except Exception as exc:
             self._log_error(
@@ -538,8 +525,6 @@ class RunOps:
             await self._mark_run_failed(run_id, thread_id, str(exc))
             stream.publish("error", {"detail": str(exc), "run_id": run_id})
             return 0
-        finally:
-            mark_finalized()
 
     async def _relay(
         self,
@@ -562,15 +547,21 @@ class RunOps:
                     yield event.frame
             completed = True
         except SubscriberOverflowError as exc:
-            if cancel_on_disconnect and task is not None:
+            if cancel_on_disconnect and task is not None and not task.cancelling():
                 task.cancel()
+            completed = True
             yield sse_event(
                 "error", {"code": "subscriber_overflow", "detail": str(exc)}, None
             )
         finally:
             # Decide before awaiting: on a disconnect this runs inside an
             # already-cancelled scope, where an await may raise again.
-            if not completed and cancel_on_disconnect and task is not None:
+            if (
+                not completed
+                and cancel_on_disconnect
+                and task is not None
+                and not task.cancelling()
+            ):
                 task.cancel()
             await events.aclose()
 
@@ -591,9 +582,9 @@ class RunOps:
         """
         if task is not None:
             try:
-                await asyncio.wait({task})
+                await self._registry.wait(run_id)
             except BaseException:
-                if cancel_on_disconnect and not task.done():
+                if cancel_on_disconnect and not task.done() and not task.cancelling():
                     task.cancel()
                 raise
         row = await self._metadata_store.fetch_run_row(thread_id, run_id)
