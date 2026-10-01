@@ -10,6 +10,20 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [3.1.1] - 2026-10-01
+
+### Fixed
+
+- `POST /threads/{id}/runs/wait` and `GET /threads/{id}/runs/{run_id}/join` now
+  report a paused run. Their output was the checkpoint's state values alone, and
+  interrupts do not live there, so a run parked on `interrupt()` was
+  indistinguishable from a completed one — the awaiting tool call with no result
+  after it, and no `__interrupt__` to act on. Pending interrupts (from the
+  snapshot, or per task on older LangGraph) are now merged onto the reserved
+  `__interrupt__` channel, serialized exactly as the streaming path and LangGraph
+  Platform's `runs.wait` do. ([#109](https://github.com/ranjitjana027/skeino/issues/109))
+
+
 ## [3.1.0] - 2026-09-22
 
 ### Added
@@ -323,7 +337,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.1.0...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.1.1...HEAD
+[3.1.1]: https://github.com/ranjitjana027/skeino/compare/v3.1.0...v3.1.1
 [3.1.0]: https://github.com/ranjitjana027/skeino/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/ranjitjana027/skeino/compare/v2.2.0...v3.0.0
