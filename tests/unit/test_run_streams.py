@@ -61,6 +61,31 @@ async def test_resumable_stream_replays_after_id_then_ends_on_close() -> None:
     assert await _collect(stream, None) == []
 
 
+async def test_resumable_history_evicts_oldest_events_and_expires_old_cursors() -> None:
+    stream = RunEventStream(
+        "t", "r", resumable=True, max_history_events=2, max_history_bytes=10_000
+    )
+    for _ in range(4):
+        stream.publish("values", {})
+    stream.close(now=0.0)
+
+    assert stream.cursor_expired(-1)
+    assert not stream.cursor_expired(2)
+    assert await _collect(stream, 2) == [3, 4]
+
+
+async def test_resumable_history_evicts_frames_over_the_byte_budget() -> None:
+    stream = RunEventStream(
+        "t", "r", resumable=True, max_history_events=10, max_history_bytes=1
+    )
+    stream.publish("values", {"payload": "x"})
+    stream.close(now=0.0)
+
+    assert stream.cursor_expired(-1)
+    assert not stream.cursor_expired(1)
+    assert await _collect(stream, 1) == []
+
+
 async def test_non_resumable_stream_keeps_no_history() -> None:
     stream = RunEventStream("t", "r", resumable=False)
     stream.publish("values", {})

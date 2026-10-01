@@ -57,8 +57,24 @@ class SkeinoSettings(BaseModel):
         description="How long a finished run created with stream_resumable=true "
         "keeps its buffered SSE events for replay via "
         "GET /threads/{thread_id}/runs/{run_id}/stream. Events are buffered in "
-        "process memory for the run's whole lifetime plus this window. 0 drops "
-        "them as soon as the run ends (a join then gets the final state only).",
+        "process memory for the run's whole lifetime plus this window, subject "
+        "to the configured event and byte limits. 0 drops them as soon as the "
+        "run ends (a join then gets the final state only).",
+    )
+    resumable_stream_max_events: int = Field(
+        default=10_000,
+        ge=1,
+        description="Maximum number of recent SSE events retained per resumable "
+        "thread-scoped run for replay. Older events are evicted; a join whose "
+        "Last-Event-ID predates the retained window returns 409.",
+    )
+    resumable_stream_max_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1,
+        description="Maximum encoded SSE frame bytes retained per resumable "
+        "thread-scoped run. Older events are evicted when this budget is "
+        "exceeded; a join whose Last-Event-ID predates the retained window "
+        "returns 409.",
     )
 
     # Assistant identity

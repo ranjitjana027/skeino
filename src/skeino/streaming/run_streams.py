@@ -23,6 +23,7 @@ deployment would need a shared broker (e.g. Redis streams) for all three.
 
 import asyncio
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final
@@ -35,6 +36,8 @@ from skeino.streaming.sse import sse_event
 # (``metadata``), that the run failed (``error``), or that it is over (``end``).
 _LIFECYCLE_EVENTS: Final[frozenset[str]] = frozenset({"metadata", "error", "end"})
 _SUBSCRIBER_QUEUE_SIZE: Final[int] = 256
+_DEFAULT_HISTORY_MAX_EVENTS: Final[int] = 10_000
+_DEFAULT_HISTORY_MAX_BYTES: Final[int] = 16 * 1024 * 1024
 
 
 def stream_mode_matches(event: str, stream_modes: Sequence[str]) -> bool:
@@ -67,14 +70,26 @@ class StreamEvent:
 class RunEventStream:
     """The event fan-out (and, if resumable, the history) of one run."""
 
-    def __init__(self, thread_id: str, run_id: str, *, resumable: bool) -> None:
+    def __init__(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        resumable: bool,
+        max_history_events: int = _DEFAULT_HISTORY_MAX_EVENTS,
+        max_history_bytes: int = _DEFAULT_HISTORY_MAX_BYTES,
+    ) -> None:
         """Start an open stream with no events and no subscribers."""
         self.thread_id = thread_id
         self.run_id = run_id
         self.resumable = resumable
         self.closed_at: float | None = None
         self._next_id = 1
-        self._history: list[StreamEvent] = []
+        self._history: deque[StreamEvent] = deque()
+        self._history_bytes = 0
+        self._evicted_through_id = 0
+        self._max_history_events = max_history_events
+        self._max_history_bytes = max_history_bytes
         self._subscribers: set[asyncio.Queue[StreamEvent | None]] = set()
 
     @property
@@ -97,12 +112,24 @@ class RunEventStream:
         self._next_id += 1
         if self.resumable:
             self._history.append(published)
+            self._history_bytes += len(published.frame.encode("utf-8"))
+            while self._history and (
+                len(self._history) > self._max_history_events
+                or self._history_bytes > self._max_history_bytes
+            ):
+                evicted = self._history.popleft()
+                self._history_bytes -= len(evicted.frame.encode("utf-8"))
+                self._evicted_through_id = evicted.event_id
         for queue in tuple(self._subscribers):
             if queue.full():
                 self._detach(queue)
             else:
                 queue.put_nowait(published)
         return published
+
+    def cursor_expired(self, after: int) -> bool:
+        """Whether replay after ``after`` would omit previously evicted events."""
+        return self._evicted_through_id > 0 and after < self._evicted_through_id
 
     def close(self, now: float) -> None:
         """Mark the stream finished and release every subscriber. Idempotent."""
@@ -171,17 +198,27 @@ class RunStreamRegistry:
         self,
         *,
         retention_seconds: float,
+        max_history_events: int = _DEFAULT_HISTORY_MAX_EVENTS,
+        max_history_bytes: int = _DEFAULT_HISTORY_MAX_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create an empty registry keeping finished resumable streams a while."""
         self._retention = retention_seconds
+        self._max_history_events = max_history_events
+        self._max_history_bytes = max_history_bytes
         self._clock = clock
         self._streams: dict[str, RunEventStream] = {}
 
     def open(self, thread_id: str, run_id: str, *, resumable: bool) -> RunEventStream:
         """Register and return a fresh stream for a run that is about to start."""
         self._sweep()
-        stream = RunEventStream(thread_id, run_id, resumable=resumable)
+        stream = RunEventStream(
+            thread_id,
+            run_id,
+            resumable=resumable,
+            max_history_events=self._max_history_events,
+            max_history_bytes=self._max_history_bytes,
+        )
         self._streams[run_id] = stream
         return stream
 

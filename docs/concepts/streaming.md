@@ -71,10 +71,12 @@ request's `on_disconnect`:
 SDK's `client.runs.joinStream(threadId, runId, {streamMode, lastEventId})` and
 `useStream`'s `joinStream` / `reconnectOnMount` call.
 
-For a run created with **`stream_resumable: true`**, skeino keeps every event
-it publishes (with the same `id`s the original stream carried) for the run's
-lifetime plus `SkeinoSettings.resumable_stream_ttl_seconds` (default 600). A
-join then:
+For a thread-scoped run created with **`stream_resumable: true`**, skeino keeps
+the most recent events (with the same `id`s the original stream carried), up to
+`SkeinoSettings.resumable_stream_max_events` (default 10,000) and
+`SkeinoSettings.resumable_stream_max_bytes` (default 16 MiB) per run. The
+retained history stays available for the run's lifetime plus
+`SkeinoSettings.resumable_stream_ttl_seconds` (default 600). A join then:
 
 1. replays the retained events with an id greater than the `Last-Event-ID`
    header — `-1` (what `useStream` sends) replays from the first event; no
@@ -84,6 +86,12 @@ join then:
 A run created without `stream_resumable` keeps no history, so a join only sees
 events from the moment it attaches.
 
+When a history limit is reached, skeino evicts the oldest events. If
+`Last-Event-ID` is older than the retained window, the join returns `409` rather
+than silently replaying an incomplete stream. Stateless `POST /runs/stream`
+never retains history, even if `stream_resumable: true` is sent, because its
+ephemeral run identifiers cannot be used to join later.
+
 | Situation | Response |
 | --- | --- |
 | Run in flight, resumable | `200`: replay after `Last-Event-ID`, then live events |
@@ -92,7 +100,7 @@ events from the moment it attaches.
 | Run finished, events retained, `Last-Event-ID` sent | `200`: replay of the retained events |
 | Run finished otherwise (not resumable, retention expired, or no `Last-Event-ID`) | `200`: final `values` (no `id`) then `end` `{run_id, status}` — or `error` if the run failed |
 | Unknown thread, unknown run, or a run of another thread | `404` |
-| Run `pending`/`running` with no task or stream on this server | `409` |
+| Run `pending`/`running` with no task or stream on this server; or `Last-Event-ID` predates retained history | `409` |
 | `Last-Event-ID` not an integer, malformed `stream_mode` | `422` |
 
 LangGraph Platform reports an unknown run as a `200` stream carrying an

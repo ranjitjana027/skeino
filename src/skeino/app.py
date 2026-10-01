@@ -225,7 +225,9 @@ def create_app(
                 lock_manager=ThreadLockManager(),
                 registry=BackgroundRunRegistry(),
                 streams=RunStreamRegistry(
-                    retention_seconds=settings.resumable_stream_ttl_seconds
+                    retention_seconds=settings.resumable_stream_ttl_seconds,
+                    max_history_events=settings.resumable_stream_max_events,
+                    max_history_bytes=settings.resumable_stream_max_bytes,
                 ),
                 logger=logger,
             )

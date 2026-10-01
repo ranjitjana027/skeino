@@ -366,6 +366,14 @@ class RunOps:
         task = self._registry.get(run_id)
         stream = self._streams.get(thread_id, run_id)
         if stream is not None and not (stream.closed and after is None):
+            if after is not None and stream.cursor_expired(after):
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Last-Event-ID {after} predates the retained event window "
+                        f"for run {run_id}."
+                    ),
+                )
             return self._relay(
                 stream.subscribe(after=after),
                 task,
@@ -651,6 +659,9 @@ class RunOps:
         checkpointer out from under it.
         """
         payload = self._as_stateless(request)
+        # This endpoint exposes neither the ephemeral thread id nor a usable
+        # run URL, so retained history could never be joined or replayed.
+        payload = payload.model_copy(update={"stream_resumable": False})
         thread_id = str(uuid4())
 
         async def discard() -> None:

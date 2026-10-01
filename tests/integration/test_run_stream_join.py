@@ -172,6 +172,22 @@ async def test_join_resumes_after_last_event_id_without_duplicates() -> None:
         assert [(i, e) for i, e, _ in frames] == [(3, "values"), (4, "end")]
 
 
+async def test_join_with_cursor_older_than_retained_window_is_409() -> None:
+    async with running_app(resumable_stream_max_events=2) as (app, _graph, client):
+        run, original = await app.state.skeino.run_ops.create_streaming_run(
+            _THREAD, _request()
+        )
+        _ = [frame async for frame in original]
+
+        response = await client.get(
+            f"/threads/{_THREAD}/runs/{run.run_id}/stream",
+            headers={"Last-Event-ID": "-1"},
+        )
+
+        assert response.status_code == 409
+        assert "predates the retained event window" in response.json()["detail"]
+
+
 async def test_join_without_last_event_id_tails_live_only() -> None:
     # LangGraph semantics: no Last-Event-ID → no replay, only what comes next.
     async with running_app() as (app, graph, client):

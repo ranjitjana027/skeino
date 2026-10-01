@@ -81,6 +81,21 @@ def test_stateless_stream_emits_the_same_events_as_a_thread_run(client_and_graph
     assert names[-1] == "end"
 
 
+def test_stateless_resumable_stream_does_not_retain_unreachable_history(
+    client_and_graph,
+):
+    client, _ = client_and_graph
+    with client.stream(
+        "POST", "/runs/stream", json=_payload(stream_resumable=True)
+    ) as res:
+        assert res.status_code == 200
+        text = "".join(res.iter_text())
+
+    assert _event_names(text)[0] == "metadata"
+    streams = client.app.state.skeino.run_ops._streams
+    assert streams._streams == {}
+
+
 def test_stateless_batch_returns_one_output_per_payload(client_and_graph):
     client, _ = client_and_graph
     res = client.post("/runs/batch", json=[_payload(), _payload()])
