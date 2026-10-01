@@ -64,11 +64,11 @@ Prefix: `/threads/{thread_id}`
 | Method | Path | Request | Response | Notes |
 | --- | --- | --- | --- | --- |
 | `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | **Background** create — returns immediately with a `pending`/`running` run. Header: `Location`. |
-| `POST` | `/threads/{thread_id}/runs/wait` | `RunCreateRequest` | output values | Run to completion and return the final graph state values. Header: `X-Tokens-Used`. |
+| `POST` | `/threads/{thread_id}/runs/wait` | `RunCreateRequest` | output values | Run to completion and return the final graph state values (plus `__interrupt__` if it ended parked). Header: `X-Tokens-Used`. |
 | `POST` | `/threads/{thread_id}/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`). See [Streaming](../concepts/streaming.md). |
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
-| `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values. |
+| `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values (plus `__interrupt__` if it ended parked). |
 | `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
 | `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 
@@ -120,8 +120,10 @@ are accepted by the schema but rejected at runtime as out of scope for v1.
 
 - **Thread status:** `idle`, `busy`, `interrupted`, `error`. A thread is
   `interrupted` while its graph waits on an `interrupt()` — the pending
-  request is in `interrupts` on the thread and on its state's tasks, and the
-  next run resumes it with `command.resume`.
+  request is in `interrupts` on the thread and on its state's tasks, rides the
+  `__interrupt__` channel of the run's output (`runs/wait`, `runs/join`) and of
+  its `values`/`updates` stream events, and the next run resumes it with
+  `command.resume`.
 - **Run status:** `pending`, `running`, `success`, `error`, `timeout`,
   `interrupted`.
 

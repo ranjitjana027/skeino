@@ -65,8 +65,9 @@ A thread is created with `POST /threads`. The request can:
 Thread status is one of `idle`, `busy`, `interrupted`, or `error`. A thread
 reports `interrupted` once a run ends parked on a graph `interrupt()`,
 waiting for a human decision; the pending request rides the `__interrupt__`
-channel of the run's `values`/`updates` events and stays readable on the
-thread afterwards, and the next run resumes it with `command.resume`. You can read
+channel of the run's `values`/`updates` events **and of the output returned by
+`runs/wait` and `runs/join`**, and stays readable on the thread afterwards, and
+the next run resumes it with `command.resume`. You can read
 a thread's metadata-plus-latest-values with `GET /threads/{id}`, its full latest
 checkpoint with `GET /threads/{id}/state`, and walk its checkpoint history with
 `GET`/`POST /threads/{id}/history`. To read state at a specific point in time,
@@ -99,11 +100,13 @@ to consume the result:
   `pending`/`running` [`RunModel`][skeino.schemas.runs.RunModel]; poll
   `GET .../runs/{run_id}` or join.
 - `POST /threads/{id}/runs/wait` — run to completion and return the final graph
-  state values (the run output, matching the LangGraph SDK `runs.wait`).
+  state values (the run output, matching the LangGraph SDK `runs.wait`). A run
+  that ends parked on an `interrupt()` also reports it under `__interrupt__`.
 - `POST /threads/{id}/runs/stream` — execute and stream events over SSE (see
   [Streaming](streaming.md)).
 - `GET /threads/{id}/runs/{run_id}/join` — wait for an in-flight run to reach a
-  terminal state and return its final graph state values.
+  terminal state and return its final graph state values, `__interrupt__`
+  included when it parked.
 
 A run progresses through these statuses:
 
