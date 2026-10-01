@@ -9,6 +9,7 @@ on:
       - "pyproject.toml"
       - "poetry.lock"
       - ".github/workflows/ci.yml"
+      - "codecov.yml"
   pull_request:
     branches: [main]
     paths: *code-paths
@@ -63,4 +64,28 @@ jobs:
         run: poetry run bandit -r src
 
       - name: Pytest
-        run: poetry run pytest
+        run: >-
+          poetry run pytest
+          --cov --cov-report=xml --cov-report=term
+          --junitxml=junit.xml -o junit_family=legacy
+
+      # Codecov is free for public repos. Uploads never fail CI: a Codecov
+      # outage or a missing token (e.g. fork PRs) must not block merges.
+      - name: Upload coverage to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage.xml
+          flags: py${{ matrix.python-version }}
+          fail_ci_if_error: false
+
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v5.5.5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: junit.xml
+          report_type: test_results
+          flags: py${{ matrix.python-version }}
+          fail_ci_if_error: false

@@ -67,6 +67,7 @@ mypy = ">=1.19.0,<3.0.0"
 bandit = { version = ">=1.7.0", extras = ["toml"] }
 towncrier = ">=24.8.0"
 mongomock-motor = ">=0.0.30"
+pytest-cov = ">=6.0.0"
 
 [tool.poetry.group.docs]
 optional = true
@@ -94,6 +95,20 @@ asyncio_mode = "auto"
 # plain `pytest` stays in-memory and sub-second. Run it explicitly with
 # `poetry run pytest tests/api`.
 testpaths = ["tests/unit", "tests/integration"]
+
+[tool.coverage.run]
+source = ["skeino"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "\\.\\.\\.$",
+]
 
 [tool.ruff]
 # .claude/ holds agent/editor tooling (e.g. hook scripts), not shippable

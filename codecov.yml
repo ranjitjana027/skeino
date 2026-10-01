@@ -1,0 +1,23 @@
+# Codecov config — https://docs.codecov.com/docs/codecov-yaml
+# Statuses are informational for now: they report on PRs but never block a
+# merge. Tighten (drop `informational`) once a baseline is established.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+    patch:
+      default:
+        target: 80%
+        informational: true
+
+comment:
+  layout: "condensed_header, diff, flags, files"
+  require_changes: false
+
+# One upload per Python version in the CI matrix; merge them into one report.
+flag_management:
+  default_rules:
+    carryforward: false
