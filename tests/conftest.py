@@ -21,6 +21,10 @@ from langsmith import run_helpers
 
 from skeino import SkeinoSettings, create_app
 
+# Shared assertion modules imported by test files: rewrite their asserts so a
+# failing contract check reports values, not a bare AssertionError.
+pytest.register_assert_rewrite("tests.store_contract")
+
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)

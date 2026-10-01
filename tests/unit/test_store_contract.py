@@ -1,13 +1,17 @@
-"""Cross-store contract test: identical row key sets across backends.
+"""Cross-store contract tests for the in-process metadata backends.
 
-Every metadata store must return exactly the :class:`ThreadRow` /
-:class:`RunRow` key sets declared next to ``MetadataStoreProtocol``. The
-parametrized fixture pins InMemory/SQLite/Mongo to that contract (and thereby
-to each other); Postgres is excluded — it needs a server — but its
-SELECT/RETURNING column lists are written against the same TypedDicts.
+Two layers, both over InMemory/SQLite/mongomock:
+
+* **key sets** — every store returns exactly the :class:`ThreadRow` /
+  :class:`RunRow` keys declared next to ``MetadataStoreProtocol``;
+* **behaviour** — one ``Test*StoreContract`` class per backend runs the shared
+  :class:`tests.store_contract.StoreContract`, with that backend's known gaps
+  as strict xfails. Real Postgres and Mongo run the same class in
+  ``tests/api/test_store_contract_backends.py``.
 """
 
 from collections.abc import AsyncIterator
+from typing import ClassVar
 from uuid import uuid4
 
 import pytest
@@ -22,6 +26,12 @@ from skeino.persistence import (
     ThreadRow,
 )
 from skeino.schemas import ThreadSearchRequest
+from tests.store_contract import (
+    IN_MEMORY_SNAPSHOT_GAPS,
+    MONGO_TIMESTAMP_GAPS,
+    SORT_KEYS,
+    StoreContract,
+)
 
 THREAD_KEYS = frozenset(ThreadRow.__required_keys__)
 RUN_KEYS = frozenset(RunRow.__required_keys__)
@@ -119,3 +129,58 @@ async def test_delete_run_removes_only_the_target(
     # Wrong thread scope must not delete the row.
     await store.delete_run(str(uuid4()), keep)
     assert await store.fetch_run_row(tid, keep) is not None
+
+
+# --- behavioural contract (tests/store_contract.py), one class per backend ---
+
+
+class TestInMemoryStoreContract(StoreContract):
+    KNOWN_GAPS: ClassVar[dict[str, str]] = {
+        **IN_MEMORY_SNAPSHOT_GAPS,
+        "test_empty_update_changes_nothing": "#136: empty update bumps updated_at",
+        **{
+            f"test_search_sorts_by_every_key[{key}-{order}]": (
+                "#112: in-memory ignores sort_by"
+            )
+            for key in SORT_KEYS
+            if key != "updated_at"
+            for order in ("asc", "desc")
+        },
+    }
+
+    @pytest.fixture
+    async def store(self) -> AsyncIterator[MetadataStoreProtocol]:
+        memory_store = InMemoryMetadataStore()
+        await memory_store.setup()
+        yield memory_store
+
+
+class TestSqliteStoreContract(StoreContract):
+    @pytest.fixture
+    async def store(self) -> AsyncIterator[MetadataStoreProtocol]:
+        sqlite_store = SqliteMetadataStore(":memory:")
+        await sqlite_store.setup()
+        try:
+            yield sqlite_store
+        finally:
+            await sqlite_store.aclose()
+
+
+class TestMongomockStoreContract(StoreContract):
+    KNOWN_GAPS: ClassVar[dict[str, str]] = MONGO_TIMESTAMP_GAPS
+
+    @pytest.fixture
+    async def store(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> AsyncIterator[MetadataStoreProtocol]:
+        import motor.motor_asyncio
+
+        monkeypatch.setattr(
+            motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient
+        )
+        mongo_store = MongoMetadataStore("mongodb://mock", db_name=f"c{uuid4().hex}")
+        await mongo_store.setup()
+        try:
+            yield mongo_store
+        finally:
+            await mongo_store.aclose()

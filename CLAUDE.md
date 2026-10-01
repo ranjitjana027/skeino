@@ -46,8 +46,10 @@ serialization/  graph state <-> wire conversion
 Two separate persistence backends, by design:
 
 - **Metadata store** (`persistence/base.py` `MetadataStoreProtocol`) — thread/run
-  rows (status, metadata, config, ttl, kwargs). Two implementations that must
-  stay in lockstep: `MetadataStore` (Postgres) and `InMemoryMetadataStore`.
+  rows (status, metadata, config, ttl, kwargs). Four implementations that must
+  stay in lockstep: `MetadataStore` (Postgres), `SqliteMetadataStore`,
+  `MongoMetadataStore` and `InMemoryMetadataStore` — enforced by the shared
+  behavioural contract in `tests/store_contract.py`.
 - **Checkpointer** — LangGraph graph state/history (Postgres saver or
   `MemorySaver`), resolved in `persistence/checkpointer.py`. The graph exposes
   it as `graph.checkpointer`.
@@ -73,11 +75,12 @@ v1 routes a **single graph**.
 ## Adding an API endpoint / feature
 
 Thread the change through the layers in order — and when touching persistence,
-update **both** the protocol and **both** store implementations:
+update the protocol and **all four** store implementations:
 
 `schemas/*.py` (export in `schemas/__init__.py`) → `ops/*.py` →
-`api/*.py` route → `persistence/base.py` protocol + `metadata_store.py` +
-`in_memory_store.py` → extend `tests/conftest.py::FakeGraph` if new
+`api/*.py` route → `persistence/base.py` protocol + **all four** stores
+(`metadata_store.py`, `sqlite_store.py`, `mongo_store.py`, `in_memory_store.py`)
++ a contract test in `tests/store_contract.py` → extend `tests/conftest.py::FakeGraph` if new
 graph/checkpointer behaviour is needed → tests → changelog fragment → docs.
 
 The `add-api-endpoint` skill walks this end to end. To review and land open PRs,
@@ -100,6 +103,10 @@ see `review-and-merge-prs`; to ship a release, see `cut-release`.
 - Tests must be **non-vacuous**: a test that still passes when the feature is
   broken is worthless. If a behaviour can't be exercised (e.g. failure
   injection, checkpoint selection), extend `FakeGraph` so it can.
+- Store behaviour goes in `tests/store_contract.py` (`StoreContract`), not in a
+  per-backend test: the default suite runs it on InMemory/SQLite/mongomock and
+  `tests/api/test_store_contract_backends.py` on real Postgres/Mongo. A gap one
+  backend has is a strict xfail in that backend's `KNOWN_GAPS`.
 - `tests/api/` runs against **real** Postgres/Mongo/Redis from
   `docker-compose.yml` with a real LangGraph echo graph. It is excluded from
   plain `pytest` via `testpaths` (keeps the default suite sub-second) — run it
