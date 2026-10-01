@@ -58,7 +58,14 @@ event is `end` with `"status": "interrupted"`.
 ## Disconnects
 
 The run executes in a server-side task, not in the request: the SSE response is
-one subscriber to the run's events. What a client disconnect does is the run
+one subscriber to the run's events. A subscriber whose 256-event delivery queue
+overflows receives an `error` event with code `subscriber_overflow` before its
+response closes. This event has no id: resumable clients can reconnect using
+their last successfully received event id, subject to the retained history
+window. Non-resumable clients cannot recover discarded output. Overflow follows
+the run's cancel/continue disconnect policy.
+
+What a client disconnect does is the run
 request's `on_disconnect`:
 
 - **`"continue"`** (default, as on LangGraph Platform) — the run keeps going;

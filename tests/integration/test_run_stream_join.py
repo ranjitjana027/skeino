@@ -506,6 +506,44 @@ async def test_burst_stream_does_not_detach_a_subscriber_that_can_drain() -> Non
         assert len([name for _, name, _ in frames if name == "custom"]) == 300
 
 
+@pytest.mark.parametrize("stateless", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_overflow_reports_error_and_honors_disconnect_policy(
+    stateless: bool,
+    cancel: bool,
+) -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        graph.stream_gate = asyncio.Event()
+        request = _request(
+            stream_resumable=False, on_disconnect="cancel" if cancel else "continue"
+        )
+        if stateless:
+            run, events = await ops.create_stateless_streaming_run(request)
+        else:
+            run, events = await ops.create_streaming_run(_THREAD, request)
+        task = ops._registry.get(str(run.run_id))
+        assert task is not None
+        await events.__anext__()
+        await graph.stream_started.wait()
+        stream = ops._streams._streams[str(run.run_id)]
+        for index in range(257):
+            stream.publish("custom", {"index": index})
+        frames = parse_frames(await _drain(events))
+        assert len(frames) == 1
+        assert frames[0][0] is None
+        assert frames[0][1] == "error"
+        assert frames[0][2]["code"] == "subscriber_overflow"
+        assert not stream.closed
+        if cancel:
+            await asyncio.wait({task})
+            assert task.cancelled()
+        else:
+            assert not task.done()
+            graph.stream_gate.set()
+            await task
+
+
 async def test_join_refreshes_status_when_local_handles_have_disappeared() -> None:
     async with running_app() as (app, _graph, _client):
         run_ops = app.state.skeino.run_ops

@@ -40,6 +40,10 @@ _DEFAULT_HISTORY_MAX_EVENTS: Final[int] = 10_000
 _DEFAULT_HISTORY_MAX_BYTES: Final[int] = 16 * 1024 * 1024
 
 
+class SubscriberOverflowError(Exception):
+    """A subscriber lost events because its bounded delivery queue filled."""
+
+
 def stream_mode_matches(event: str, stream_modes: Sequence[str]) -> bool:
     """Return whether an event should reach a subscriber filtering on modes.
 
@@ -90,7 +94,9 @@ class RunEventStream:
         self._evicted_through_id = 0
         self._max_history_events = max_history_events
         self._max_history_bytes = max_history_bytes
-        self._subscribers: set[asyncio.Queue[StreamEvent | None]] = set()
+        self._subscribers: set[
+            asyncio.Queue[StreamEvent | SubscriberOverflowError | None]
+        ] = set()
 
     @property
     def closed(self) -> bool:
@@ -142,12 +148,18 @@ class RunEventStream:
             else:
                 queue.put_nowait(None)
 
-    def _detach(self, queue: asyncio.Queue[StreamEvent | None]) -> None:
+    def _detach(
+        self, queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None]
+    ) -> None:
         """Stop a lagging subscriber and discard its queued events."""
         self._subscribers.discard(queue)
         while not queue.empty():
             queue.get_nowait()
-        queue.put_nowait(None)
+        queue.put_nowait(
+            SubscriberOverflowError(
+                "Subscriber queue overflow; streamed output was lost."
+            )
+        )
 
     def subscribe(self, *, after: int | None) -> AsyncGenerator[StreamEvent, None]:
         """Attach a subscriber; return its event iterator.
@@ -164,8 +176,8 @@ class RunEventStream:
             if after is not None
             else []
         )
-        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue(
-            maxsize=_SUBSCRIBER_QUEUE_SIZE
+        queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None] = (
+            asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_SIZE)
         )
         if self.closed:
             queue.put_nowait(None)
@@ -174,12 +186,16 @@ class RunEventStream:
         return self._drain(replay, queue)
 
     async def _drain(
-        self, replay: list[StreamEvent], queue: asyncio.Queue[StreamEvent | None]
+        self,
+        replay: list[StreamEvent],
+        queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
     ) -> AsyncGenerator[StreamEvent, None]:
         try:
             for event in replay:
                 yield event
             while (event_or_end := await queue.get()) is not None:
+                if isinstance(event_or_end, SubscriberOverflowError):
+                    raise event_or_end
                 yield event_or_end
         finally:
             self._subscribers.discard(queue)

@@ -49,6 +49,7 @@ from skeino.streaming import (
     sse_event,
     stream_mode_matches,
 )
+from skeino.streaming.run_streams import SubscriberOverflowError
 from skeino.tracing import resolve_session_name, run_tracing_context
 from skeino.usage import (
     attach_usage_handler,
@@ -560,6 +561,12 @@ class RunOps:
                 if stream_mode_matches(event.event, stream_modes):
                     yield event.frame
             completed = True
+        except SubscriberOverflowError as exc:
+            if cancel_on_disconnect and task is not None:
+                task.cancel()
+            yield sse_event(
+                "error", {"code": "subscriber_overflow", "detail": str(exc)}, None
+            )
         finally:
             # Decide before awaiting: on a disconnect this runs inside an
             # already-cancelled scope, where an await may raise again.

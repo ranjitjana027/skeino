@@ -8,6 +8,7 @@ from skeino.streaming import (
     sse_event,
     stream_mode_matches,
 )
+from skeino.streaming.run_streams import SubscriberOverflowError
 
 
 class _Clock:
@@ -118,7 +119,8 @@ async def test_slow_subscriber_is_detached_when_its_bounded_queue_fills() -> Non
 
     stream.publish("values", {})
     assert stream.subscriber_count == 0
-    assert [event async for event in slow] == []
+    with pytest.raises(SubscriberOverflowError):
+        await slow.__anext__()
 
 
 async def test_close_detaches_subscriber_when_its_queue_is_full() -> None:
@@ -129,7 +131,8 @@ async def test_close_detaches_subscriber_when_its_queue_is_full() -> None:
 
     stream.close(now=0.0)
     assert stream.subscriber_count == 0
-    assert [event async for event in slow] == []
+    with pytest.raises(SubscriberOverflowError):
+        await slow.__anext__()
 
 
 def test_publish_after_close_fails_loudly() -> None:
