@@ -4,9 +4,17 @@ on:
   push:
     tags:
       - "v*"
+  # Manual run: (re)create the GitHub Release page for an already-published
+  # tag, e.g. to backfill one. Skips build/publish; PyPI is not touched.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag, e.g. v3.1.0"
+        required: true
 
 jobs:
   build:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -29,6 +37,7 @@ jobs:
           path: dist/
 
   publish:
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -46,3 +55,49 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  # A tag alone doesn't create a GitHub Release page. Create one from the
+  # tag's CHANGELOG.md section once PyPI has the release (or on a manual run).
+  github-release:
+    needs: publish
+    if: >-
+      ${{ !cancelled() && (needs.publish.result == 'success'
+      || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Validate tag
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a vX.Y.Z release tag"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.TAG }}
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v head="## [${TAG#v}]" '
+            index($0, head) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error::No CHANGELOG.md section for ${TAG#v}"
+            exit 1
+          fi
+
+      - name: Create or update the GitHub Release
+        run: |
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file notes.md
+          else
+            gh release create "$TAG" --verify-tag --title "$TAG" \
+              --notes-file notes.md
+          fi
