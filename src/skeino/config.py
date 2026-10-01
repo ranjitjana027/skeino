@@ -50,6 +50,17 @@ class SkeinoSettings(BaseModel):
         "(durable graph state, ephemeral thread/run list) fails loudly at startup.",
     )
 
+    # Streaming
+    resumable_stream_ttl_seconds: float = Field(
+        default=600.0,
+        ge=0,
+        description="How long a finished run created with stream_resumable=true "
+        "keeps its buffered SSE events for replay via "
+        "GET /threads/{thread_id}/runs/{run_id}/stream. Events are buffered in "
+        "process memory for the run's whole lifetime plus this window. 0 drops "
+        "them as soon as the run ends (a join then gets the final state only).",
+    )
+
     # Assistant identity
     default_assistant_id: str | None = Field(
         default=None,

@@ -14,9 +14,15 @@ def _json_dumps(payload: dict[str, JsonValue]) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-def sse_event(event: str, data: dict[str, JsonValue], event_id: int) -> str:
-    """Format a server-sent event chunk."""
-    return f"id: {event_id}\nevent: {event}\ndata: {_json_dumps(data)}\n\n"
+def sse_event(event: str, data: dict[str, JsonValue], event_id: int | None) -> str:
+    """Format a server-sent event chunk.
+
+    ``event_id`` of ``None`` omits the ``id:`` line — for an event synthesised
+    after the fact (e.g. a finished run's final state on join), which has no
+    place in the run's event sequence and so cannot be resumed from.
+    """
+    body = f"event: {event}\ndata: {_json_dumps(data)}\n\n"
+    return body if event_id is None else f"id: {event_id}\n{body}"
 
 
 def is_retriable_stream_error(exc: BaseException) -> bool:

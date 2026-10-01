@@ -77,6 +77,14 @@ class Streamer:
             return True
         return self._output_keys is None or key in self._output_keys
 
+    def filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
+        """Apply the fail-closed output filter to a full-state snapshot.
+
+        Public so a state read outside a live stream (a finished run's final
+        state, sent on join) honours the same output schema as the stream.
+        """
+        return self._filter_values(payload)
+
     def _filter_values(self, payload: dict[str, JsonValue]) -> dict[str, JsonValue]:
         """Drop non-output keys from a ``values`` (full-state) snapshot."""
         if self._output_keys is None:

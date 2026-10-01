@@ -4012,6 +4012,100 @@
         "summary": "Join Run"
       }
     },
+    "/threads/{thread_id}/runs/{run_id}/stream": {
+      "get": {
+        "description": "Join a run's SSE stream: replay after ``Last-Event-ID``, then tail live.\n\nReplay needs the run to have been created with ``stream_resumable: true``;\n``Last-Event-ID: -1`` replays from the first event. Without the header the\njoin tails live events only (LangGraph Platform semantics). A finished run\nwith nothing to replay yields its final ``values`` and ``end``.",
+        "operationId": "join_run_stream_threads__thread_id__runs__run_id__stream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "thread_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Thread Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Run Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "stream_mode",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stream Mode"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cancel_on_disconnect",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Cancel On Disconnect",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Last-Event-ID",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Last-Event-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Join Run Stream"
+      }
+    },
     "/threads/{thread_id}/state": {
       "get": {
         "description": "Return the latest checkpoint state for a thread.",

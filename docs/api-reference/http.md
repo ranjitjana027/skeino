@@ -69,6 +69,7 @@ Prefix: `/threads/{thread_id}`
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values (plus `__interrupt__` if it ended parked). |
+| `GET` | `/threads/{thread_id}/runs/{run_id}/stream` | — | SSE stream | **Join** a run's event stream (SDK `runs.joinStream`). Replays events after the `Last-Event-ID` header (`-1` = from the start; needs `stream_resumable: true`), then tails live events. Query: `stream_mode` (single mode, JSON array, or repeated), `cancel_on_disconnect` (default `false`). `404` unknown thread/run, `409` run in flight with no stream on this server, `422` malformed `Last-Event-ID`/`stream_mode`. See [Streaming](../concepts/streaming.md#joining-a-run-stream). |
 | `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
 | `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 

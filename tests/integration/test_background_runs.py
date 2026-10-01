@@ -277,9 +277,9 @@ async def test_shutdown_marks_queued_run_interrupted() -> None:
     assert (await run_ops.get_run(_THREAD, str(queued.run_id))).status == "interrupted"
 
 
-async def test_join_live_streaming_run_is_409() -> None:
-    # A live streaming run is registered as external (no joinable task); joining
-    # it must fail fast rather than return a non-terminal snapshot.
+async def test_join_streaming_run_returns_its_output() -> None:
+    # A streaming run executes in a tracked task (it publishes to its event
+    # stream), so /join can await it like a background run and return output.
     app, _ = build_test_app()
     async with app.router.lifespan_context(app):
         run_ops = app.state.skeino.run_ops
@@ -290,13 +290,25 @@ async def test_join_live_streaming_run_is_409() -> None:
             stream_mode="values",
         )
         run, stream = await run_ops.create_streaming_run(_THREAD, request)
-        await stream.__anext__()  # start the generator (emit metadata)
-        try:
-            with pytest.raises(HTTPException) as exc:
-                await run_ops.join_run(_THREAD, str(run.run_id))
-            assert exc.value.status_code == 409
-        finally:
-            await stream.aclose()  # runs the generator's finally → releases lock
+        await stream.__anext__()  # metadata
+        output = await run_ops.join_run(_THREAD, str(run.run_id))
+        assert output == {"messages": [{"type": "ai", "content": "streamed"}]}
+        await stream.aclose()
+
+
+async def test_join_in_flight_run_without_task_is_409() -> None:
+    # A row that says ``running`` but has no task in this process (another
+    # worker, or stranded by a crash) cannot be joined: fail fast rather than
+    # return a non-terminal snapshot.
+    app, _ = build_test_app()
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        run = await run_ops.create_run(_THREAD, _req())
+        await run_ops.join_run(_THREAD, str(run.run_id))
+        await run_ops._metadata_store.update_run_status(str(run.run_id), "running")
+        with pytest.raises(HTTPException) as exc:
+            await run_ops.join_run(_THREAD, str(run.run_id))
+        assert exc.value.status_code == 409
 
 
 async def test_join_returns_404_when_run_deleted_concurrently() -> None:

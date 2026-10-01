@@ -13,6 +13,7 @@ graph, matching ``create_app(graphs={...})``'s factory signature.
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import json
 from collections.abc import Callable, Iterator
@@ -152,6 +153,35 @@ def build_fake_llm(checkpointer: Any) -> Any:
     graph.add_node("call_model", call_model)
     graph.add_edge(START, "call_model")
     return graph.compile(checkpointer=checkpointer)
+
+
+def make_gated(entered: asyncio.Event, gate: asyncio.Event) -> Callable[[Any], Any]:
+    """Two steps with a pause between: a run observably mid-flight.
+
+    ``first`` writes a message and a ``custom`` event; ``second`` sets
+    ``entered`` and waits on ``gate`` before replying — so a test can join the
+    run while it is parked, then let it finish. Not in ``GRAPHS``: the events
+    are per-test, and must belong to the test's event loop.
+    """
+
+    def build(checkpointer: Any) -> Any:
+        def first(state: MessagesState) -> dict[str, Any]:
+            get_stream_writer()({"step": "first"})
+            return {"messages": [AIMessage("step one")]}
+
+        async def second(state: MessagesState) -> dict[str, Any]:
+            entered.set()
+            await gate.wait()
+            return {"messages": [AIMessage(f"step two after: {_last_text(state)}")]}
+
+        graph = StateGraph(MessagesState)
+        graph.add_node("first", first)
+        graph.add_node("second", second)
+        graph.add_edge(START, "first")
+        graph.add_edge("first", "second")
+        return graph.compile(checkpointer=checkpointer)
+
+    return build
 
 
 GRAPHS: dict[str, Callable[[Any], Any]] = {

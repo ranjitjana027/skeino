@@ -51,7 +51,67 @@ If the graph raises, the terminal event is instead:
 
 - **`error`** — `{"detail": "<message>", "run_id": "..."}`.
 
-If the client disconnects mid-stream, the run is marked `interrupted`.
+If the run is cancelled (`POST .../cancel`, a superseding `interrupt`/
+`rollback` run, or a disconnect with `on_disconnect: "cancel"`), the terminal
+event is `end` with `"status": "interrupted"`.
+
+## Disconnects
+
+The run executes in a server-side task, not in the request: the SSE response is
+one subscriber to the run's events. What a client disconnect does is the run
+request's `on_disconnect`:
+
+- **`"continue"`** (default, as on LangGraph Platform) — the run keeps going;
+  the client can come back and [join](#joining-a-run-stream) it.
+- **`"cancel"`** — the run is cancelled and marked `interrupted`.
+
+## Joining a run stream
+
+`GET /threads/{thread_id}/runs/{run_id}/stream` re-attaches to a run — what the
+SDK's `client.runs.joinStream(threadId, runId, {streamMode, lastEventId})` and
+`useStream`'s `joinStream` / `reconnectOnMount` call.
+
+For a run created with **`stream_resumable: true`**, skeino keeps every event
+it publishes (with the same `id`s the original stream carried) for the run's
+lifetime plus `SkeinoSettings.resumable_stream_ttl_seconds` (default 600). A
+join then:
+
+1. replays the retained events with an id greater than the `Last-Event-ID`
+   header — `-1` (what `useStream` sends) replays from the first event; no
+   header replays nothing, matching LangGraph Platform;
+2. tails live events until the run ends, then closes after `end` / `error`.
+
+A run created without `stream_resumable` keeps no history, so a join only sees
+events from the moment it attaches.
+
+| Situation | Response |
+| --- | --- |
+| Run in flight, resumable | `200`: replay after `Last-Event-ID`, then live events |
+| Run in flight, not resumable | `200`: live events only |
+| Background run (`POST /runs`, which streams nothing) | `200`: waits, then the final state |
+| Run finished, events retained, `Last-Event-ID` sent | `200`: replay of the retained events |
+| Run finished otherwise (not resumable, retention expired, or no `Last-Event-ID`) | `200`: final `values` (no `id`) then `end` `{run_id, status}` — or `error` if the run failed |
+| Unknown thread, unknown run, or a run of another thread | `404` |
+| Run `pending`/`running` with no task or stream on this server | `409` |
+| `Last-Event-ID` not an integer, malformed `stream_mode` | `422` |
+
+LangGraph Platform reports an unknown run as a `200` stream carrying an
+`error` event; skeino checks before the response starts so clients get a real
+status code.
+
+`stream_mode` (a single mode, a JSON array, or the parameter repeated) filters
+what the join delivers, with LangGraph's matching rules (`messages` covers
+`messages-tuple`; `mode|namespace` matches `mode`). `metadata`, `end`, and
+`error` are always delivered. `cancel_on_disconnect=true` cancels the run when
+the joining client goes away; the default leaves it running.
+
+!!! info "Process-local buffer"
+    Events are buffered in the memory of the worker running the run — the same
+    single-process scope as the run's task and thread lock (see
+    [Deployment](../guides/deployment.md)). With several workers, a join must
+    reach the worker that owns the run; one that lands elsewhere gets `409`.
+    The buffer is independent of the persistence backend, and does not survive
+    a restart (nor does the run: shutdown marks it `interrupted`).
 
 ## Stream modes
 
@@ -102,9 +162,9 @@ Streaming runs are hardened against transient backend failures:
   error surfaces instead.
 - **Permanent errors fail fast.** Programming errors (`ValueError`, `KeyError`,
   …) are never retried.
-- **Disconnect handling.** A client disconnect (`CancelledError`) marks the run
-  `interrupted` and releases the thread lock in a `finally` block, so a dropped
-  connection never wedges the thread.
+- **Disconnect handling.** The run's task releases the thread lock in a
+  `finally` block (and a done-callback, for a task cancelled before it
+  started), so neither a dropped connection nor a cancel wedges the thread.
 
 ## Serialization on the wire
 
@@ -132,7 +192,7 @@ are stringified, and arbitrary objects fall back to their public attributes.
 | `values` | `values` mode | full state snapshot `{messages: [...], ...}` per super-step |
 | `events` | `events` mode | raw LangGraph v2 event |
 | `updates` / `messages` / `messages-tuple` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode (`updates` deltas are output-key filtered) |
-| `end` | terminal, success | `{run_id, status: "success", usage: {total_tokens}}` |
+| `end` | terminal, success / cancelled | `{run_id, status: "success", usage: {total_tokens}}`, or `{run_id, status: "interrupted"}` |
 | `error` | terminal, failure | `{detail, run_id}` |
 
 See [Threads & runs](threads-and-runs.md) for run lifecycle and the

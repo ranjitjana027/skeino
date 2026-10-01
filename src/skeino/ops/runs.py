@@ -3,13 +3,15 @@
 Every run executes inside a background :class:`asyncio.Task` tracked by the
 :class:`BackgroundRunRegistry`. ``create_run`` returns immediately with a
 ``pending`` run; ``wait_run`` / ``join_run`` await the task; ``cancel_run`` and
-the interrupt/rollback multitask strategies cancel it. Streaming runs execute in
-the request (live SSE) but register with the same registry + execution lock so
-multitask admission stays uniform across paths.
+the interrupt/rollback multitask strategies cancel it. Streaming runs are tasks
+too: they publish SSE events to a :class:`RunEventStream` that the creating
+response — and any later ``join_run_stream`` — subscribes to, so a run can
+outlive its client (``on_disconnect="continue"``) and be re-attached to.
 """
 
 import asyncio
-from typing import Any, AsyncIterator, Final
+from collections.abc import Awaitable, Callable, Sequence
+from typing import Any, AsyncGenerator, AsyncIterator, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
@@ -39,9 +41,13 @@ from skeino.serialization import (
 from skeino.streaming import (
     STREAM_MAX_RETRIES,
     STREAM_RETRY_BACKOFF_SECS,
+    RunEventStream,
+    RunStreamRegistry,
     Streamer,
+    StreamEvent,
     is_retriable_stream_error,
     sse_event,
+    stream_mode_matches,
 )
 from skeino.tracing import resolve_session_name, run_tracing_context
 from skeino.usage import (
@@ -62,6 +68,27 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"success", "error", "interrupted", "timeout"}
 )
 _INTERRUPT_CHANNEL: Final[str] = "__interrupt__"
+_DEFAULT_STREAM_RETENTION_SECS: Final[float] = 600.0
+
+
+def _parse_last_event_id(value: str | None) -> int | None:
+    """Parse an SSE ``Last-Event-ID`` into the id to replay after.
+
+    Ids are the per-run integer counter skeino assigns (``1``, ``2``, ...);
+    ``-1`` — what the SDK's ``useStream`` sends to mean "from the beginning" —
+    replays everything. Blank means no header. Anything else is a client bug,
+    and replaying from a guessed position would silently drop or repeat
+    events, so it is a 422.
+    """
+    if value is None or not value.strip():
+        return None
+    try:
+        return int(value.strip())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid Last-Event-ID {value!r}: expected an integer event id.",
+        ) from exc
 
 
 def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
@@ -102,6 +129,7 @@ class RunOps:
         assistant_ops: AssistantOps,
         lock_manager: ThreadLockManager,
         registry: BackgroundRunRegistry,
+        streams: RunStreamRegistry | None = None,
         logger: Any | None = None,
     ) -> None:
         """Capture every collaborator a run needs."""
@@ -112,6 +140,9 @@ class RunOps:
         self._assistant_ops = assistant_ops
         self._lock_manager = lock_manager
         self._registry = registry
+        self._streams = streams or RunStreamRegistry(
+            retention_seconds=_DEFAULT_STREAM_RETENTION_SECS
+        )
         self._logger = logger
 
     async def create_run(self, thread_id: str, request: RunCreateRequest) -> RunModel:
@@ -144,14 +175,15 @@ class RunOps:
         if task is not None:
             await asyncio.wait({task})
         elif run.status not in _TERMINAL_STATUSES:
-            # No background task to await and the run is still in flight — a live
-            # streaming run has no joinable server-side handle in v1. Fail fast
-            # rather than return a non-terminal snapshot and break the contract.
+            # No task to await and the run is still in flight — it is not
+            # running in this process (e.g. another worker, or a row stranded
+            # by a crash). Fail fast rather than return a non-terminal snapshot
+            # and break the contract.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"Run {run_id} is {run.status} with no joinable background "
-                    "task; live streaming runs cannot be joined in this version."
+                    f"Run {run_id} is {run.status} with no joinable task "
+                    "on this server."
                 ),
             )
         output, _tokens = await self._collect_terminal_output(thread_id, run_id, task)
@@ -169,8 +201,7 @@ class RunOps:
 
         ``action="interrupt"`` cancels the run and leaves it ``interrupted``;
         ``action="rollback"`` cancels it and deletes the run row. Returns 409 if
-        the run is already terminal or cannot be cancelled (e.g. a live
-        streaming run, which is cancelled by client disconnect in v1).
+        the run is already terminal or has no task in this process to cancel.
 
         ``rollback`` always waits for the task to fully unwind before deleting,
         regardless of ``wait`` — otherwise a still-running task could keep
@@ -188,10 +219,7 @@ class RunOps:
         if not cancelled:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"Run {run_id} has no cancellable background task; "
-                    "live streaming runs are cancelled by client disconnect."
-                ),
+                detail=(f"Run {run_id} has no cancellable task on this server."),
             )
         if action == "rollback":
             # rollback always waited above, so the task has fully unwound.
@@ -218,9 +246,26 @@ class RunOps:
         await self._metadata_store.delete_run(thread_id, run_id)
 
     async def create_streaming_run(
-        self, thread_id: str, request: RunCreateRequest
+        self,
+        thread_id: str,
+        request: RunCreateRequest,
+        *,
+        after_run: Callable[[], Awaitable[None]] | None = None,
     ) -> tuple[RunModel, AsyncIterator[str]]:
-        """Create a run and stream its output as SSE (live, in-request)."""
+        """Create a run and stream its output as SSE.
+
+        The run executes in a background task that publishes to a
+        :class:`RunEventStream`; the returned iterator is one subscriber of it,
+        attached before the task starts so it sees every event from ``id: 1``.
+        The task is tracked by the run registry like a background run, so the
+        run can be joined (``/join`` or ``/stream``), cancelled, and superseded
+        by an ``interrupt``/``rollback`` multitask strategy.
+
+        ``request.on_disconnect`` decides what a client disconnect does:
+        ``"cancel"`` cancels the run, ``"continue"`` (the default, as on
+        LangGraph Platform) leaves it running for a later join. ``after_run`` is
+        awaited once the run has finished, success or not (stateless cleanup).
+        """
         await self._thread_ops.ensure_thread_for_run(thread_id, request.if_not_exists)
         self._assistant_ops.ensure_supported(request.assistant_id)
         self._validate_run_request(request)
@@ -260,122 +305,278 @@ class RunOps:
             self._registry.unregister_external(thread_id, run_id)
             raise
 
-        async def event_stream() -> AsyncIterator[str]:
-            event_id = 1
-            emitted_data = False
+        stream = self._streams.open(
+            thread_id, run_id, resumable=request.stream_resumable
+        )
+        events = stream.subscribe(after=None)
+        released = False
+
+        def finish() -> None:
+            # Idempotent: runs from the task's ``finally`` and again from its
+            # done-callback, which also covers a task cancelled before its
+            # body ever ran (so no ``finally`` executed).
+            nonlocal released
+            if not released:
+                released = True
+                lock.release()
+            self._streams.close(stream)
+
+        task = self._registry.spawn(
+            thread_id,
+            run_id,
+            self._publish_run(
+                run, request, stream_modes, stream, finish=finish, after_run=after_run
+            ),
+        )
+        task.add_done_callback(lambda _t: finish())
+        return run, self._relay(
+            events,
+            task,
+            stream_modes=(),
+            cancel_on_disconnect=request.on_disconnect == "cancel",
+        )
+
+    async def join_run_stream(
+        self,
+        thread_id: str,
+        run_id: str,
+        *,
+        stream_modes: list[str],
+        last_event_id: str | None,
+        cancel_on_disconnect: bool,
+    ) -> AsyncIterator[str]:
+        """Re-attach to a run's event stream (LangGraph ``runs.joinStream``).
+
+        * A run with a live or retained event stream: replay the events after
+          ``last_event_id`` (resumable runs only; ``-1`` replays everything,
+          absent replays nothing), then tail live events until the run ends.
+        * A finished run whose events are not retained (non-resumable, expired,
+          or joined without a ``Last-Event-ID``): its final state as one
+          ``values`` event (no id), then ``end`` — or ``error`` if it failed.
+        * A background run (``POST /runs``, which streams nothing): wait for
+          it, then the same final-state events.
+        * A run that is in flight with no stream or task in this process: 409.
+
+        Unknown thread, unknown run, or a run of another thread: 404. A
+        malformed ``Last-Event-ID``: 422. All are raised before the response
+        starts, so they arrive as real HTTP statuses.
+        """
+        run = await self.get_run(thread_id, run_id)  # 404 if unknown
+        after = _parse_last_event_id(last_event_id)
+        task = self._registry.get(run_id)
+        stream = self._streams.get(thread_id, run_id)
+        if stream is not None and not (stream.closed and after is None):
+            return self._relay(
+                stream.subscribe(after=after),
+                task,
+                stream_modes=stream_modes,
+                cancel_on_disconnect=cancel_on_disconnect,
+            )
+        if task is None and run.status not in _TERMINAL_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Run {run_id} is {run.status} but has no event stream on "
+                    "this server to join."
+                ),
+            )
+        return self._final_state_events(
+            thread_id,
+            run_id,
+            task,
+            stream_modes=stream_modes,
+            cancel_on_disconnect=cancel_on_disconnect,
+        )
+
+    async def _publish_run(
+        self,
+        run: RunModel,
+        request: RunCreateRequest,
+        stream_modes: list[str],
+        stream: RunEventStream,
+        *,
+        finish: Callable[[], None],
+        after_run: Callable[[], Awaitable[None]] | None,
+    ) -> int:
+        """Execute a streaming run, publishing its events; return total tokens.
+
+        The body of what used to be the in-request SSE generator. It now runs
+        in its own task, so a disconnecting client no longer unwinds it.
+        """
+        run_id = str(run.run_id)
+        thread_id = str(run.thread_id)
+        emitted_data = False
+        try:
+            await self._metadata_store.update_thread(
+                thread_id, status_value=_THREAD_BUSY
+            )
+            await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
+            stream.publish(
+                "metadata",
+                {
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "run": serialize_value(run.model_dump(mode="json")),
+                },
+            )
+
+            runnable_input = self._resolve_run_input(request)
+            config = build_thread_config(
+                thread_id, request.config, request.checkpoint, run_id=run_id
+            )
+            # One handler for all retry attempts: tokens consumed by a failed
+            # attempt were still consumed, so they count.
+            usage_handler = attach_usage_handler(config)
+            # Route the run's trace to its requested LangSmith project too
+            # (skeino.tracing). Around the whole attempt loop, so a retried
+            # attempt traces to the same projects as the first.
+            with run_tracing_context(request.langsmith_tracer):
+                for attempt in range(STREAM_MAX_RETRIES):
+                    try:
+                        async for event_name, payload in self._streamer.stream(
+                            runnable_input, config, request, stream_modes
+                        ):
+                            stream.publish(event_name, payload)
+                            emitted_data = True
+                        break
+                    except Exception as exc:
+                        # Only retry while nothing has been published. Graph
+                        # execution is not idempotent, so replaying a partially
+                        # streamed run would duplicate output and re-invoke the
+                        # model. ``CancelledError`` is a BaseException and is
+                        # deliberately not caught here so a cancel propagates
+                        # to the cancellation handler below.
+                        if (
+                            attempt < STREAM_MAX_RETRIES - 1
+                            and not emitted_data
+                            and is_retriable_stream_error(exc)
+                        ):
+                            backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
+                            self._log_warning(
+                                "Stream attempt %s failed (retrying in %.1fs): %s",
+                                attempt + 1,
+                                backoff,
+                                exc,
+                            )
+                            await asyncio.sleep(backoff)
+                        else:
+                            raise
+
+            await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
+            await self._metadata_store.update_thread(
+                thread_id,
+                status_value=await self._settled_thread_status(thread_id),
+                mark_state_updated=True,
+            )
+            total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
+            if total_tokens == 0:
+                # Fallback for providers the callback handler can't see.
+                total_tokens = await self._total_run_tokens(thread_id)
+            stream.publish(
+                "end",
+                {
+                    "run_id": run_id,
+                    "status": _RUN_SUCCESS,
+                    "usage": {"total_tokens": total_tokens},
+                },
+            )
+            return total_tokens
+        except asyncio.CancelledError:
+            self._log_warning(
+                "Streaming run %s cancelled for thread %s", run_id, thread_id
+            )
+            await self._mark_run_interrupted(run_id, thread_id)
+            stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
+            raise
+        except Exception as exc:
+            self._log_error(
+                "Streaming run %s failed for thread %s: %s",
+                run_id,
+                thread_id,
+                exc,
+                exc=exc,
+            )
+            # Persist the failure best-effort; a store outage must not stop
+            # subscribers from receiving the 'error' event.
+            await self._mark_run_failed(run_id, thread_id, str(exc))
+            stream.publish("error", {"detail": str(exc), "run_id": run_id})
+            return 0
+        finally:
+            finish()
+            if after_run is not None:
+                await after_run()
+
+    async def _relay(
+        self,
+        events: AsyncGenerator[StreamEvent, None],
+        task: asyncio.Task[Any] | None,
+        *,
+        stream_modes: Sequence[str],
+        cancel_on_disconnect: bool,
+    ) -> AsyncIterator[str]:
+        """Forward one subscriber's events as SSE frames, filtered by mode.
+
+        If the client goes away before the stream ends and
+        ``cancel_on_disconnect`` is set, the run is cancelled; otherwise it
+        keeps running for whoever joins next.
+        """
+        completed = False
+        try:
+            async for event in events:
+                if stream_mode_matches(event.event, stream_modes):
+                    yield event.frame
+            completed = True
+        finally:
+            # Decide before awaiting: on a disconnect this runs inside an
+            # already-cancelled scope, where an await may raise again.
+            if not completed and cancel_on_disconnect and task is not None:
+                task.cancel()
+            await events.aclose()
+
+    async def _final_state_events(
+        self,
+        thread_id: str,
+        run_id: str,
+        task: asyncio.Task[Any] | None,
+        *,
+        stream_modes: Sequence[str],
+        cancel_on_disconnect: bool,
+    ) -> AsyncIterator[str]:
+        """Stream a finished run's outcome: final ``values`` + ``end``, or ``error``.
+
+        For a joined run with no event history to replay. The events carry no
+        ``id`` — they are not part of the run's event sequence, so there is
+        nothing to resume from.
+        """
+        if task is not None:
             try:
-                await self._metadata_store.update_thread(
-                    thread_id, status_value=_THREAD_BUSY
-                )
-                await self._metadata_store.update_run_status(
-                    str(run.run_id), _RUN_RUNNING
-                )
-                yield sse_event(
-                    "metadata",
-                    {
-                        "run_id": str(run.run_id),
-                        "thread_id": str(thread_id),
-                        "run": serialize_value(run.model_dump(mode="json")),
-                    },
-                    event_id,
-                )
-                event_id += 1
-
-                runnable_input = self._resolve_run_input(request)
-                config = build_thread_config(
-                    thread_id,
-                    request.config,
-                    request.checkpoint,
-                    run_id=str(run.run_id),
-                )
-                # One handler for all retry attempts: tokens consumed by a
-                # failed attempt were still consumed, so they count.
-                usage_handler = attach_usage_handler(config)
-                # Route the run's trace to its requested LangSmith project too
-                # (skeino.tracing). Around the whole attempt loop, so a retried
-                # attempt traces to the same projects as the first.
-                with run_tracing_context(request.langsmith_tracer):
-                    for attempt in range(STREAM_MAX_RETRIES):
-                        try:
-                            async for event_name, payload in self._streamer.stream(
-                                runnable_input, config, request, stream_modes
-                            ):
-                                yield sse_event(event_name, payload, event_id)
-                                event_id += 1
-                                emitted_data = True
-                            break
-                        except Exception as exc:
-                            # Only retry while nothing has reached the client. Graph
-                            # execution is not idempotent, so replaying a partially
-                            # streamed run would duplicate output and re-invoke the
-                            # model. ``CancelledError`` is a BaseException and is
-                            # deliberately not caught here so client disconnects
-                            # propagate to the cancellation handler below.
-                            if (
-                                attempt < STREAM_MAX_RETRIES - 1
-                                and not emitted_data
-                                and is_retriable_stream_error(exc)
-                            ):
-                                backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
-                                self._log_warning(
-                                    "Stream attempt %s failed (retrying in %.1fs): %s",
-                                    attempt + 1,
-                                    backoff,
-                                    exc,
-                                )
-                                await asyncio.sleep(backoff)
-                            else:
-                                raise
-
-                await self._metadata_store.update_run_status(
-                    str(run.run_id), _RUN_SUCCESS
-                )
-                await self._metadata_store.update_thread(
-                    thread_id,
-                    status_value=await self._settled_thread_status(thread_id),
-                    mark_state_updated=True,
-                )
-                total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
-                if total_tokens == 0:
-                    # Fallback for providers the callback handler can't see.
-                    total_tokens = await self._total_run_tokens(thread_id)
-                yield sse_event(
-                    "end",
-                    {
-                        "run_id": str(run.run_id),
-                        "status": _RUN_SUCCESS,
-                        "usage": {"total_tokens": total_tokens},
-                    },
-                    event_id,
-                )
-            except asyncio.CancelledError:
-                self._log_warning(
-                    "Streaming run %s cancelled for thread %s", run.run_id, thread_id
-                )
-                await self._mark_run_interrupted(str(run.run_id), thread_id)
+                await asyncio.wait({task})
+            except BaseException:
+                if cancel_on_disconnect and not task.done():
+                    task.cancel()
                 raise
-            except Exception as exc:
-                self._log_error(
-                    "Streaming run %s failed for thread %s: %s",
-                    run.run_id,
-                    thread_id,
-                    exc,
-                    exc=exc,
-                )
-                # Persist the failure best-effort; a store outage must not stop
-                # the client from receiving the 'error' event.
-                await self._mark_run_failed(str(run.run_id), thread_id, str(exc))
-                yield sse_event(
-                    "error",
-                    {"detail": str(exc), "run_id": str(run.run_id)},
-                    event_id,
-                )
-            finally:
-                if lock.locked():
-                    lock.release()
-                self._registry.unregister_external(thread_id, run_id)
-
-        return run, event_stream()
+        row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        if row is None:
+            # Deleted while we waited (rollback / DELETE).
+            yield sse_event(
+                "error",
+                {"detail": f"Run {run_id} not found.", "run_id": run_id},
+                None,
+            )
+            return
+        run_status = str(row["status"])
+        if run_status == _RUN_ERROR:
+            yield sse_event(
+                "error",
+                {"detail": row.get("error") or "Run failed.", "run_id": run_id},
+                None,
+            )
+            return
+        if stream_mode_matches("values", stream_modes):
+            output = await self._final_state_values(thread_id, run_id)
+            if isinstance(output, dict):
+                yield sse_event("values", self._streamer.filter_values(output), None)
+        yield sse_event("end", {"run_id": run_id, "status": run_status}, None)
 
     # ------------------------------------------------------------------
     # Stateless runs
@@ -442,31 +643,27 @@ class RunOps:
     async def create_stateless_streaming_run(
         self, request: RunCreateRequest
     ) -> tuple[RunModel, AsyncIterator[str]]:
-        """Stream a run on an ephemeral thread, deleting it once the stream ends."""
+        """Stream a run on an ephemeral thread, deleting it once the run ends.
+
+        Cleanup is tied to the run, not to the response: with
+        ``on_disconnect="continue"`` the run outlives a departed client, and
+        deleting the thread when the response closed would pull the
+        checkpointer out from under it.
+        """
         payload = self._as_stateless(request)
         thread_id = str(uuid4())
+
+        async def discard() -> None:
+            await self._discard_thread(thread_id)
+
         try:
-            run, stream = await self.create_streaming_run(thread_id, payload)
+            return await self.create_streaming_run(
+                thread_id, payload, after_run=discard
+            )
         except BaseException:
-            # The run never started, so nothing will consume the stream and
-            # trigger the cleanup below.
+            # The run never started, so its cleanup hook will never fire.
             await self._discard_thread(thread_id)
             raise
-
-        async def cleanup_after(inner: AsyncIterator[str]) -> AsyncIterator[str]:
-            # Cleanup belongs after the stream is exhausted, not after this
-            # function returns: the response is sent as soon as the generator is
-            # handed to Starlette, and deleting the thread at that point would
-            # pull the checkpointer out from under a run still in progress.
-            try:
-                async for chunk in inner:
-                    yield chunk
-            finally:
-                # Also covers the client disconnecting mid-stream, which
-                # unwinds the generator via GeneratorExit/CancelledError.
-                await self._discard_thread(thread_id)
-
-        return run, cleanup_after(stream)
 
     async def run_stateless_batch(self, requests: list[RunCreateRequest]) -> list[Any]:
         """Run each payload on its own ephemeral thread; return outputs in order.
@@ -596,9 +793,9 @@ class RunOps:
 
         ``reject`` 409s when busy; ``interrupt`` cancels active background runs;
         ``rollback`` cancels and deletes them; ``enqueue`` is a no-op (the new
-        run's task simply waits on the execution lock). Live streaming runs have
-        no cancellable task, so interrupt/rollback leave them running and the new
-        run queues behind them (resumable-stream cancellation is a follow-up).
+        run's task simply waits on the execution lock). Streaming runs are
+        tasks too, so they are cancelled the same way — except one still queued
+        for the execution lock, which has no task yet and stays queued.
         """
         active = self._registry.active_runs(thread_id)
         if not active:
