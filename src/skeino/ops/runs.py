@@ -284,10 +284,14 @@ class RunOps:
         async with self._registry.admission(thread_id):
             await self._resolve_multitask(thread_id, request.multitask_strategy)
             self._registry.register_external(thread_id, run_id)
-        # Acquire the execution lock (``enqueue`` waits here). Unregister on any
-        # failure so a cancelled wait does not leak an active slot.
+        # Track lock acquisition as a cancellable task. This keeps queued
+        # streaming runs interruptible before they have a producer task.
+        lock_task = self._registry.spawn(thread_id, run_id, lock.acquire())
         try:
-            await lock.acquire()
+            await lock_task
+            # The short handoff is synchronous: preserve active admission while
+            # metadata and stream setup await, then producer task takes over.
+            self._registry.register_external(thread_id, run_id)
         except BaseException:
             self._registry.unregister_external(thread_id, run_id)
             raise

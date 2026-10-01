@@ -655,6 +655,34 @@ async def test_streaming_run_is_superseded_by_interrupt_strategy() -> None:
         assert first.json()["status"] == "interrupted"
 
 
+async def test_interrupt_cancels_stream_while_waiting_for_execution_lock() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        lock = ops._lock_manager.get(_THREAD)
+        await lock.acquire()
+        queued = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="enqueue"))
+        )
+        for _ in range(50):
+            if len(ops._registry.all_active()) == 1:
+                break
+            await asyncio.sleep(0)
+        else:
+            pytest.fail("queued stream was not registered")
+
+        graph.stream_gate = None
+        replacement = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="interrupt"))
+        )
+        await asyncio.sleep(0)
+        lock.release()
+        run, events = await asyncio.wait_for(replacement, 5)
+        await _drain(events)
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
+
+
 def test_ops_join_rejects_bad_last_event_id_before_streaming() -> None:
     from skeino.ops.runs import _parse_last_event_id
 
