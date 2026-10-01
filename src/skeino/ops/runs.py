@@ -386,8 +386,15 @@ class RunOps:
         after = _parse_last_event_id(last_event_id)
         task = self._registry.get(run_id)
         stream = self._streams.get(thread_id, run_id)
-        if stream is not None and not (
-            after is None and (stream.closed or (task is not None and task.done()))
+        stream_finished_without_history = (
+            stream is not None
+            and not stream.resumable
+            and (stream.closed or (task is not None and task.done()))
+        )
+        if (
+            stream is not None
+            and not stream_finished_without_history
+            and not (after is None and stream.closed)
         ):
             if after is not None and stream.cursor_expired(after):
                 raise HTTPException(
@@ -838,9 +845,9 @@ class RunOps:
 
         ``reject`` 409s when busy; ``interrupt`` cancels active background runs;
         ``rollback`` cancels and deletes them; ``enqueue`` is a no-op (the new
-        run's task simply waits on the execution lock). Streaming runs are
-        tasks too, so they are cancelled the same way — except one still queued
-        for the execution lock, which has no task yet and stays queued.
+        run's task simply waits on the execution lock). Streaming runs track
+        lock acquisition as a task, so queued streaming runs are cancellable
+        through the same path.
         """
         active = self._registry.active_runs(thread_id)
         if not active:

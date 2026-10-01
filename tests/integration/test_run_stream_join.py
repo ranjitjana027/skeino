@@ -564,7 +564,7 @@ async def test_join_refreshes_status_when_local_handles_have_disappeared() -> No
             _THREAD,
             str(run.run_id),
             stream_modes=[],
-            last_event_id=None,
+            last_event_id="2",
             cancel_on_disconnect=False,
         )
         frames = parse_frames(await _drain(joined))
@@ -796,7 +796,7 @@ async def test_no_cursor_join_during_finalization_returns_final_state() -> None:
             await release.wait()
 
         run, original = await ops.create_streaming_run(
-            _THREAD, _request(), after_run=cleanup
+            _THREAD, _request(stream_resumable=False), after_run=cleanup
         )
         response = asyncio.create_task(_drain(original))
         await entered.wait()
