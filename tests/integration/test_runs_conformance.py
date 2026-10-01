@@ -23,6 +23,7 @@ from tests.real_graphs import (
     gate,
     real_client,
     user_input,
+    wait_until_gated,
 )
 
 MISSING = "00000000-0000-0000-0000-000000000000"
@@ -100,6 +101,7 @@ def _busy(client: TestClient, text: str = "one", **body: Any) -> tuple[str, str]
     thread_id = _thread(client)
     run_id = _start(client, thread_id, text, **body)["run_id"]
     _until_status(client, thread_id, run_id, "running")
+    wait_until_gated()
     return thread_id, run_id
 
 
@@ -371,6 +373,7 @@ def test_cancel_rollback_discards_checkpoints_written_mid_run(
     with gate():
         run_id = _start(gated, thread_id, "two", durability="async")["run_id"]
         _until_status(gated, thread_id, run_id, "running")
+        wait_until_gated()
         gated.post(
             f"/threads/{thread_id}/runs/{run_id}/cancel",
             params={"action": "rollback", "wait": "true"},
@@ -400,7 +403,7 @@ def test_cancel_with_wait_returns_final_body_and_join_location(
         )
     assert response.status_code == 200
     assert response.headers["location"] == f"/threads/{thread_id}/runs/{run_id}/join"
-    assert "messages" in response.json()
+    assert [m["content"] for m in response.json()["messages"]] == ["one"]
 
 
 def test_join_after_cancel_returns_the_threads_values(gated: TestClient) -> None:
@@ -412,7 +415,8 @@ def test_join_after_cancel_returns_the_threads_values(gated: TestClient) -> None
         )
         joined = gated.get(f"/threads/{thread_id}/runs/{run_id}/join")
     assert joined.status_code == 200
-    assert "messages" in joined.json()
+    # The cancelled run had consumed its input; nothing else was written.
+    assert [m["content"] for m in joined.json()["messages"]] == ["one"]
 
 
 # --- interrupt + resume ----------------------------------------------------
@@ -466,6 +470,7 @@ def test_thread_accepts_runs_after_a_cancelled_one(gated: TestClient) -> None:
     with gate() as release:
         run_id = _start(gated, thread_id, "one")["run_id"]
         _until_status(gated, thread_id, run_id, "running")
+        wait_until_gated()
         gated.post(
             f"/threads/{thread_id}/runs/{run_id}/cancel",
             params={"action": "interrupt", "wait": "true"},

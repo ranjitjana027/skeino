@@ -41,6 +41,8 @@ GATE_TIMEOUT_SECONDS = 5.0
 # Holds ``gated`` runs open until the test releases them; see ``gate()``.
 _GATE = threading.Event()
 _GATE.set()  # open by default: outside gate() ``gated`` behaves like ``echo``
+# Set by a ``gated`` run once it is parked at the gate (input consumed).
+_ENTERED = threading.Event()
 
 
 class MessagesState(TypedDict):
@@ -137,6 +139,7 @@ def build_gated(checkpointer: Any) -> Any:
     """Echo that blocks until the test opens ``gate()``, keeping its thread busy."""
 
     async def reply(state: MessagesState) -> dict[str, Any]:
+        _ENTERED.set()
         opened = await asyncio.to_thread(_GATE.wait, GATE_TIMEOUT_SECONDS)
         if not opened:
             raise TimeoutError("gated run never released; open gate() in the test")
@@ -220,11 +223,22 @@ def gate() -> Iterator[threading.Event]:
     Inside the block ``gated`` runs stay busy; ``.set()`` releases them early.
     Reopening on exit means a failing test never leaves a run hanging.
     """
+    _ENTERED.clear()
     _GATE.clear()
     try:
         yield _GATE
     finally:
         _GATE.set()
+
+
+def wait_until_gated(timeout: float = GATE_TIMEOUT_SECONDS) -> None:
+    """Block until a ``gated`` run has reached the gate inside ``gate()``.
+
+    A run's status flips to ``running`` before the graph executes, so polling
+    status alone races the node; this proves the node consumed its input.
+    """
+    if not _ENTERED.wait(timeout):
+        raise TimeoutError("no gated run reached the gate")
 
 
 def user_input(text: str = "hi") -> dict[str, Any]:
