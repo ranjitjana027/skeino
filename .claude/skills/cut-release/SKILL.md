@@ -95,11 +95,17 @@ curl -s https://pypi.org/pypi/skeino/json | \
 
 Confirm the latest version matches and both wheel + sdist are present.
 
-## 7. Offer a GitHub Release
+## 7. Check the GitHub Release
 
-The tag alone doesn't create a GitHub *Release* page. Offer to run
-`gh release create vX.Y.Z --notes-from-tag` (or notes from the changelog
-section).
+`publish.yml`'s `github-release` job creates the GitHub *Release* page for the
+tag once PyPI publishing succeeds, using the tag's `CHANGELOG.md` section as the
+notes. Confirm it exists (`gh release view vX.Y.Z`). To create or refresh the
+page for an already-published tag (e.g. a backfill), run the workflow manually —
+it skips build/publish and does not touch PyPI:
+
+```bash
+gh workflow run publish.yml -f tag=vX.Y.Z
+```
 
 ## 8. Sync the consumer skill in the marketplace
 
