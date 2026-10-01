@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import Annotated, Any, TypedDict
@@ -34,6 +35,14 @@ from skeino import SkeinoSettings, create_app
 ASSISTANT_ID = "agent"
 FAKE_LLM_REPLY = "the quick brown fox"
 INTERNAL_VALUE = "internal-pipeline-detail"
+FAILURE_MESSAGE = "graph exploded"
+GATE_TIMEOUT_SECONDS = 5.0
+
+# Holds ``gated`` runs open until the test releases them; see ``gate()``.
+_GATE = threading.Event()
+_GATE.set()  # open by default: outside gate() ``gated`` behaves like ``echo``
+# Set by a ``gated`` run once it is parked at the gate (input consumed).
+_ENTERED = threading.Event()
 
 
 class MessagesState(TypedDict):
@@ -126,6 +135,34 @@ def build_interrupting(checkpointer: Any) -> Any:
     return graph.compile(checkpointer=checkpointer)
 
 
+def build_gated(checkpointer: Any) -> Any:
+    """Echo that blocks until the test opens ``gate()``, keeping its thread busy."""
+
+    async def reply(state: MessagesState) -> dict[str, Any]:
+        _ENTERED.set()
+        opened = await asyncio.to_thread(_GATE.wait, GATE_TIMEOUT_SECONDS)
+        if not opened:
+            raise TimeoutError("gated run never released; open gate() in the test")
+        return {"messages": [AIMessage(f"echo: {_last_text(state)}")]}
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("reply", reply)
+    graph.add_edge(START, "reply")
+    return graph.compile(checkpointer=checkpointer)
+
+
+def build_failing(checkpointer: Any) -> Any:
+    """One node that raises ``ValueError(FAILURE_MESSAGE)``."""
+
+    def explode(state: MessagesState) -> dict[str, Any]:
+        raise ValueError(FAILURE_MESSAGE)
+
+    graph = StateGraph(MessagesState)
+    graph.add_node("explode", explode)
+    graph.add_edge(START, "explode")
+    return graph.compile(checkpointer=checkpointer)
+
+
 def build_with_subgraph(checkpointer: Any) -> Any:
     """Parent graph whose only node is a compiled subgraph."""
 
@@ -192,6 +229,8 @@ GRAPHS: dict[str, Callable[[Any], Any]] = {
     "interrupting": build_interrupting,
     "with_subgraph": build_with_subgraph,
     "fake_llm": build_fake_llm,
+    "gated": build_gated,
+    "failing": build_failing,
 }
 
 
@@ -204,6 +243,31 @@ def real_client(graph_name: str) -> Iterator[TestClient]:
     )
     with TestClient(app) as client:
         yield client
+
+
+@contextmanager
+def gate() -> Iterator[threading.Event]:
+    """Close the ``gated`` graph's gate for the block; always reopen on exit.
+
+    Inside the block ``gated`` runs stay busy; ``.set()`` releases them early.
+    Reopening on exit means a failing test never leaves a run hanging.
+    """
+    _ENTERED.clear()
+    _GATE.clear()
+    try:
+        yield _GATE
+    finally:
+        _GATE.set()
+
+
+def wait_until_gated(timeout: float = GATE_TIMEOUT_SECONDS) -> None:
+    """Block until a ``gated`` run has reached the gate inside ``gate()``.
+
+    A run's status flips to ``running`` before the graph executes, so polling
+    status alone races the node; this proves the node consumed its input.
+    """
+    if not _ENTERED.wait(timeout):
+        raise TimeoutError("no gated run reached the gate")
 
 
 def user_input(text: str = "hi") -> dict[str, Any]:
