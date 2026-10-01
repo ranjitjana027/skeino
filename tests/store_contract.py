@@ -201,13 +201,20 @@ class StoreContract:
     async def test_create_thread_with_ttl_records_expiry(
         self, store: MetadataStoreProtocol
     ) -> None:
-        row = await self._thread(store, ttl=ThreadTtlConfig(strategy="delete", ttl=30))
-        ttl = row["ttl"]
+        tid = _tid()
+        row = await self._thread(
+            store, tid, ttl=ThreadTtlConfig(strategy="delete", ttl=30)
+        )
+        stored = await self._get(store, tid)
+        assert stored is not None
+        # What was persisted, not just what the create echoed back.
+        assert stored["ttl"] == row["ttl"]
+        ttl = stored["ttl"]
         assert ttl is not None
         assert ttl["strategy"] == "delete"
         assert ttl["ttl_minutes"] == 30
         expires = datetime.fromisoformat(str(ttl["expires_at"]))
-        assert (expires - row["created_at"]).total_seconds() == pytest.approx(
+        assert (expires - stored["created_at"]).total_seconds() == pytest.approx(
             1800, abs=1
         )
 
@@ -487,9 +494,18 @@ class StoreContract:
         thread = await store.create_thread(
             tid, metadata={"a": 1}, config={}, ttl=None, if_exists="raise"
         )
-        run = await store.create_run(_tid(), tid, "agent", {}, {}, "enqueue")
+        rid = _tid()
+        run = await store.create_run(rid, tid, "agent", {"m": 1}, {}, "enqueue")
+        # Mutating what a create returned must not write into the store...
+        thread["metadata"]["leak"] = True
+        run["metadata"]["leak"] = True
+        stored_thread = await store.fetch_thread_row(tid)
+        stored_run = await store.fetch_run_row(tid, rid)
+        assert stored_thread is not None and stored_thread["metadata"] == {"a": 1}
+        assert stored_run is not None and stored_run["metadata"] == {"m": 1}
+        del thread["metadata"]["leak"], run["metadata"]["leak"]
         await store.update_thread(tid, status_value="busy", metadata={"b": 2})
-        await store.update_run_status(str(run["run_id"]), "success")
+        await store.update_run_status(rid, "success")
         # Later writes must not rewrite results the caller already holds.
         assert (thread["status"], thread["metadata"]) == ("idle", {"a": 1})
         assert run["status"] == "pending"
