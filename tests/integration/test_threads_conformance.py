@@ -114,14 +114,13 @@ def test_search_by_ids_respects_limit(client: TestClient) -> None:
     assert len(_search(client, ids=ids, limit=2)) == 2
 
 
-def test_search_by_status(client: TestClient) -> None:
-    busy_free = _thread(client)["thread_id"]
-    with real_client("interrupting") as paused_client:
-        paused = _thread(paused_client)["thread_id"]
-        _run(paused_client, paused)
-        found = _ids(_search(paused_client, status="interrupted"))
-    assert found == [paused]
-    assert busy_free not in found
+def test_search_by_status() -> None:
+    with real_client("interrupting") as client:
+        idle = _thread(client)["thread_id"]
+        paused = _thread(client)["thread_id"]
+        _run(client, paused)
+        assert _ids(_search(client, status="interrupted")) == [paused]
+        assert _ids(_search(client, status="idle")) == [idle]
 
 
 def test_search_metadata_match_on_first_page(client: TestClient) -> None:
@@ -237,7 +236,7 @@ def test_run_stamps_graph_and_assistant_on_thread_metadata(client: TestClient) -
     _run(client, thread_id)
     metadata = client.get(f"/threads/{thread_id}").json()["metadata"]
     assert metadata["graph_id"] == ASSISTANT_ID
-    assert "assistant_id" in metadata
+    assert metadata["assistant_id"] == ASSISTANT_ID
     assert _ids(_search(client, metadata={"graph_id": ASSISTANT_ID})) == [thread_id]
 
 
@@ -248,6 +247,11 @@ def test_delete_removes_thread_state_and_runs(client: TestClient) -> None:
     for path in ("", "/state", "/runs"):
         assert client.get(f"/threads/{thread_id}{path}").status_code == 404
     assert thread_id not in _ids(_search(client))
+    # The 404s above only prove the row is gone; recreating the id proves the
+    # checkpoints and run rows went with it.
+    _thread(client, thread_id=thread_id)
+    assert client.get(f"/threads/{thread_id}/state").json()["values"] in ({}, None)
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
 
 
 # --- copy ------------------------------------------------------------------
@@ -256,9 +260,11 @@ def test_delete_removes_thread_state_and_runs(client: TestClient) -> None:
 def test_copy_forks_state_and_metadata_independently(client: TestClient) -> None:
     source = _thread(client, metadata={"team": "a"})["thread_id"]
     _run(client, source, "one")
+    source_metadata = client.get(f"/threads/{source}").json()["metadata"]
     copy = client.post(f"/threads/{source}/copy").json()
     assert copy["thread_id"] != source
-    assert copy["metadata"] == {"team": "a", "forked_from": source}
+    assert source_metadata["team"] == "a"
+    assert copy["metadata"] == {**source_metadata, "forked_from": source}
     assert copy["values"] == client.get(f"/threads/{source}").json()["values"]
 
     _run(client, copy["thread_id"], "two")
@@ -381,4 +387,11 @@ def test_explicit_async_durability_checkpoints_every_step(client: TestClient) ->
 def test_default_durability_checkpoints_every_step(client: TestClient) -> None:
     thread_id = _thread(client)["thread_id"]
     _run(client, thread_id)
+    assert len(_history(client, thread_id)) >= 3
+
+
+@pytest.mark.xfail(strict=True, reason="#127: checkpoint_during is ignored")
+def test_checkpoint_during_checkpoints_every_step(client: TestClient) -> None:
+    thread_id = _thread(client)["thread_id"]
+    _run(client, thread_id, checkpoint_during=True)
     assert len(_history(client, thread_id)) >= 3
