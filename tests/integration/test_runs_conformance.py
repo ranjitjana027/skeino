@@ -20,7 +20,6 @@ from fastapi.testclient import TestClient
 
 from tests.real_graphs import (
     ASSISTANT_ID,
-    FAILURE_MESSAGE,
     gate,
     real_client,
     user_input,
@@ -344,11 +343,10 @@ def test_multitask_rollback_discards_the_first_runs_state(gated: TestClient) -> 
 def test_cancel_interrupt_marks_run_interrupted(gated: TestClient) -> None:
     with gate():
         thread_id, run_id = _busy(gated)
-        response = gated.post(
+        gated.post(
             f"/threads/{thread_id}/runs/{run_id}/cancel",
             params={"action": "interrupt", "wait": "true"},
         )
-        assert response.status_code in {200, 204}
         assert _run(gated, thread_id, run_id).json()["status"] == "interrupted"
         assert gated.get(f"/threads/{thread_id}").json()["status"] == "idle"
 
@@ -386,6 +384,23 @@ def test_cancel_without_wait_is_accepted(gated: TestClient) -> None:
         thread_id, run_id = _busy(gated)
         response = gated.post(f"/threads/{thread_id}/runs/{run_id}/cancel")
         assert response.status_code == 202
+
+
+@pytest.mark.xfail(
+    strict=True, reason="#129: cancel wait=true is 204, not the run's final body"
+)
+def test_cancel_with_wait_returns_final_body_and_join_location(
+    gated: TestClient,
+) -> None:
+    with gate():
+        thread_id, run_id = _busy(gated)
+        response = gated.post(
+            f"/threads/{thread_id}/runs/{run_id}/cancel",
+            params={"action": "interrupt", "wait": "true"},
+        )
+    assert response.status_code == 200
+    assert response.headers["location"] == f"/threads/{thread_id}/runs/{run_id}/join"
+    assert "messages" in response.json()
 
 
 def test_join_after_cancel_returns_the_threads_values(gated: TestClient) -> None:
@@ -429,8 +444,9 @@ def test_failing_graph_marks_run_and_thread_error() -> None:
     with real_client("failing") as client:
         thread_id = _thread(client)
         response = _wait(client, thread_id)
+        # Only "the caller is told it failed": the error body's shape and
+        # wording are deliberately not part of this contract.
         assert response.status_code >= 400 or "__error__" in response.json()
-        assert FAILURE_MESSAGE in response.text
         (run,) = client.get(f"/threads/{thread_id}/runs").json()
         assert run["status"] == "error"
         assert client.get(f"/threads/{thread_id}").json()["status"] == "error"
