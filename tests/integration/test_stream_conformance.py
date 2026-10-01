@@ -147,7 +147,9 @@ def test_debug_tasks_and_checkpoints_carry_their_shapes() -> None:
     tasks = _data(events, "tasks")
     assert any(t.get("name") == "reply" and "input" in t for t in tasks)
     assert any(t.get("name") == "reply" and "result" in t for t in tasks)
-    assert all({"config", "values"} <= set(c) for c in _data(events, "checkpoints"))
+    checkpoints = _data(events, "checkpoints")
+    assert checkpoints  # ``all([])`` would pass if multi-mode dropped them
+    assert all({"config", "values"} <= set(c) for c in checkpoints)
 
 
 def test_custom_dict_payload_is_forwarded() -> None:
