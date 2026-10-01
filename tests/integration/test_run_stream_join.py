@@ -490,6 +490,45 @@ async def test_streaming_run_can_be_cancelled_and_joiners_see_end() -> None:
         assert task.cancelled()
 
 
+async def test_burst_stream_does_not_detach_a_subscriber_that_can_drain() -> None:
+    async with running_app() as (app, _graph, _client):
+        run_ops = app.state.skeino.run_ops
+
+        async def burst(*_args: Any, **_kwargs: Any) -> AsyncIterator[tuple[str, Any]]:
+            for index in range(300):
+                yield "custom", {"index": index}
+
+        run_ops._streamer.stream = burst
+        run, events = await run_ops.create_streaming_run(_THREAD, _request())
+        frames = parse_frames(await _drain(events))
+
+        assert len([name for _, name, _ in frames if name == "custom"]) == 300
+
+
+async def test_cancel_before_stream_task_starts_runs_stateless_cleanup() -> None:
+    async with running_app() as (app, graph, _client):
+        run_ops = app.state.skeino.run_ops
+        run, _events = await run_ops.create_stateless_streaming_run(_request())
+        stream = run_ops._streams._streams[str(run.run_id)]
+        thread_id = stream.thread_id
+        task = run_ops._registry.get(str(run.run_id))
+        assert task is not None
+        task.cancel()
+        await asyncio.wait({task})
+        # The done callback must persist interruption and run after_run even
+        # though _publish_run never got its first event-loop turn.
+        for _ in range(20):
+            if thread_id not in graph.state_by_thread:
+                break
+            await asyncio.sleep(0)
+
+        assert thread_id not in graph.state_by_thread
+        assert thread_id not in graph.history_by_thread
+        assert thread_id not in graph.checkpoints_by_thread
+        assert not stream.resumable
+        assert str(run.run_id) not in run_ops._streams._streams
+
+
 async def test_streaming_run_is_superseded_by_interrupt_strategy() -> None:
     async with running_app() as (app, graph, client):
         run_id, task = await _start_and_leave(app, graph)

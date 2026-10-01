@@ -310,6 +310,7 @@ class RunOps:
         )
         events = stream.subscribe(after=None)
         released = False
+        finalized = False
 
         def finish() -> None:
             # Idempotent: runs from the task's ``finally`` and again from its
@@ -321,14 +322,46 @@ class RunOps:
                 lock.release()
             self._streams.close(stream)
 
+        def mark_finalized() -> None:
+            nonlocal finalized
+            finalized = True
+
         task = self._registry.spawn(
             thread_id,
             run_id,
             self._publish_run(
-                run, request, stream_modes, stream, finish=finish, after_run=after_run
+                run,
+                request,
+                stream_modes,
+                stream,
+                finish=finish,
+                mark_finalized=mark_finalized,
+                after_run=after_run,
             ),
         )
-        task.add_done_callback(lambda _t: finish())
+
+        async def finalize_prestart_cancellation() -> None:
+            """Persist and clean up if cancellation beat the coroutine's start."""
+            nonlocal finalized
+            if finalized:
+                return
+            finalized = True
+            await self._mark_run_interrupted(run_id, thread_id)
+            if not stream.closed:
+                stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
+            finish()
+            if after_run is not None:
+                await after_run()
+
+        def task_done(done: asyncio.Task[Any]) -> None:
+            if finalized:
+                return
+            if done.cancelled():
+                asyncio.create_task(finalize_prestart_cancellation())
+            else:
+                finish()
+
+        task.add_done_callback(task_done)
         return run, self._relay(
             events,
             task,
@@ -404,6 +437,7 @@ class RunOps:
         stream: RunEventStream,
         *,
         finish: Callable[[], None],
+        mark_finalized: Callable[[], None],
         after_run: Callable[[], Awaitable[None]] | None,
     ) -> int:
         """Execute a streaming run, publishing its events; return total tokens.
@@ -446,6 +480,10 @@ class RunOps:
                         ):
                             stream.publish(event_name, payload)
                             emitted_data = True
+                            # Async generators may emit already-buffered chunks
+                            # without suspending. Give response relays a chance
+                            # to drain bounded queues before the next publish.
+                            await asyncio.sleep(0)
                         break
                     except Exception as exc:
                         # Only retry while nothing has been published. Graph
@@ -510,6 +548,7 @@ class RunOps:
             stream.publish("error", {"detail": str(exc), "run_id": run_id})
             return 0
         finally:
+            mark_finalized()
             finish()
             if after_run is not None:
                 await after_run()
