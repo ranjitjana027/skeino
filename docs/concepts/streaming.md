@@ -108,10 +108,13 @@ the joining client goes away; the default leaves it running.
 !!! info "Process-local buffer"
     Events are buffered in the memory of the worker running the run — the same
     single-process scope as the run's task and thread lock (see
-    [Deployment](../guides/deployment.md)). With several workers, a join must
-    reach the worker that owns the run; one that lands elsewhere gets `409`.
-    The buffer is independent of the persistence backend, and does not survive
-    a restart (nor does the run: shutdown marks it `interrupted`).
+    [Deployment](../guides/deployment.md)). With several workers, replay and
+    live tailing require a join to reach the worker that owns the run. If a
+    join lands elsewhere while the run is still active, it gets `409`; if the
+    run is already terminal, skeino returns synthetic final-state events with
+    `200` from persisted state instead. The buffer is independent of the
+    persistence backend, and does not survive a restart (nor does the run:
+    shutdown marks it `interrupted`).
 
 ## Stream modes
 
