@@ -37,7 +37,7 @@ from skeino.serialization import serialize_value
 
 router = APIRouter(prefix="/threads/{thread_id}")
 stateless_router = APIRouter()
-_STREAM_MODE_ADAPTER = TypeAdapter(StreamMode)
+_STREAM_MODE_ADAPTER: TypeAdapter[StreamMode] = TypeAdapter(StreamMode)
 
 
 @router.post("/runs", response_model=RunModel)
