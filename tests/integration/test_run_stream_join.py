@@ -277,8 +277,12 @@ async def test_join_finished_run_without_last_event_id_sends_final_state() -> No
 
 @pytest.mark.parametrize(
     ("settings", "resumable"),
-    [({}, False), ({"resumable_stream_ttl_seconds": 0}, True)],
-    ids=["non-resumable", "retention-expired"],
+    [
+        ({}, False),
+        ({"resumable_stream_ttl_seconds": 0}, True),
+        ({"resumable_stream_max_retained_runs": 0}, True),
+    ],
+    ids=["non-resumable", "retention-expired", "retention-disabled"],
 )
 async def test_join_finished_run_with_nothing_retained_sends_final_state(
     settings: dict[str, Any], resumable: bool

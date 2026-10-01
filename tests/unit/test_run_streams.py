@@ -182,6 +182,27 @@ def test_zero_retention_drops_streams_on_close() -> None:
     assert registry.get("t", "r") is None
 
 
+def test_finished_stream_budget_evicts_oldest_without_affecting_active_runs() -> None:
+    registry = RunStreamRegistry(retention_seconds=600, max_retained_streams=2)
+    active = registry.open("t", "active", resumable=True)
+    for index in range(10):
+        stream = registry.open("t", str(index), resumable=True)
+        stream.publish("values", {"index": index})
+        registry.close(stream)
+        registry.close(stream)
+        assert len(registry._expiry) <= 2
+    assert registry.get("t", "0") is None
+    assert registry.get("t", "7") is None
+    assert registry.get("t", "8") is not None
+    assert registry.get("t", "9") is not None
+    assert registry.get("t", "active") is active
+
+
+def test_negative_finished_stream_budget_is_rejected() -> None:
+    with pytest.raises(ValueError):
+        RunStreamRegistry(retention_seconds=600, max_retained_streams=-1)
+
+
 def test_expiry_tracks_close_order_and_ignores_repeated_close() -> None:
     clock = _Clock()
     registry = RunStreamRegistry(retention_seconds=10, clock=clock)

@@ -214,12 +214,16 @@ class RunStreamRegistry:
         self,
         *,
         retention_seconds: float,
+        max_retained_streams: int = 16,
         max_history_events: int = _DEFAULT_HISTORY_MAX_EVENTS,
         max_history_bytes: int = _DEFAULT_HISTORY_MAX_BYTES,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Create an empty registry keeping finished resumable streams a while."""
         self._retention = retention_seconds
+        if max_retained_streams < 0:
+            raise ValueError("max_retained_streams must be non-negative")
+        self._max_retained_streams = max_retained_streams
         self._max_history_events = max_history_events
         self._max_history_bytes = max_history_bytes
         self._clock = clock
@@ -260,6 +264,11 @@ class RunStreamRegistry:
         elif not was_closed:
             self._expiry.append(stream)
         self._sweep()
+
+        while len(self._expiry) > self._max_retained_streams:
+            oldest = self._expiry.popleft()
+            if self._streams.get(oldest.run_id) is oldest:
+                del self._streams[oldest.run_id]
 
     def _sweep(self) -> None:
         now = self._clock()

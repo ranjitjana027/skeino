@@ -61,6 +61,13 @@ class SkeinoSettings(BaseModel):
         "to the configured event and byte limits. 0 drops them as soon as the "
         "run ends (a join then gets the final state only).",
     )
+    resumable_stream_max_retained_runs: int = Field(
+        default=16,
+        ge=0,
+        description="Maximum finished resumable streams retained per worker. "
+        "Oldest finished buffers are evicted first; joins then return final "
+        "state instead of replay. 0 disables finished history retention.",
+    )
     resumable_stream_max_events: int = Field(
         default=10_000,
         ge=1,

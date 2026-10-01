@@ -99,6 +99,14 @@ than silently replaying an incomplete stream. Stateless `POST /runs/stream`
 never retains history, even if `stream_resumable: true` is sent, because its
 ephemeral run identifiers cannot be used to join later.
 
+Each worker retains at most `SkeinoSettings.resumable_stream_max_retained_runs`
+finished streams (default 16; 0 disables finished history retention). With the
+default per-run byte cap this bounds registry-owned finished history to 256 MiB
+of encoded frames, plus object overhead. Oldest finished buffers are evicted
+first; joins to those runs return synthetic final-state events with `200`,
+even when a replay cursor is supplied. Active streams do not count toward this
+finished-history limit and remain subject to the per-run event and byte caps.
+
 | Situation | Response |
 | --- | --- |
 | Run in flight, resumable | `200`: replay after `Last-Event-ID`, then live events |
