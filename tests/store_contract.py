@@ -88,6 +88,7 @@ IN_MEMORY_SNAPSHOT_GAPS = {
     name: "#136: in-memory returns its live rows"
     for name in (
         "test_create_results_are_snapshots",
+        "test_do_nothing_create_result_is_a_snapshot",
         "test_read_results_are_snapshots",
         "test_run_results_are_snapshots",
     )
@@ -518,6 +519,25 @@ class StoreContract:
         # Later writes must not rewrite results the caller already holds.
         assert (thread["status"], thread["metadata"]) == ("idle", {"a": 1})
         assert run["status"] == "pending"
+
+    async def test_do_nothing_create_result_is_a_snapshot(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        # ``if_exists="do_nothing"`` returns the existing row on its own
+        # branch, so it needs isolating separately from a fresh insert.
+        tid = _tid()
+        await store.create_thread(
+            tid, metadata={"a": 1}, config={}, ttl=None, if_exists="raise"
+        )
+        existing = await store.create_thread(
+            tid, metadata={"x": 2}, config={}, ttl=None, if_exists="do_nothing"
+        )
+        existing["metadata"]["leak"] = True
+        stored = await store.fetch_thread_row(tid)
+        assert stored is not None and stored["metadata"] == {"a": 1}
+        del existing["metadata"]["leak"]
+        await store.update_thread(tid, status_value="busy", metadata={"b": 2})
+        assert (existing["status"], existing["metadata"]) == ("idle", {"a": 1})
 
     async def test_read_results_are_snapshots(
         self, store: MetadataStoreProtocol
