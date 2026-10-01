@@ -15,8 +15,13 @@ poetry run ruff format --check .   # formatting (use `ruff format .` to fix)
 poetry run ruff check .            # lint (use `ruff check --fix .`)
 poetry run mypy src                # strict types
 poetry run bandit -r src           # security
-poetry run pytest                  # unit + integration (in-memory, no services)
+poetry run pytest --cov            # unit + integration (in-memory, no services)
 ```
+
+`--cov` enforces the branch-coverage gate (`fail_under` in `pyproject.toml`,
+as CI runs it). It is a ratchet: raise it when coverage grows, never lower it.
+It is deliberately not in `addopts`, so partial runs (`pytest tests/unit/x.py`,
+mutation testing) don't trip the gate.
 
 Infra-backed API tests (local-only, not part of the five checks; needs Docker):
 

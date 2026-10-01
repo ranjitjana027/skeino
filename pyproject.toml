@@ -38,7 +38,7 @@ langgraph = "^1.0.0"
 langgraph-checkpoint = ">=2.0.0"
 langchain-core = "*"
 python-dotenv = ">=1.0.1"
-uvicorn = ">=0.41,<0.54"
+uvicorn = ">=0.41,<0.55"
 # All database backends are OPTIONAL extras, imported lazily so the default
 # install only ships the in-memory checkpointer. Pick a backend with the
 # matching extra: skeino[postgres], skeino[sqlite], or skeino[mongodb].
@@ -67,6 +67,7 @@ mypy = ">=1.19.0,<3.0.0"
 bandit = { version = ">=1.7.0", extras = ["toml"] }
 towncrier = ">=24.8.0"
 mongomock-motor = ">=0.0.30"
+pytest-cov = ">=6.0.0"
 
 [tool.poetry.group.docs]
 optional = true
@@ -94,6 +95,23 @@ asyncio_mode = "auto"
 # plain `pytest` stays in-memory and sub-second. Run it explicitly with
 # `poetry run pytest tests/api`.
 testpaths = ["tests/unit", "tests/integration"]
+
+[tool.coverage.run]
+source = ["skeino"]
+branch = true
+
+[tool.coverage.report]
+# Ratchet: raise as coverage grows, never lower. Measured 82.07% (branch) on
+# 3.11/3.12/3.13 when introduced.
+fail_under = 82
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@overload",
+    "\\.\\.\\.$",
+]
 
 [tool.ruff]
 # .claude/ holds agent/editor tooling (e.g. hook scripts), not shippable
