@@ -17,6 +17,7 @@ pins the surface.
 from __future__ import annotations
 
 import re
+import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -201,7 +202,26 @@ def test_matrix_covers_every_documented_route() -> None:
 # --- documented status per route -------------------------------------------
 
 
-@pytest.mark.parametrize("route", sorted(DOCUMENTED), ids=" ".join)
+# ``tests/real_graphs.py`` states are ``typing.TypedDict``, which pydantic cannot
+# schema on Python < 3.12; skeino 500s instead of degrading that schema (#133).
+_PY311_SCHEMA_GAP = pytest.mark.xfail(
+    sys.version_info < (3, 12),
+    strict=True,
+    reason="#133: a failing schema 500s the route (typing.TypedDict on py<3.12)",
+)
+_SCHEMA_ROUTES = {
+    ("GET", "/assistants/{assistant_id}/schemas"),
+    ("GET", "/assistants/{assistant_id}/subgraphs"),
+}
+_STATUS_CASES = [
+    pytest.param(route, marks=_PY311_SCHEMA_GAP, id=" ".join(route))
+    if route in _SCHEMA_ROUTES
+    else pytest.param(route, id=" ".join(route))
+    for route in sorted(DOCUMENTED)
+]
+
+
+@pytest.mark.parametrize("route", _STATUS_CASES)
 def test_route_returns_documented_status(route: Route, world: World) -> None:
     response = HAPPY[route](world)
     assert response.status_code == DOCUMENTED[route], response.text
