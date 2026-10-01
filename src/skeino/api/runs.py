@@ -21,6 +21,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from pydantic import TypeAdapter, ValidationError
 
 from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model, run_location
@@ -30,11 +31,13 @@ from skeino.schemas import (
     RunCreateRequest,
     RunModel,
     RunStatus,
+    StreamMode,
 )
 from skeino.serialization import serialize_value
 
 router = APIRouter(prefix="/threads/{thread_id}")
 stateless_router = APIRouter()
+_STREAM_MODE_ADAPTER = TypeAdapter(StreamMode)
 
 
 @router.post("/runs", response_model=RunModel)
@@ -126,25 +129,43 @@ def _parse_stream_modes(values: list[str] | None) -> list[str]:
     modes: list[str] = []
     for value in values or []:
         if not value.startswith("["):
-            modes.append(value)
-            continue
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid stream_mode {value!r}: {exc}",
-            ) from exc
-        if not isinstance(parsed, list) or not all(isinstance(m, str) for m in parsed):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Invalid stream_mode {value!r}: expected a list of strings.",
-            )
-        modes.extend(parsed)
+            parsed_modes = [value]
+        else:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {value!r}: {exc}",
+                ) from exc
+            if not isinstance(parsed, list) or not all(
+                isinstance(mode, str) for mode in parsed
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {value!r}: expected a list of strings.",
+                )
+            parsed_modes = parsed
+        for mode in parsed_modes:
+            try:
+                modes.append(_STREAM_MODE_ADAPTER.validate_python(mode))
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {mode!r}.",
+                ) from exc
     return modes
 
 
-@router.get("/runs/{run_id}/stream")
+@router.get(
+    "/runs/{run_id}/stream",
+    response_class=StreamingResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+        }
+    },
+)
 async def join_run_stream(
     request: Request,
     thread_id: UUID,

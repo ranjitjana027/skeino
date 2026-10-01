@@ -4086,8 +4086,10 @@
         "responses": {
           "200": {
             "content": {
-              "application/json": {
-                "schema": {}
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
               }
             },
             "description": "Successful Response"

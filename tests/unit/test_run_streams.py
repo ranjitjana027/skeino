@@ -84,6 +84,29 @@ async def test_subscriber_is_detached_when_drained_or_closed_early() -> None:
     assert stream.subscriber_count == 0
 
 
+async def test_slow_subscriber_is_detached_when_its_bounded_queue_fills() -> None:
+    stream = RunEventStream("t", "r", resumable=False)
+    slow = stream.subscribe(after=None)
+    for _ in range(256):
+        stream.publish("values", {})
+    assert stream.subscriber_count == 1
+
+    stream.publish("values", {})
+    assert stream.subscriber_count == 0
+    assert [event async for event in slow] == []
+
+
+async def test_close_detaches_subscriber_when_its_queue_is_full() -> None:
+    stream = RunEventStream("t", "r", resumable=False)
+    slow = stream.subscribe(after=None)
+    for _ in range(256):
+        stream.publish("values", {})
+
+    stream.close(now=0.0)
+    assert stream.subscriber_count == 0
+    assert [event async for event in slow] == []
+
+
 def test_publish_after_close_fails_loudly() -> None:
     stream = RunEventStream("t", "r", resumable=True)
     stream.close(now=0.0)

@@ -34,6 +34,7 @@ from skeino.streaming.sse import sse_event
 # filter: without them a joined client cannot tell which run it is attached to
 # (``metadata``), that the run failed (``error``), or that it is over (``end``).
 _LIFECYCLE_EVENTS: Final[frozenset[str]] = frozenset({"metadata", "error", "end"})
+_SUBSCRIBER_QUEUE_SIZE: Final[int] = 256
 
 
 def stream_mode_matches(event: str, stream_modes: Sequence[str]) -> bool:
@@ -96,8 +97,11 @@ class RunEventStream:
         self._next_id += 1
         if self.resumable:
             self._history.append(published)
-        for queue in self._subscribers:
-            queue.put_nowait(published)
+        for queue in tuple(self._subscribers):
+            if queue.full():
+                self._detach(queue)
+            else:
+                queue.put_nowait(published)
         return published
 
     def close(self, now: float) -> None:
@@ -105,8 +109,18 @@ class RunEventStream:
         if self.closed:
             return
         self.closed_at = now
-        for queue in self._subscribers:
-            queue.put_nowait(None)
+        for queue in tuple(self._subscribers):
+            if queue.full():
+                self._detach(queue)
+            else:
+                queue.put_nowait(None)
+
+    def _detach(self, queue: asyncio.Queue[StreamEvent | None]) -> None:
+        """Stop a lagging subscriber and discard its queued events."""
+        self._subscribers.discard(queue)
+        while not queue.empty():
+            queue.get_nowait()
+        queue.put_nowait(None)
 
     def subscribe(self, *, after: int | None) -> AsyncGenerator[StreamEvent, None]:
         """Attach a subscriber; return its event iterator.
@@ -123,7 +137,9 @@ class RunEventStream:
             if after is not None
             else []
         )
-        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue()
+        queue: asyncio.Queue[StreamEvent | None] = asyncio.Queue(
+            maxsize=_SUBSCRIBER_QUEUE_SIZE
+        )
         if self.closed:
             queue.put_nowait(None)
         else:

@@ -383,7 +383,7 @@ async def test_join_with_malformed_last_event_id_is_422() -> None:
 async def test_join_with_malformed_stream_mode_is_422() -> None:
     async with running_app() as (app, graph, client):
         run_id, _ = await _start_and_leave(app, graph)
-        for bad in ('["values"', "[1, 2]"):
+        for bad in ('["values"', "[1, 2]", "bogus", '["values", "bogus"]'):
             r = await client.get(
                 f"/threads/{_THREAD}/runs/{run_id}/stream",
                 params={"stream_mode": bad},
