@@ -165,17 +165,23 @@ class StoreContract:
     async def test_row_types_match_the_declared_contract(
         self, store: MetadataStoreProtocol
     ) -> None:
-        tid = _tid()
+        tid, rid = _tid(), _tid()
         await self._thread(store, tid)
-        run = await store.create_run(_tid(), tid, "agent", {}, {}, "enqueue")
+        created = await store.create_run(rid, tid, "agent", {}, {}, "enqueue")
+        await store.update_thread(tid, mark_state_updated=True)
         thread = await store.fetch_thread_row(tid)
-        assert thread is not None
+        run = await store.fetch_run_row(tid, rid)
+        assert thread is not None and run is not None
         assert isinstance(thread["thread_id"], UUID)
-        assert isinstance(run["run_id"], UUID)
-        assert isinstance(run["thread_id"], UUID)
+        for row in (created, run):
+            assert isinstance(row["run_id"], UUID)
+            assert isinstance(row["thread_id"], UUID)
         for stamp in (
             thread["created_at"],
             thread["updated_at"],
+            thread["state_updated_at"],
+            created["created_at"],
+            created["updated_at"],
             run["created_at"],
             run["updated_at"],
         ):
@@ -387,7 +393,15 @@ class StoreContract:
     async def test_delete_missing_thread_is_a_silent_no_op(
         self, store: MetadataStoreProtocol
     ) -> None:
+        tid, rid = _tid(), _tid()
+        await self._thread(store, tid, metadata={"keep": True})
+        await self._run(store, tid, run_id=rid)
+        thread_before = await self._get(store, tid)
+        run_before = await self._get_run(store, tid, rid)
         await store.delete_thread(_tid())
+        # Unrelated rows are untouched, not merely "no exception raised".
+        assert await self._get(store, tid) == thread_before
+        assert await self._get_run(store, tid, rid) == run_before
 
     # --- runs --------------------------------------------------------------
 
