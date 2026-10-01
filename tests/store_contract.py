@@ -437,7 +437,16 @@ class StoreContract:
     async def test_update_missing_run_is_a_silent_no_op(
         self, store: MetadataStoreProtocol
     ) -> None:
-        await store.update_run_status(_tid(), "success")
+        tid, rid = _tid(), _tid()
+        await self._thread(store, tid)
+        await store.update_run_status(rid, "success")
+        # No upsert: the id stays unknown and a later create starts it fresh.
+        assert await store.fetch_run_row(tid, rid) is None
+        assert (
+            await store.list_run_rows(tid, limit=10, offset=0, status_value=None) == []
+        )
+        run = await self._run(store, tid, run_id=rid)
+        assert (run["status"], run["error"]) == ("pending", None)
 
     async def test_run_lookups_are_scoped_to_their_thread(
         self, store: MetadataStoreProtocol
