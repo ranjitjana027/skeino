@@ -8,14 +8,18 @@ wrong is a strict xfail scoped to that backend via ``KNOWN_GAPS``.
 
 The contract is behaviour at the protocol surface — row values, ordering,
 scoping, no-op and missing-row semantics — not driver-level value types
-beyond what ``ThreadRow``/``RunRow`` declare.
+beyond what ``ThreadRow``/``RunRow`` declare. Behavioural comparisons go
+through ``_norm`` (UTC, millisecond precision) so a timestamp-precision gap
+fails only the dedicated timestamp tests, never masking an unrelated
+regression; ``test_timestamps_round_trip_exactly`` and
+``test_row_types_match_the_declared_contract`` pin exactness and types.
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
@@ -43,16 +47,49 @@ def _ids(rows: list[ThreadRow] | list[RunRow], key: str = "thread_id") -> list[s
     return [str(row[key]) for row in rows]  # type: ignore[literal-required]
 
 
+def _norm(value: Any) -> Any:
+    """Deep copy with every datetime as UTC-aware, truncated to milliseconds.
+
+    Used for behavioural comparisons only; the copy also guarantees a store
+    that hands out live rows cannot make a before/after comparison pass by
+    comparing a row to itself.
+    """
+    if isinstance(value, datetime):
+        aware = value if value.utcoffset() is not None else value.replace(tzinfo=UTC)
+        aware = aware.astimezone(UTC)
+        return aware.replace(microsecond=aware.microsecond // 1000 * 1000)
+    if isinstance(value, dict):
+        return {key: _norm(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_norm(item) for item in value]
+    return copy.deepcopy(value)
+
+
+def _sort_key(value: Any) -> tuple[int, Any]:
+    """Contract ordering: ``None`` sorts before every value (upstream precedent:
+    ``x or datetime.min``), so null placement is identical on every backend."""
+    return (0, "") if value is None else (1, str(_norm(value)))
+
+
 MONGO_TIMESTAMP_GAPS = {
     name: "#135: Mongo returns naive, ms-truncated timestamps"
     for name in (
-        "test_create_thread_returns_the_stored_row",
         "test_row_types_match_the_declared_contract",
-        "test_create_existing_thread_do_nothing_returns_original",
-        "test_update_thread_sets_fields_and_bumps_updated_at",
-        "test_delete_thread_removes_it_and_only_its_runs",
-        "test_create_run_returns_a_pending_row",
-        "test_update_run_status_sets_and_clears_error",
+        "test_timestamps_round_trip_exactly",
+    )
+}
+POSTGRES_NULL_ORDER_GAPS = {
+    f"test_search_sorts_by_every_key[state_updated_at-{order}]": (
+        "#138: Postgres sorts NULL state_updated_at as the largest value"
+    )
+    for order in ("asc", "desc")
+}
+IN_MEMORY_SNAPSHOT_GAPS = {
+    name: "#136: in-memory returns its live rows"
+    for name in (
+        "test_create_results_are_snapshots",
+        "test_read_results_are_snapshots",
+        "test_run_results_are_snapshots",
     )
 }
 
@@ -76,10 +113,7 @@ class StoreContract:
     async def _thread(
         self, store: MetadataStoreProtocol, thread_id: str | None = None, **kwargs: Any
     ) -> ThreadRow:
-        # Deep copies throughout: a store that hands out its live rows must
-        # not make a before/after comparison pass by comparing a row to itself
-        # (``test_returned_rows_are_snapshots`` pins that behaviour directly).
-        return copy.deepcopy(
+        return _norm(  # type: ignore[no-any-return]
             await store.create_thread(
                 thread_id or _tid(),
                 metadata=kwargs.pop("metadata", {}),
@@ -92,7 +126,7 @@ class StoreContract:
     async def _run(
         self, store: MetadataStoreProtocol, thread_id: str, **kwargs: Any
     ) -> RunRow:
-        return copy.deepcopy(
+        return _norm(  # type: ignore[no-any-return]
             await store.create_run(
                 kwargs.pop("run_id", _tid()),
                 thread_id,
@@ -102,6 +136,14 @@ class StoreContract:
                 kwargs.pop("multitask_strategy", "enqueue"),
             )
         )
+
+    async def _get(self, store: MetadataStoreProtocol, thread_id: str) -> Any:
+        return _norm(await store.fetch_thread_row(thread_id))
+
+    async def _get_run(
+        self, store: MetadataStoreProtocol, thread_id: str, run_id: str
+    ) -> Any:
+        return _norm(await store.fetch_run_row(thread_id, run_id))
 
     # --- create / fetch thread ---------------------------------------------
 
@@ -117,14 +159,14 @@ class StoreContract:
         assert row["state_updated_at"] is None
         assert row["ttl"] is None
         assert row["created_at"] == row["updated_at"]
-        assert await store.fetch_thread_row(tid) == row
+        assert await self._get(store, tid) == row
 
     async def test_row_types_match_the_declared_contract(
         self, store: MetadataStoreProtocol
     ) -> None:
         tid = _tid()
         await self._thread(store, tid)
-        run = await self._run(store, tid)
+        run = await store.create_run(_tid(), tid, "agent", {}, {}, "enqueue")
         thread = await store.fetch_thread_row(tid)
         assert thread is not None
         assert isinstance(thread["thread_id"], UUID)
@@ -138,6 +180,23 @@ class StoreContract:
         ):
             assert isinstance(stamp, datetime)
             assert stamp.utcoffset() is not None  # timezone-aware
+
+    async def test_timestamps_round_trip_exactly(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        # What a create returns is what every later read returns, to the
+        # microsecond — callers echo the create response straight to clients.
+        tid, rid = _tid(), _tid()
+        thread = await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        run = await store.create_run(rid, tid, "agent", {}, {}, "enqueue")
+        stored_thread = await store.fetch_thread_row(tid)
+        stored_run = await store.fetch_run_row(tid, rid)
+        assert stored_thread is not None and stored_run is not None
+        for key in ("created_at", "updated_at"):
+            assert stored_thread[key] == thread[key]
+            assert stored_run[key] == run[key]
 
     async def test_create_thread_with_ttl_records_expiry(
         self, store: MetadataStoreProtocol
@@ -170,13 +229,13 @@ class StoreContract:
             store, tid, metadata={"v": 2}, if_exists="do_nothing"
         )
         assert again == original
-        fetched = await store.fetch_thread_row(tid)
+        fetched = await self._get(store, tid)
         assert fetched is not None and fetched["metadata"] == {"v": 1}
 
     async def test_fetch_missing_thread_is_none(
         self, store: MetadataStoreProtocol
     ) -> None:
-        assert await store.fetch_thread_row(_tid()) is None
+        assert await self._get(store, _tid()) is None
 
     # --- update thread -----------------------------------------------------
 
@@ -189,7 +248,7 @@ class StoreContract:
         await store.update_thread(
             tid, status_value="busy", config={"c": 2}, metadata={"b": 2}
         )
-        row = await store.fetch_thread_row(tid)
+        row = await self._get(store, tid)
         assert row is not None
         assert row["status"] == "busy"
         assert row["config"] == {"c": 2}
@@ -204,7 +263,7 @@ class StoreContract:
         tid = _tid()
         await self._thread(store, tid, metadata={"a": 1}, config={"c": 1})
         await store.update_thread(tid, status_value="busy")
-        row = await store.fetch_thread_row(tid)
+        row = await self._get(store, tid)
         assert row is not None
         assert (row["metadata"], row["config"]) == ({"a": 1}, {"c": 1})
 
@@ -214,7 +273,7 @@ class StoreContract:
         tid = _tid()
         await self._thread(store, tid)
         await store.update_thread(tid, mark_state_updated=True)
-        row = await store.fetch_thread_row(tid)
+        row = await self._get(store, tid)
         assert row is not None
         assert row["state_updated_at"] is not None
         assert row["state_updated_at"] >= row["created_at"]
@@ -224,17 +283,17 @@ class StoreContract:
     ) -> None:
         tid = _tid()
         await self._thread(store, tid)
-        before = copy.deepcopy(await store.fetch_thread_row(tid))
+        before = await self._get(store, tid)
         await asyncio.sleep(TICK)
         await store.update_thread(tid)
-        assert await store.fetch_thread_row(tid) == before
+        assert await self._get(store, tid) == before
 
     async def test_update_missing_thread_is_a_silent_no_op(
         self, store: MetadataStoreProtocol
     ) -> None:
         tid = _tid()
         await store.update_thread(tid, status_value="busy", metadata={"a": 1})
-        assert await store.fetch_thread_row(tid) is None
+        assert await self._get(store, tid) is None
 
     # --- search ------------------------------------------------------------
 
@@ -297,13 +356,9 @@ class StoreContract:
             _search(sort_by=sort_by, sort_order=sort_order)
         )
         assert len(rows) == 5
-        values = [
-            str(row[sort_by])  # type: ignore[literal-required]
-            for row in rows
-            if row[sort_by] is not None  # type: ignore[literal-required]
-        ]
-        assert len(values) >= 3
-        assert values == sorted(values, reverse=sort_order == "desc")
+        keys = [_sort_key(row[sort_by]) for row in rows]  # type: ignore[literal-required]
+        assert sum(key[0] for key in keys) >= 3  # enough real values to order
+        assert keys == sorted(keys, reverse=sort_order == "desc")
 
     # --- delete thread -----------------------------------------------------
 
@@ -316,10 +371,10 @@ class StoreContract:
         doomed_run = await self._run(store, doomed)
         kept_run = await self._run(store, kept)
         await store.delete_thread(doomed)
-        assert await store.fetch_thread_row(doomed) is None
-        assert await store.fetch_run_row(doomed, str(doomed_run["run_id"])) is None
-        assert await store.fetch_thread_row(kept) is not None
-        assert await store.fetch_run_row(kept, str(kept_run["run_id"])) == kept_run
+        assert await self._get(store, doomed) is None
+        assert await self._get_run(store, doomed, str(doomed_run["run_id"])) is None
+        assert await self._get(store, kept) is not None
+        assert await self._get_run(store, kept, str(kept_run["run_id"])) == kept_run
 
     async def test_delete_missing_thread_is_a_silent_no_op(
         self, store: MetadataStoreProtocol
@@ -351,7 +406,7 @@ class StoreContract:
         assert run["multitask_strategy"] == "reject"
         assert run["error"] is None
         assert run["created_at"] == run["updated_at"]
-        assert await store.fetch_run_row(tid, rid) == run
+        assert await self._get_run(store, tid, rid) == run
 
     async def test_update_run_status_sets_and_clears_error(
         self, store: MetadataStoreProtocol
@@ -362,13 +417,13 @@ class StoreContract:
         rid = str(run["run_id"])
         await asyncio.sleep(TICK)
         await store.update_run_status(rid, "error", error="boom")
-        failed = await store.fetch_run_row(tid, rid)
+        failed = await self._get_run(store, tid, rid)
         assert failed is not None
         assert (failed["status"], failed["error"]) == ("error", "boom")
         assert failed["updated_at"] > run["updated_at"]
         assert failed["created_at"] == run["created_at"]
         await store.update_run_status(rid, "success")
-        retried = await store.fetch_run_row(tid, rid)
+        retried = await self._get_run(store, tid, rid)
         assert retried is not None
         assert (retried["status"], retried["error"]) == ("success", None)
 
@@ -384,15 +439,15 @@ class StoreContract:
         await self._thread(store, owner)
         await self._thread(store, other)
         rid = str((await self._run(store, owner))["run_id"])
-        assert await store.fetch_run_row(other, rid) is None
+        assert await self._get_run(store, other, rid) is None
         assert (
             await store.list_run_rows(other, limit=10, offset=0, status_value=None)
             == []
         )
         await store.delete_run(other, rid)  # wrong thread: must not delete
-        assert await store.fetch_run_row(owner, rid) is not None
+        assert await self._get_run(store, owner, rid) is not None
         await store.delete_run(owner, rid)
-        assert await store.fetch_run_row(owner, rid) is None
+        assert await self._get_run(store, owner, rid) is None
 
     async def test_list_runs_newest_first_with_paging_and_status(
         self, store: MetadataStoreProtocol
@@ -425,15 +480,54 @@ class StoreContract:
 
     # --- isolation ---------------------------------------------------------
 
-    async def test_returned_rows_are_snapshots(
+    async def test_create_results_are_snapshots(
         self, store: MetadataStoreProtocol
     ) -> None:
         tid = _tid()
-        created = await self._thread(store, tid, metadata={"a": 1})
+        thread = await store.create_thread(
+            tid, metadata={"a": 1}, config={}, ttl=None, if_exists="raise"
+        )
+        run = await store.create_run(_tid(), tid, "agent", {}, {}, "enqueue")
+        await store.update_thread(tid, status_value="busy", metadata={"b": 2})
+        await store.update_run_status(str(run["run_id"]), "success")
+        # Later writes must not rewrite results the caller already holds.
+        assert (thread["status"], thread["metadata"]) == ("idle", {"a": 1})
+        assert run["status"] == "pending"
+
+    async def test_read_results_are_snapshots(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await store.create_thread(
+            tid, metadata={"a": 1}, config={}, ttl=None, if_exists="raise"
+        )
         fetched = await store.fetch_thread_row(tid)
+        (searched,) = await store.search_thread_rows(_search())
         assert fetched is not None
-        fetched["metadata"]["leak"] = True  # caller mutates what it was given
+        # Mutating what a read returned must not write into the store.
+        fetched["metadata"]["leak"] = True
+        searched["metadata"]["leak"] = True
         await store.update_thread(tid, status_value="busy")
-        assert created["status"] == "idle"  # earlier result not rewritten
+        assert fetched["status"] == "idle"
         again = await store.fetch_thread_row(tid)
         assert again is not None and again["metadata"] == {"a": 1}
+
+    async def test_run_results_are_snapshots(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid, rid = _tid(), _tid()
+        await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        await store.create_run(rid, tid, "agent", {"m": 1}, {}, "enqueue")
+        fetched = await store.fetch_run_row(tid, rid)
+        (listed,) = await store.list_run_rows(
+            tid, limit=10, offset=0, status_value=None
+        )
+        assert fetched is not None
+        fetched["metadata"]["leak"] = True
+        listed["metadata"]["leak"] = True
+        await store.update_run_status(rid, "success")
+        assert fetched["status"] == "pending"
+        again = await store.fetch_run_row(tid, rid)
+        assert again is not None and again["metadata"] == {"m": 1}

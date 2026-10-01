@@ -26,7 +26,12 @@ from skeino.persistence import (
     ThreadRow,
 )
 from skeino.schemas import ThreadSearchRequest
-from tests.store_contract import MONGO_TIMESTAMP_GAPS, SORT_KEYS, StoreContract
+from tests.store_contract import (
+    IN_MEMORY_SNAPSHOT_GAPS,
+    MONGO_TIMESTAMP_GAPS,
+    SORT_KEYS,
+    StoreContract,
+)
 
 THREAD_KEYS = frozenset(ThreadRow.__required_keys__)
 RUN_KEYS = frozenset(RunRow.__required_keys__)
@@ -131,7 +136,7 @@ async def test_delete_run_removes_only_the_target(
 
 class TestInMemoryStoreContract(StoreContract):
     KNOWN_GAPS: ClassVar[dict[str, str]] = {
-        "test_returned_rows_are_snapshots": "#136: in-memory returns live rows",
+        **IN_MEMORY_SNAPSHOT_GAPS,
         "test_empty_update_changes_nothing": "#136: empty update bumps updated_at",
         **{
             f"test_search_sorts_by_every_key[{key}-{order}]": (

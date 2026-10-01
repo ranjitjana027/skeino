@@ -20,10 +20,16 @@ from skeino.persistence import (
     MongoMetadataStore,
 )
 from tests.api.conftest import MONGODB_URI, POSTGRES_URI
-from tests.store_contract import MONGO_TIMESTAMP_GAPS, StoreContract
+from tests.store_contract import (
+    MONGO_TIMESTAMP_GAPS,
+    POSTGRES_NULL_ORDER_GAPS,
+    StoreContract,
+)
 
 
 class TestPostgresStoreContract(StoreContract):
+    KNOWN_GAPS: ClassVar[dict[str, str]] = POSTGRES_NULL_ORDER_GAPS
+
     @pytest.fixture
     async def store(self) -> AsyncIterator[MetadataStoreProtocol]:
         postgres_store = MetadataStore(POSTGRES_URI)
