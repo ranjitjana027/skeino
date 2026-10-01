@@ -101,6 +101,9 @@ source = ["skeino"]
 branch = true
 
 [tool.coverage.report]
+# Ratchet: raise as coverage grows, never lower. Measured 82.07% (branch) on
+# 3.11/3.12/3.13 when introduced.
+fail_under = 82
 show_missing = true
 skip_covered = true
 exclude_also = [
