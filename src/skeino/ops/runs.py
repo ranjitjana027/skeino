@@ -335,12 +335,16 @@ class RunOps:
 
         async def finalize_run() -> None:
             """Complete cleanup within the registry's awaited lifecycle."""
-            if task.cancelled():
-                await self._mark_run_interrupted(run_id, thread_id)
-                stream.publish("end", {"run_id": run_id, "status": _RUN_INTERRUPTED})
-            finish()
-            if after_run is not None:
-                await after_run()
+            try:
+                if task.cancelled():
+                    await self._mark_run_interrupted(run_id, thread_id)
+                    stream.publish(
+                        "end", {"run_id": run_id, "status": _RUN_INTERRUPTED}
+                    )
+                if after_run is not None:
+                    await after_run()
+            finally:
+                finish()
 
         return run, self._relay(
             events,
@@ -378,7 +382,9 @@ class RunOps:
         after = _parse_last_event_id(last_event_id)
         task = self._registry.get(run_id)
         stream = self._streams.get(thread_id, run_id)
-        if stream is not None and not (stream.closed and after is None):
+        if stream is not None and not (
+            after is None and (stream.closed or (task is not None and task.done()))
+        ):
             if after is not None and stream.cursor_expired(after):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,

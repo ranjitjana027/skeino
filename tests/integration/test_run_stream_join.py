@@ -728,3 +728,59 @@ async def test_join_real_graph_mid_run_matches_original_stream_exactly() -> None
 
 async def _drain(events: AsyncIterator[str]) -> str:
     return "".join([chunk async for chunk in events])
+
+
+async def test_stateless_response_waits_for_delayed_cleanup() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        entered, release = asyncio.Event(), asyncio.Event()
+        discard = ops._discard_thread
+
+        async def delayed_discard(thread_id: str) -> None:
+            entered.set()
+            await release.wait()
+            await discard(thread_id)
+
+        ops._discard_thread = delayed_discard
+        run, events = await ops.create_stateless_streaming_run(_request())
+        response = asyncio.create_task(_drain(events))
+        await entered.wait()
+        await asyncio.sleep(0)
+        finished_early = response.done()
+        release.set()
+        await response
+        assert not finished_early
+        assert not graph.state_by_thread
+        assert str(run.run_id) not in ops._streams._streams
+
+
+async def test_no_cursor_join_during_finalization_returns_final_state() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def cleanup() -> None:
+            entered.set()
+            await release.wait()
+
+        run, original = await ops.create_streaming_run(
+            _THREAD, _request(), after_run=cleanup
+        )
+        response = asyncio.create_task(_drain(original))
+        await entered.wait()
+        task = ops._registry.get(str(run.run_id))
+        assert task is not None and task.done()
+        joined = await ops.join_run_stream(
+            _THREAD,
+            str(run.run_id),
+            stream_modes=["values"],
+            last_event_id=None,
+            cancel_on_disconnect=False,
+        )
+        join_response = asyncio.create_task(_drain(joined))
+        await asyncio.sleep(0)
+        release.set()
+        frames = parse_frames(await join_response)
+        await response
+        assert [name for _, name, _ in frames] == ["values", "end"]
+        assert all(event_id is None for event_id, _, _ in frames)
