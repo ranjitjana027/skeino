@@ -2,7 +2,7 @@
 
 Covers every thread route in ``docs/api-reference/http.md`` (create, search,
 get, patch, delete, copy, state read/write/time-travel, history) with enough
-data to exercise the edges: pagination beyond one page, sort ties, nested
+data to exercise the edges: pagination beyond one page, every sort key and direction, nested
 filters, multi-run history. The contract is the docs plus upstream LangGraph
 server behaviour. Known gaps are strict xfails tied to their issues.
 """
@@ -154,30 +154,35 @@ def test_search_by_values(client: TestClient) -> None:
     assert found == [hit]
 
 
-def test_search_sort_by_updated_at(client: TestClient) -> None:
-    first, second, third = (_thread(client)["thread_id"] for _ in range(3))
-    client.patch(f"/threads/{first}", json={"metadata": {"touched": True}})
-    ids = [first, second, third]
-    newest_first = _ids(
-        _search(client, ids=ids, sort_by="updated_at", sort_order="desc")
-    )
-    assert newest_first == [first, third, second]
-    oldest_first = _ids(
-        _search(client, ids=ids, sort_by="updated_at", sort_order="asc")
-    )
-    assert oldest_first == [second, third, first]
+SORT_KEYS = ["thread_id", "status", "created_at", "updated_at", "state_updated_at"]
+XFAIL_SORT = pytest.mark.xfail(strict=True, reason="#112: in-memory ignores sort_by")
 
 
-@pytest.mark.xfail(strict=True, reason="#112: in-memory store ignores sort_by")
-def test_search_sort_by_created_at(client: TestClient) -> None:
-    first, second, third = (_thread(client)["thread_id"] for _ in range(3))
-    client.patch(f"/threads/{first}", json={"metadata": {"touched": True}})
-    found = _ids(
-        _search(
-            client, ids=[first, second, third], sort_by="created_at", sort_order="asc"
-        )
-    )
-    assert found == [first, second, third]
+@pytest.mark.parametrize("sort_order", ["asc", "desc"])
+@pytest.mark.parametrize(
+    "sort_by",
+    [
+        key if key == "updated_at" else pytest.param(key, marks=XFAIL_SORT)
+        for key in SORT_KEYS
+    ],
+)
+def test_search_sorts_by_every_key_and_direction(sort_by: str, sort_order: str) -> None:
+    # Five threads arranged so the store's fallback order (updated_at desc:
+    # t1, t2, t4, t3, t5) is monotonic in no other key, in either direction —
+    # an ignored ``sort_by`` fails every case instead of passing by accident.
+    t1, t2, t3, t4, t5 = (f"00000000-0000-0000-0000-00000000000{n}" for n in "31524")
+    with real_client("interrupting") as client:
+        for thread_id in (t1, t2, t3, t4, t5):
+            _thread(client, thread_id=thread_id)
+        for thread_id in (t2, t3, t4):  # interrupted; state_updated_at t2 < t3 < t4
+            _run(client, thread_id)
+        for thread_id in (t2, t1):
+            client.patch(f"/threads/{thread_id}", json={"metadata": {"bump": True}})
+        rows = _search(client, sort_by=sort_by, sort_order=sort_order)
+    assert len(rows) == 5
+    values = [row[sort_by] for row in rows if row[sort_by] is not None]
+    assert len(values) >= 3
+    assert values == sorted(values, reverse=sort_order == "desc")
 
 
 @pytest.mark.xfail(strict=True, reason="#127: search select ignored")
@@ -185,6 +190,18 @@ def test_search_select_limits_fields(client: TestClient) -> None:
     _thread(client)
     (thread,) = _search(client, select=["thread_id", "status"])
     assert set(thread) == {"thread_id", "status"}
+
+
+@pytest.mark.xfail(strict=True, reason="#127: search extract ignored")
+def test_search_extract_returns_state_paths(client: TestClient) -> None:
+    thread_id = _thread(client, metadata={"team": "a"})["thread_id"]
+    _run(client, thread_id, "needle")
+    (thread,) = _search(
+        client,
+        ids=[thread_id],
+        extract={"team": "metadata.team", "first": "values.messages[0].content"},
+    )
+    assert thread["extracted"] == {"team": "a", "first": "needle"}
 
 
 def test_search_rejects_out_of_range_limit(client: TestClient) -> None:
