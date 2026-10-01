@@ -7,8 +7,10 @@ parked thread must not report ``idle`` and a parked run's output must not look
 like a completed one's.
 """
 
+import logging
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from langgraph.types import Interrupt
 
@@ -145,3 +147,40 @@ def test_wait_output_has_no_interrupt_channel_when_nothing_is_pending(
 
     assert isinstance(output, dict)
     assert "__interrupt__" not in output
+
+
+def test_wait_output_keeps_an_interrupt_the_state_already_carries() -> None:
+    # A graph that writes ``__interrupt__`` into its own state (or a LangGraph
+    # that surfaces it in ``values``) already reports the pause; skeino must
+    # not overwrite it with the snapshot's copy.
+    app, graph = build_test_app()
+    graph.pending_interrupts = (Interrupt(value={"from": "snapshot"}),)
+    with TestClient(app) as client:
+        thread_id = _new_thread(client)
+        response = client.post(
+            f"/threads/{thread_id}/runs/wait",
+            json={
+                "assistant_id": "test_agent",
+                "input": {"__interrupt__": [{"value": {"from": "state"}}]},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["__interrupt__"] == [{"value": {"from": "state"}}]
+
+
+def test_wait_output_warns_when_a_paused_state_is_not_a_mapping(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Non-mapping state has nowhere to put ``__interrupt__``. The output is
+    # returned as-is, but the lost pause must be logged, never dropped silently.
+    app, graph = build_test_app()
+    graph.pending_interrupts = (Interrupt(value={"question": "approve?"}),)
+    graph.snapshot_values = ["not", "a", "mapping"]
+    with TestClient(app) as client, caplog.at_level(logging.WARNING):
+        output = _run(client, _new_thread(client))
+
+    assert output == ["not", "a", "mapping"]
+    assert any(
+        "not a mapping" in r.getMessage() and "__interrupt__" in r.getMessage()
+        for r in caplog.records
+    )

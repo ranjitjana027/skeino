@@ -79,6 +79,10 @@ class FakeGraph:
         # pending *tasks*, with nothing on the snapshot itself. Set this
         # instead of ``pending_interrupts`` to exercise that shape.
         self.pending_task_interrupts: tuple[Any, ...] = ()
+        # When set, every snapshot reports these as its ``values`` instead of
+        # the recorded state — e.g. a non-mapping state, which has no channel
+        # to carry ``__interrupt__`` on.
+        self.snapshot_values: Any = None
         # --- LangSmith tracing context observed at execution time ---
         # Each ainvoke/astream records the tracing context it ran under, so
         # tests can assert *where* a run's trace would have been written
@@ -332,7 +336,9 @@ class FakeGraph:
                 ),
             )
         return SimpleNamespace(
-            values=dict(values),
+            values=dict(values)
+            if self.snapshot_values is None
+            else self.snapshot_values,
             next=(),
             tasks=tasks,
             config={"configurable": configurable},
