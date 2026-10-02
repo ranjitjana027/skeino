@@ -25,6 +25,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
     single-run-per-thread invariant across a cluster, either run a single worker
     process or front the deployment with routing that pins a thread to one
     worker. A shared, cross-process lock service is out of scope for v1.
+    The same holds for joining a run's event stream
+    (`GET /threads/{id}/runs/{run_id}/stream`): events are buffered in the
+    worker running the run, so pin a thread to one worker for joins to work.
 
 !!! info "Crashed workers and their runs"
     A run whose worker dies without a graceful shutdown is marked `error` once

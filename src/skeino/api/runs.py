@@ -1,4 +1,4 @@
-"""Run create (background), wait, join, cancel, delete, list, get, streaming.
+"""Run create (background), wait, join, join-stream, cancel, delete, list, get, streaming.
 
 Two routers. ``router`` carries the thread-scoped runs, where the caller owns
 the thread and its checkpoint history. ``stateless_router`` carries the
@@ -11,8 +11,17 @@ import json
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import StreamingResponse
+from pydantic import TypeAdapter, ValidationError
 
 from skeino.api._openapi import request_model
 from skeino.api._request import get_state, parse_request_model, run_location
@@ -22,11 +31,13 @@ from skeino.schemas import (
     RunCreateRequest,
     RunModel,
     RunStatus,
+    StreamMode,
 )
 from skeino.serialization import serialize_value
 
 router = APIRouter(prefix="/threads/{thread_id}")
 stateless_router = APIRouter()
+_STREAM_MODE_ADAPTER: TypeAdapter[StreamMode] = TypeAdapter(StreamMode)
 
 
 @router.post("/runs", response_model=RunModel)
@@ -105,6 +116,89 @@ async def join_run(request: Request, thread_id: UUID, run_id: UUID) -> JsonValue
     """Wait for a run to finish and return the final graph state values."""
     state = get_state(request)
     return await state.run_ops.join_run(str(thread_id), str(run_id))
+
+
+def _parse_stream_modes(values: list[str] | None) -> list[str]:
+    """Flatten ``stream_mode`` query values into a list of modes.
+
+    Accepts what LangGraph Platform accepts — a single mode
+    (``stream_mode=values``) or a JSON array (``stream_mode=["values","updates"]``)
+    — plus a repeated parameter, which is how the JS SDK's ``URLSearchParams``
+    may encode an array. Empty means "every mode".
+    """
+    modes: list[str] = []
+    for value in values or []:
+        if not value.startswith("["):
+            parsed_modes = [value]
+        else:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {value!r}: {exc}",
+                ) from exc
+            if not isinstance(parsed, list) or not all(
+                isinstance(mode, str) for mode in parsed
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {value!r}: expected a list of strings.",
+                )
+            parsed_modes = parsed
+        for mode in parsed_modes:
+            try:
+                modes.append(_STREAM_MODE_ADAPTER.validate_python(mode))
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Invalid stream_mode {mode!r}.",
+                ) from exc
+    return modes
+
+
+@router.get(
+    "/runs/{run_id}/stream",
+    response_class=StreamingResponse,
+    responses={
+        status.HTTP_200_OK: {
+            "content": {"text/event-stream": {"schema": {"type": "string"}}}
+        }
+    },
+)
+async def join_run_stream(
+    request: Request,
+    thread_id: UUID,
+    run_id: UUID,
+    stream_mode: list[str] | None = Query(default=None),
+    cancel_on_disconnect: bool = Query(default=False),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    """Join a run's SSE stream: replay after ``Last-Event-ID``, then tail live.
+
+    Replay needs the run to have been created with ``stream_resumable: true``;
+    ``Last-Event-ID: -1`` replays from the first event. Without the header the
+    join tails live events only (LangGraph Platform semantics). A finished run
+    with nothing to replay yields its final ``values`` and ``end``.
+    """
+    state = get_state(request)
+    event_stream = await state.run_ops.join_run_stream(
+        str(thread_id),
+        str(run_id),
+        stream_modes=_parse_stream_modes(stream_mode),
+        last_event_id=last_event_id,
+        cancel_on_disconnect=cancel_on_disconnect,
+    )
+    return StreamingResponse(
+        event_stream,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Location": f"/threads/{thread_id}/runs/{run_id}/stream",
+            "Content-Location": run_location(thread_id, run_id),
+        },
+    )
 
 
 @router.post("/runs/{run_id}/cancel", status_code=status.HTTP_204_NO_CONTENT)

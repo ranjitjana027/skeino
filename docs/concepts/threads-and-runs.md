@@ -125,9 +125,11 @@ and — on failure — an `error` message. List a thread's runs with
 - `DELETE /threads/{id}/runs/{run_id}` removes a **terminal** run row (it returns
   **409** while the run is still active — cancel it first).
 
-A live SSE stream (`/runs/stream`) is cancelled by the client disconnecting;
-cross-request cancellation of a streaming run (reconnect/resume) is a planned
-follow-up.
+Streaming runs (`/runs/stream`) execute in a server-side task like background
+runs, so they can be cancelled, joined (`/join` for the output,
+`/runs/{run_id}/stream` for the events), and outlive a disconnecting client
+unless the run asked for `on_disconnect: "cancel"`. See
+[Streaming](streaming.md#joining-a-run-stream).
 
 ### Orphaned runs
 
@@ -201,9 +203,9 @@ already busy:
 | `rollback` | Cancel **and delete** the active run, then start the new one. |
 | `interrupt` | Cancel the active run (left `interrupted`), then start the new one. |
 
-`interrupt`/`rollback` cancel active **background** runs. A live SSE streaming run
-has no cancellable server-side handle, so a new run queues behind it instead
-(consistent with `enqueue`) until resumable streaming lands.
+`interrupt`/`rollback` cancel active runs, streaming ones included. A run still
+queued for the thread lock has no task yet, so a new run queues behind it
+(consistent with `enqueue`).
 
 !!! info "Single-process scope"
     Locks are in-process `asyncio` locks, which is correct for a single-process

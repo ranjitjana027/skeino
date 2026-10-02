@@ -4,10 +4,12 @@ These exercise the error/cancel paths that the cooperative ``FakeGraph`` could
 not reach before failure injection was added: a failed run must release its
 thread lock and record an ``error`` status; a streaming failure must emit an
 ``error`` event without replaying already-sent output; a client disconnect must
-mark the run ``interrupted`` and free the lock.
+mark the run ``interrupted`` and free the lock when ``on_disconnect="cancel"``,
+and leave it running to completion when ``"continue"``.
 """
 
 import asyncio
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -141,9 +143,11 @@ def test_streaming_retries_before_first_event(
         assert graph.stream_attempts == 2  # retried once, then succeeded
 
 
-async def test_streaming_cancellation_marks_interrupted_and_releases_lock() -> None:
+async def _disconnect_mid_stream(on_disconnect: str) -> tuple[Any, Any, str, str]:
+    """Start a gated streaming run, read one event, then drop the client."""
     app, graph = build_test_app()
     assert isinstance(graph, FakeGraph)
+    graph.stream_gate = asyncio.Event()
     async with app.router.lifespan_context(app):
         run_ops = app.state.skeino.run_ops
         thread_id = "11111111-1111-1111-1111-111111111111"
@@ -151,18 +155,38 @@ async def test_streaming_cancellation_marks_interrupted_and_releases_lock() -> N
             assistant_id="test_agent",
             input={"messages": []},
             if_not_exists="create",
-            stream_mode="values",
+            stream_mode=["updates", "values"],
+            on_disconnect=on_disconnect,
         )
         run, stream = await run_ops.create_streaming_run(thread_id, request)
+        task = run_ops._registry.get(str(run.run_id))
+        assert task is not None
 
-        # Consume the metadata event; the generator is now suspended mid-run.
         first = await stream.__anext__()
         assert "event: metadata" in first
+        await graph.stream_started.wait()  # the run is now parked mid-graph
 
         # Simulate a client disconnect mid-stream.
         with pytest.raises(asyncio.CancelledError):
             await stream.athrow(asyncio.CancelledError())
 
+        graph.stream_gate.set()  # let a still-running run finish
+        await asyncio.wait({task})
         persisted = await run_ops.get_run(thread_id, str(run.run_id))
-        assert persisted.status == "interrupted"
-        assert not run_ops._lock_manager.get(thread_id).locked()
+        locked = run_ops._lock_manager.get(thread_id).locked()
+        return persisted, graph, persisted.status, "locked" if locked else "free"
+
+
+async def test_disconnect_with_on_disconnect_cancel_interrupts_run() -> None:
+    _, _, run_status, lock = await _disconnect_mid_stream("cancel")
+    assert run_status == "interrupted"
+    assert lock == "free"
+
+
+async def test_disconnect_with_on_disconnect_continue_finishes_run() -> None:
+    # The LangGraph default: the run outlives its client, so it can be joined.
+    _, graph, run_status, lock = await _disconnect_mid_stream("continue")
+    assert run_status == "success"
+    assert lock == "free"
+    state = graph.state_by_thread["11111111-1111-1111-1111-111111111111"]
+    assert state["messages"][-1]["content"] == "streamed"

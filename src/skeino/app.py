@@ -43,7 +43,7 @@ from skeino.persistence.uri import (
     normalize_sqlite_uri,
 )
 from skeino.registry import GraphRegistry
-from skeino.streaming import Streamer
+from skeino.streaming import RunStreamRegistry, Streamer
 
 GraphBuilder = Callable[
     [BaseCheckpointSaver | None],
@@ -225,6 +225,12 @@ def create_app(
                 assistant_ops=assistant_ops,
                 lock_manager=ThreadLockManager(),
                 registry=BackgroundRunRegistry(),
+                streams=RunStreamRegistry(
+                    retention_seconds=settings.resumable_stream_ttl_seconds,
+                    max_retained_streams=settings.resumable_stream_max_retained_runs,
+                    max_history_events=settings.resumable_stream_max_events,
+                    max_history_bytes=settings.resumable_stream_max_bytes,
+                ),
                 logger=logger,
             )
 
