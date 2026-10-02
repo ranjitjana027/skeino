@@ -55,8 +55,8 @@ class BackgroundRunRegistry:
         — otherwise a just-completed run could still read as active and make an
         admission decision (e.g. ``reject``) 409 incorrectly. A finished task
         whose finalizer is still pending stays active until finalization ends.
-        Externally registered runs (a streaming run's reserved slot) stay active
-        until explicitly unregistered.
+        An externally registered run with no task (a streaming run's reserved
+        slot) stays active until a task spawned under its id finishes.
         """
         run_ids = self._active_by_thread.get(thread_id)
         if not run_ids:
@@ -157,10 +157,6 @@ class BackgroundRunRegistry:
         """
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
 
-    def unregister_external(self, thread_id: str, run_id: str) -> None:
-        """Drop a run registered with :meth:`register_external`."""
-        self._forget(thread_id, run_id)
-
     def _forget(self, thread_id: str, run_id: str) -> None:
         """Drop a finished run from the task / active maps."""
         self._tasks.pop(run_id, None)
@@ -170,14 +166,24 @@ class BackgroundRunRegistry:
             if not active:
                 del self._active_by_thread[thread_id]
 
-    async def wait(self, run_id: str) -> None:
-        """Wait for execution and finalization without cancelling either."""
-        task = self._tasks.get(run_id)
-        completion = self._completion.get(run_id)
-        if task is not None:
+    async def wait(self, run_id: str) -> asyncio.Task[Any] | None:
+        """Wait for execution and finalization without cancelling either.
+
+        Follows a hand-off: when the awaited task spawned a successor under
+        the same run id, that one is awaited too. Returns the last task
+        awaited (the one that ran the run), or ``None`` if none was tracked.
+        """
+        awaited: asyncio.Task[Any] | None = None
+        completion: asyncio.Future[None] | None = None
+        while (task := self._tasks.get(run_id)) is not None and task is not awaited:
+            awaited = task
+            # Read per task, before it ends: its finalizer drops the entry, and
+            # a successor registers its own at spawn.
+            completion = self._completion.get(run_id)
             await asyncio.wait({task})
         if completion is not None:
             await asyncio.shield(completion)
+        return awaited
 
     async def cancel(self, run_id: str, *, wait: bool) -> bool:
         """Cancel a live run task. Return whether one existed.

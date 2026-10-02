@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
@@ -832,6 +832,24 @@ async def _drain(events: AsyncIterator[str]) -> str:
     return "".join([chunk async for chunk in events])
 
 
+async def _poll(
+    condition: Callable[[], bool], what: str, *, timeout: float = 5.0
+) -> None:
+    """Wait for ``condition``, failing loudly (not silently) if it never holds."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not condition():
+        if loop.time() > deadline:
+            pytest.fail(f"timed out waiting for {what}")
+        await asyncio.sleep(0.005)
+
+
+def _is_queued_on_lock(ops: Any, thread_id: str = _THREAD) -> Callable[[], bool]:
+    """Whether some run is parked waiting for the thread's execution lock."""
+    lock = ops._lock_manager.get(thread_id)
+    return lambda: bool(lock._waiters)
+
+
 async def test_stateless_response_waits_for_delayed_cleanup() -> None:
     async with running_app() as (app, graph, _client):
         ops = app.state.skeino.run_ops
@@ -1168,6 +1186,37 @@ async def test_cancel_after_success_committed_reports_success() -> None:
         assert ops._unsettled_threads == set()
 
 
+async def test_background_cancel_after_success_committed_settles_the_thread() -> None:
+    # The background twin: ``success`` is saved, the settle write stalls, and a
+    # cancel lands. The run stays ``success`` and its thread is settled by the
+    # cancel handler, not left ``busy`` until a liveness pass.
+    async with running_app() as (app, _graph, client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        update_thread = store.update_thread
+        settling, never = asyncio.Event(), asyncio.Event()
+
+        async def stall_settle(thread_id: str, **kwargs: Any) -> Any:
+            if kwargs.get("mark_state_updated") and not settling.is_set():
+                settling.set()  # only the first settle stalls
+                await never.wait()
+            return await update_thread(thread_id, **kwargs)
+
+        store.update_thread = stall_settle
+        run = await ops.create_run(_THREAD, _request())
+        run_id = str(run.run_id)
+        await asyncio.wait_for(settling.wait(), 5)
+        assert (await ops.get_run(_THREAD, run_id)).status == "success"
+        assert await ops._registry.cancel(run_id, wait=False)
+        await asyncio.wait_for(ops._registry.wait(run_id), 5)
+        store.update_thread = update_thread
+
+        assert (await ops.get_run(_THREAD, run_id)).status == "success"
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "idle"
+        assert ops._unsettled_threads == set()
+
+
 async def test_failure_after_success_committed_reports_success() -> None:
     async with running_app() as (app, _graph, client):
         ops = app.state.skeino.run_ops
@@ -1251,37 +1300,61 @@ async def test_background_run_failing_after_a_sweep_leaves_the_thread_alone() ->
 
 
 async def test_queued_stream_stays_tracked_through_the_producer_hand_off() -> None:
-    # The instant admission completes, before the request resumes, the run
-    # must still read as active, or reject/interrupt/rollback would miss it.
+    # The instant admission completes (its done callbacks have run), the run
+    # must still read as active and cancellable, or reject/interrupt/rollback
+    # would miss it: admission's tracking must not drop the producer it spawned.
     async with running_app() as (app, graph, _client):
         ops = app.state.skeino.run_ops
-        store = ops._metadata_store
-        create_run = store.create_run
-        seen: list[set[str]] = []
-        graph.stream_gate = asyncio.Event()
-        holder, held = await ops.create_streaming_run(_THREAD, _request())
+        registry = ops._registry
+        first_gate = graph.stream_gate = asyncio.Event()
+        _holder, held = await ops.create_streaming_run(_THREAD, _request())
         holder_body = asyncio.create_task(_drain(held))
         await graph.stream_started.wait()
 
-        async def insert_then_check(*args: Any, **kwargs: Any) -> Any:
-            row = await create_run(*args, **kwargs)
-            # Runs after admission finishes but before its done callbacks.
-            asyncio.get_running_loop().call_soon(
-                lambda: seen.append(ops._registry.active_runs(_THREAD))
-            )
-            return row
+        seen: list[tuple[str, set[str], asyncio.Task[Any] | None]] = []
+        spawn = registry.spawn
 
-        store.create_run = insert_then_check
+        def spawn_and_observe(
+            thread_id: str, run_id: str, coro: Any, **kwargs: Any
+        ) -> Any:
+            task = spawn(thread_id, run_id, coro, **kwargs)
+            if kwargs.get("finalize") is None:  # the admission task
+                # Added after the registry's own done callback, so it sees the
+                # state admission's completion leaves behind.
+                task.add_done_callback(
+                    lambda _t: seen.append(
+                        (run_id, registry.active_runs(thread_id), registry.get(run_id))
+                    )
+                )
+            return task
+
+        registry.spawn = spawn_and_observe
         queued = asyncio.create_task(
             ops.create_streaming_run(_THREAD, _request(multitask_strategy="enqueue"))
         )
-        await asyncio.sleep(0.05)
-        graph.stream_gate.set()
-        run, events = await asyncio.wait_for(queued, 5)
-        store.create_run = create_run
+        await _poll(_is_queued_on_lock(ops), "the queued run to wait for the lock")
+        registry.spawn = spawn
+        # Release the holder, but park the queued run's own producer on a new
+        # gate so it is still executing when its tracking is checked.
+        graph.stream_gate = second_gate = asyncio.Event()
+        first_gate.set()
+        try:
+            run, events = await asyncio.wait_for(queued, 5)
+            run_id = str(run.run_id)
+
+            assert len(seen) == 1
+            seen_id, active, producer = seen[0]
+            assert seen_id == run_id
+            assert active == {run_id}
+            assert producer is not None and not producer.done()
+            assert registry.active_runs(_THREAD) == {run_id}
+            assert registry.get(run_id) is producer
+        finally:
+            # Also on failure: a producer the registry lost track of could not
+            # be cancelled at shutdown, and would hang the app's teardown.
+            second_gate.set()
         await _drain(events)
         await holder_body
-        assert seen == [{str(run.run_id)}]
 
 
 @pytest.mark.parametrize(
@@ -1312,16 +1385,15 @@ async def test_client_leaving_a_queued_stream_honors_on_disconnect(
                 _request(multitask_strategy="enqueue", on_disconnect=on_disconnect),
             )
         )
-        await asyncio.sleep(0.05)
+        await _poll(_is_queued_on_lock(ops), "the queued run to wait for the lock")
         queued.cancel()  # the client leaves while the run waits for the lock
         with pytest.raises(asyncio.CancelledError):
             await queued
         graph.stream_gate.set()
         await holder_body
-        for _ in range(200):
-            await asyncio.sleep(0.005)
-            if not ops._registry.active_runs(_THREAD):
-                break
+        await _poll(
+            lambda: not ops._registry.active_runs(_THREAD), "the queued run to settle"
+        )
         store.create_run = create_run
         if expected == "success":
             assert len(created) == 1
@@ -1368,10 +1440,10 @@ async def test_stateless_stream_left_during_admission_discards_its_thread_once(
         with pytest.raises(asyncio.CancelledError):
             await leaving
         release.set()
-        for _ in range(200):
-            await asyncio.sleep(0.005)
-            if discarded and not ops._registry.active_runs(discarded[0]):
-                break
+        await _poll(
+            lambda: bool(discarded) and not ops._registry.active_runs(discarded[0]),
+            "the stateless run to be cleaned up",
+        )
         await asyncio.sleep(0.02)  # a second discard would land here
 
         assert len(discarded) == 1  # cleanup ran exactly once
@@ -1404,6 +1476,38 @@ async def test_stateless_stream_failing_before_admission_discards_its_thread_onc
         with pytest.raises(HTTPException):
             await ops.create_stateless_streaming_run(_request())
         assert len(discarded) == 1
+
+
+async def test_stateless_stream_failing_at_the_producer_hand_off_discards_once() -> (
+    None
+):
+    # Admission inserted the row, then handing it to the producer failed: no
+    # producer will ever run ``after_run``, so admission runs it, exactly once.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        discarded: list[str] = []
+        discard = ops._discard_thread
+
+        async def count(thread_id: str) -> None:
+            discarded.append(thread_id)
+            await discard(thread_id)
+
+        def broken(_row: Any) -> Any:
+            raise RuntimeError("cannot build the run model")
+
+        ops._discard_thread = count
+        ops._run_row_to_model = broken
+        with pytest.raises(RuntimeError, match="cannot build the run model"):
+            await ops.create_stateless_streaming_run(_request())
+        await asyncio.sleep(0.02)  # a second discard would land here
+
+        assert len(discarded) == 1
+        thread_id = discarded[0]
+        assert thread_id not in graph.state_by_thread
+        assert not ops._lock_manager.get(thread_id).locked()
+        assert not ops._registry.active_runs(thread_id)
+        assert ops._registry.all_active() == []
+        assert ops._admitting == {}
 
 
 async def test_stateless_stream_cancelled_before_admission_starts_discards_once() -> (
@@ -1504,7 +1608,37 @@ async def test_stream_finalized_before_it_starts_reports_it_and_runs_nothing() -
         assert graph.tracing_seen == []  # the graph never ran
         assert (await ops.get_run(_THREAD, str(run.run_id))).status == "error"
         thread = await store.fetch_thread_row(_THREAD)
-        assert thread["status"] != "busy"  # the swept run did not take it back
+        assert thread["status"] == "idle"  # the swept run did not take it back
+
+
+async def test_stream_whose_row_is_deleted_before_it_starts_runs_nothing() -> None:
+    # The row is swept and deleted before its producer claims it: the claim
+    # finds nothing to move to ``running``, so the graph must not run and the
+    # thread must not be taken ``busy`` by a run that no longer exists.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+
+        async def deleted_on_insert(*args: Any, **kwargs: Any) -> Any:
+            row = await create_run(*args, **kwargs)
+            await store.delete_run(_THREAD, str(row["run_id"]))
+            return row
+
+        store.create_run = deleted_on_insert
+        run, events = await ops.create_streaming_run(_THREAD, _request())
+        body = await asyncio.wait_for(_drain(events), 5)
+        store.create_run = create_run
+
+        frames = parse_frames(body)
+        assert [e for _, e, _ in frames][-1] == "error"
+        assert "was deleted before it finished" in body
+        assert "event: values" not in body
+        assert graph.tracing_seen == []  # the graph never ran
+        assert await store.fetch_run_row(_THREAD, str(run.run_id)) is None
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"
+        assert not ops._lock_manager.get(_THREAD).locked()
+        assert not ops._registry.active_runs(_THREAD)
 
 
 async def test_queued_background_run_finalized_while_waiting_runs_nothing() -> None:
@@ -1564,3 +1698,315 @@ async def test_run_whose_row_was_deleted_mid_flight_does_not_report_success(
             assert "was deleted before it finished" in text
             assert '"status":"success"' not in text
         assert (await store.fetch_thread_row(_THREAD))["status"] == "error"
+
+
+def _stall_after_insert(store: Any) -> tuple[asyncio.Event, asyncio.Event, Any]:
+    """Make ``create_run`` commit its row, then stall until released."""
+    inserted, release = asyncio.Event(), asyncio.Event()
+    create_run = store.create_run
+
+    async def stalled(*args: Any, **kwargs: Any) -> Any:
+        row = await create_run(*args, **kwargs)
+        inserted.set()
+        await release.wait()
+        return row
+
+    store.create_run = stalled
+    return inserted, release, create_run
+
+
+async def _admitting_run_id(ops: Any) -> str:
+    for _ in range(100):
+        if ops._admitting:
+            return str(next(iter(ops._admitting)))
+        await asyncio.sleep(0)
+    raise AssertionError("no streaming run is being admitted")
+
+
+@pytest.mark.parametrize("join", ["join", "join_stream"])
+async def test_join_during_admission_waits_for_the_run_itself(join: str) -> None:
+    # The row is committed while admission still runs: a join landing then
+    # must wait for the run, not return when admission hands off to it.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        inserted, release, create_run = _stall_after_insert(store)
+        creating = asyncio.create_task(ops.create_streaming_run(_THREAD, _request()))
+        await inserted.wait()
+        run_id = await _admitting_run_id(ops)
+        graph.stream_gate = asyncio.Event()
+        if join == "join":
+            joined: asyncio.Task[Any] = asyncio.create_task(
+                ops.join_run(_THREAD, run_id)
+            )
+        else:
+
+            async def stream_join() -> str:
+                events = await ops.join_run_stream(
+                    _THREAD,
+                    run_id,
+                    stream_modes=[],
+                    last_event_id=None,
+                    cancel_on_disconnect=False,
+                )
+                return await _drain(events)
+
+            joined = asyncio.create_task(stream_join())
+        release.set()
+        _run, events = await creating
+        body = asyncio.create_task(_drain(events))
+        await graph.stream_started.wait()
+        await asyncio.sleep(0.02)
+        assert not joined.done()  # the run is still executing
+        graph.stream_gate.set()
+        result = await joined
+        await body
+        store.create_run = create_run
+
+        assert (await ops.get_run(_THREAD, run_id)).status == "success"
+        if join == "join":
+            assert result["messages"][-1]["content"] == "streamed"
+        else:
+            # Attached to the live stream (its events carry ids), not a
+            # final-state summary of a run it took for finished.
+            assert "id: " in result
+            assert '"status":"success"' in result
+            assert '"status":"running"' not in result
+
+
+@pytest.mark.parametrize("on_disconnect", ["continue", "cancel"])
+async def test_abandoned_admission_releases_its_subscription(
+    on_disconnect: str,
+) -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        inserted, release, create_run = _stall_after_insert(store)
+        graph.stream_gate = asyncio.Event()
+        leaving = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(on_disconnect=on_disconnect))
+        )
+        await inserted.wait()
+        run_id = await _admitting_run_id(ops)
+        if on_disconnect == "cancel":
+            # Admission succeeds in the same tick the client leaves.
+            release.set()
+            await asyncio.sleep(0)
+            leaving.cancel()
+        else:
+            leaving.cancel()
+            await asyncio.sleep(0)
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await leaving
+        await _poll(lambda: not ops._admitting, "admission to finish")
+        stream = ops._streams.get(_THREAD, run_id)
+        if stream is not None:
+            assert stream.subscriber_count == 0  # nobody will drain it
+        graph.stream_gate.set()
+        task = ops._registry.get(run_id)
+        if task is not None:
+            await asyncio.wait({task})
+        store.create_run = create_run
+        expected = "interrupted" if on_disconnect == "cancel" else "success"
+        assert (await ops.get_run(_THREAD, run_id)).status == expected
+
+
+async def test_admission_failing_as_its_client_leaves_is_logged() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        leaving: asyncio.Task[Any] | None = None
+
+        async def failing(*args: Any, **kwargs: Any) -> Any:
+            await asyncio.sleep(0)
+            raise RuntimeError("insert failed")
+
+        spawn = ops._registry.spawn
+
+        def spawn_and_leave_on_failure(*args: Any, **kwargs: Any) -> Any:
+            task = spawn(*args, **kwargs)
+            # Runs before the request's own wake-up: the client leaves in the
+            # same tick admission fails, so the request wakes to its cancel.
+            task.add_done_callback(lambda _t: leaving.cancel() if leaving else None)
+            return task
+
+        ops._registry.spawn = spawn_and_leave_on_failure
+
+        logged: list[str] = []
+        log_error = ops._log_error
+
+        def record(msg: str, *args: Any, exc: BaseException | None = None) -> None:
+            logged.append(msg % args)
+            log_error(msg, *args, exc=exc)
+
+        store.create_run = failing
+        ops._log_error = record
+        leaving = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(on_disconnect="cancel"))
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await leaving
+        assert any("insert failed" in line for line in logged)
+
+
+async def test_insert_failing_after_commit_leaves_no_pending_row() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+        created: list[str] = []
+
+        async def ack_lost(*args: Any, **kwargs: Any) -> Any:
+            row = await create_run(*args, **kwargs)
+            created.append(str(row["run_id"]))
+            raise ConnectionError("connection dropped after commit")
+
+        store.create_run = ack_lost
+        with pytest.raises(ConnectionError):
+            await ops.create_streaming_run(_THREAD, _request())
+        store.create_run = create_run
+        assert (await ops.get_run(_THREAD, created[0])).status == "interrupted"
+        assert not ops._lock_manager.get(_THREAD).locked()
+
+
+async def test_cancelled_queued_background_run_leaves_the_holders_thread_busy() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        graph.invoke_gate = asyncio.Event()
+        holder = await ops.create_run(_THREAD, _request())
+        await graph.invoke_started.wait()
+        queued = await ops.create_run(_THREAD, _request(multitask_strategy="enqueue"))
+        await _poll(_is_queued_on_lock(ops), "the queued run to wait for the lock")
+        await ops.cancel_run(_THREAD, str(queued.run_id), action="interrupt", wait=True)
+        assert (await ops.get_run(_THREAD, str(queued.run_id))).status == (
+            "interrupted"
+        )
+        # The holder is still running: its thread must stay ``busy``.
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "busy"
+        graph.invoke_gate.set()
+        await ops.join_run(_THREAD, str(holder.run_id))
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"
+
+
+async def test_settle_failing_during_a_liveness_pass_is_still_retried() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        update_thread = store.update_thread
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def failing_settle(thread_id: str, **kwargs: Any) -> Any:
+            if kwargs.get("mark_state_updated"):
+                entered.set()
+                await release.wait()
+                raise ConnectionError("store blip")
+            return await update_thread(thread_id, **kwargs)
+
+        store.update_thread = failing_settle
+        run = await ops.create_run(_THREAD, _request())
+        await entered.wait()
+        # The pass sees the thread busy with the settling run still in flight.
+        await ops.liveness_pass(stale_after_seconds=None)
+        release.set()
+        await ops._registry.wait(str(run.run_id))
+        assert ops._unsettled_threads == {_THREAD}
+        store.update_thread = update_thread
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"
+
+
+async def _strand_unsettled_thread(ops: Any) -> str:
+    """Finish a streaming run whose settle write fails: thread left ``busy``."""
+    store = ops._metadata_store
+    update_thread = store.update_thread
+
+    async def fail_settle(thread_id: str, **kwargs: Any) -> Any:
+        if kwargs.get("mark_state_updated"):
+            raise RuntimeError("store blip")
+        return await update_thread(thread_id, **kwargs)
+
+    store.update_thread = fail_settle
+    run, events = await ops.create_streaming_run(_THREAD, _request())
+    await asyncio.wait_for(_drain(events), 5)
+    await asyncio.wait_for(ops._registry.wait(str(run.run_id)), 5)
+    store.update_thread = update_thread
+    assert (await store.fetch_thread_row(_THREAD))["status"] == "busy"
+    assert ops._unsettled_threads == {_THREAD}
+    return str(run.run_id)
+
+
+async def test_settle_retry_waits_while_another_run_is_in_flight() -> None:
+    # The unsettled thread now has a run executing on it: settling it ``idle``
+    # under that run would misreport it, so the retry skips the thread without
+    # forgetting it, then settles it once the run is over.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        await _strand_unsettled_thread(ops)
+
+        graph.invoke_gate = asyncio.Event()
+        running = await ops.create_run(_THREAD, _request())
+        await graph.invoke_started.wait()
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "busy"
+        assert ops._unsettled_threads == {_THREAD}  # skipped, not dropped
+
+        # The running run's own settle fails too, so only a retry can settle.
+        update_thread = store.update_thread
+
+        async def fail_settle(thread_id: str, **kwargs: Any) -> Any:
+            if kwargs.get("mark_state_updated"):
+                raise RuntimeError("store blip")
+            return await update_thread(thread_id, **kwargs)
+
+        store.update_thread = fail_settle
+        graph.invoke_gate.set()
+        await asyncio.wait_for(ops._registry.wait(str(running.run_id)), 5)
+        store.update_thread = update_thread
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "busy"
+
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"
+        assert ops._unsettled_threads == set()
+
+
+async def test_settle_retry_leaves_a_thread_someone_else_already_changed() -> None:
+    # The thread is no longer ``busy`` (another path settled it as ``error``):
+    # the retry drops it rather than overwrite that outcome with ``idle``.
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        await _strand_unsettled_thread(ops)
+        await store.update_thread(_THREAD, status_value="error")
+
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "error"
+        assert ops._unsettled_threads == set()
+
+
+async def test_join_stream_reports_a_failed_finalizer_as_such() -> None:
+    # A finalizer failure re-raised from the registry is not a state read that
+    # failed: the joiner is told the run did not finish cleanly.
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        run = await ops.create_run(_THREAD, _request())
+        task = ops._registry.get(str(run.run_id))
+        assert task is not None
+
+        async def finalizer_failed(_run_id: str) -> Any:
+            raise RuntimeError("cleanup broke")
+
+        ops._registry.wait = finalizer_failed
+        text = await _drain(
+            ops._final_state_events(
+                _THREAD,
+                str(run.run_id),
+                task,
+                stream_modes=[],
+                cancel_on_disconnect=False,
+            )
+        )
+        assert "did not finish cleanly" in text
+        assert "Could not read the final state" not in text

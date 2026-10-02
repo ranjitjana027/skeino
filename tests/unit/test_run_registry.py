@@ -98,8 +98,6 @@ async def test_external_registration_counts_as_active_but_not_cancellable() -> N
     assert "stream1" in reg.active_runs("t1")
     # No task backing it, so it cannot be cancelled.
     assert await reg.cancel("stream1", wait=False) is False
-    reg.unregister_external("t1", "stream1")
-    assert reg.active_runs("t1") == set()
 
 
 async def test_shutdown_cancels_all_tracked_tasks() -> None:
@@ -212,3 +210,35 @@ async def test_task_handing_its_run_to_a_successor_keeps_the_run_tracked() -> No
     await successor[0]
     await asyncio.sleep(0)
     assert registry.active_runs("t") == set()
+
+
+async def test_wait_follows_a_hand_off_to_a_successor_task() -> None:
+    # A streaming run's admission task hands the run to its producer under
+    # the same id; waiting on the run means waiting for the producer too.
+    reg = BackgroundRunRegistry()
+    gate = asyncio.Event()
+    finalized = asyncio.Event()
+
+    async def producer() -> int:
+        await gate.wait()
+        return 7
+
+    async def finalize() -> None:
+        finalized.set()
+
+    admitted = asyncio.Event()
+
+    async def admission() -> None:
+        await admitted.wait()
+        reg.spawn("t", "r", producer(), finalize=finalize)
+
+    reg.spawn("t", "r", admission())
+    waiting = asyncio.create_task(reg.wait("r"))
+    await asyncio.sleep(0)  # the wait starts on the admission task
+    admitted.set()
+    await asyncio.sleep(0.01)
+    assert not waiting.done()  # admission ended, but the run has not
+    gate.set()
+    awaited = await waiting
+    assert finalized.is_set()
+    assert awaited is not None and awaited.result() == 7

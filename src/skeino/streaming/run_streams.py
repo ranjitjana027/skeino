@@ -23,6 +23,7 @@ deployment would need a shared broker (e.g. Redis streams) for all three.
 
 import asyncio
 import time
+import weakref
 from collections import deque
 from collections.abc import AsyncGenerator, Callable, Sequence
 from dataclasses import dataclass
@@ -99,6 +100,13 @@ class RunEventStream:
             asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
             tuple[str, ...],
         ] = {}
+        # Each subscription's iterator, mapped to the queue it attached with,
+        # so one that will never be iterated can still be detached
+        # (:meth:`detach`). A started one detaches itself when it ends.
+        self._queue_of: weakref.WeakKeyDictionary[
+            AsyncGenerator[StreamEvent, None],
+            asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
+        ] = weakref.WeakKeyDictionary()
 
     @property
     def closed(self) -> bool:
@@ -197,7 +205,19 @@ class RunEventStream:
         delivered = after if after is not None else self.last_event_id
         modes = tuple(stream_modes)
         replay, queue = self._attach(after, modes)
-        return self._drain(replay, queue, delivered, modes)
+        events = self._drain(replay, queue, delivered, modes)
+        self._queue_of[events] = queue
+        return events
+
+    def detach(self, events: AsyncGenerator[StreamEvent, None]) -> None:
+        """Drop a subscription nobody will iterate, releasing its queue.
+
+        Closing a never-started iterator does not run its cleanup, so a
+        subscription abandoned before its first read must be detached here.
+        """
+        queue = self._queue_of.pop(events, None)
+        if queue is not None:
+            self._subscribers.pop(queue, None)
 
     def _attach(
         self, after: int | None, stream_modes: tuple[str, ...]

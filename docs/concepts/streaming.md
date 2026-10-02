@@ -56,9 +56,10 @@ If the run is cancelled (`POST .../cancel`, a superseding `interrupt`/
 event is `end` with `"status": "interrupted"`.
 
 The terminal event always matches the persisted run status. A run whose
-`success` was already saved when it was cancelled, or when a later step failed,
-still ends with `end` `"status": "success"`; one already failed by another
-worker's orphan sweep ends with that `error`.
+`success` was already saved when it was cancelled still ends with `end`
+`"status": "success"`; one already failed by another worker's orphan sweep ends
+with that `error`. A run whose row was deleted before it finished (e.g. its
+thread was deleted) ends with an `error` saying so.
 
 ## Disconnects
 
@@ -231,7 +232,7 @@ are stringified, and arbitrary objects fall back to their public attributes.
 | `values` | `values` mode | full state snapshot `{messages: [...], ...}` per super-step |
 | `events` | `events` mode | raw LangGraph v2 event |
 | `updates` / `messages` / `messages-tuple` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode (`updates` deltas are output-key filtered) |
-| `end` | terminal, success / cancelled | `{run_id, status: "success", usage: {total_tokens}}`, or `{run_id, status: "interrupted"}` |
+| `end` | terminal, success / cancelled | `{run_id, status: "success", usage: {total_tokens}}`, or `{run_id, status: "interrupted"}`; `usage` is omitted when the event reports an outcome saved before the run's own finish |
 | `error` | terminal, failure | `{detail, run_id}`; a subscriber that fell behind gets `{code: "subscriber_overflow", detail, run_id}` with no `id` |
 
 See [Threads & runs](threads-and-runs.md) for run lifecycle and the

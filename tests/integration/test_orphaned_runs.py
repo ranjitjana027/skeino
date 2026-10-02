@@ -24,10 +24,13 @@ from uuid import uuid4
 import httpx
 import pytest
 from fastapi import FastAPI
+from langgraph.types import Interrupt
+from mongomock_motor import AsyncMongoMockClient
 
 from skeino import SkeinoSettings, create_app
+from skeino.persistence import MongoMetadataStore
 from skeino.schemas import RunCreateRequest
-from tests.conftest import FakeGraph
+from tests.conftest import FakeGraph, build_test_app
 
 HEARTBEAT = 0.05
 TIMEOUT = 0.3
@@ -306,9 +309,14 @@ async def test_sweep_spares_another_workers_live_streaming_run(tmp_path: Path) -
     db = tmp_path / "skeino.db"
     graph_a = FakeGraph()
     graph_a.stream_gate = asyncio.Event()
+    # Wide timeout, as in the background-run sibling: a 0.3s window flaked on a
+    # slow CI runner delaying A's heartbeat.
+    timeout = 1.5
     async with (
-        _running(_app(db, graph_a)) as worker_a,
-        _running(_app(db, FakeGraph())) as worker_b,
+        _running(_app(db, graph_a, orphaned_run_timeout_seconds=timeout)) as worker_a,
+        _running(
+            _app(db, FakeGraph(), orphaned_run_timeout_seconds=timeout)
+        ) as worker_b,
     ):
         thread_id = str(uuid4())
         run, events = await worker_a.create_streaming_run(
@@ -325,7 +333,8 @@ async def test_sweep_spares_another_workers_live_streaming_run(tmp_path: Path) -
         drained = asyncio.create_task(_drain(events))
         await asyncio.wait_for(graph_a.stream_started.wait(), 5)
 
-        await asyncio.sleep(TIMEOUT * 3)  # several sweep windows on both workers
+        # Past the timeout, so without A's heartbeat B would have swept it.
+        await asyncio.sleep(timeout * 1.5)
         assert (await _status(worker_b, thread_id, run_id))[0] == "running"
 
         graph_a.stream_gate.set()
@@ -401,9 +410,32 @@ async def test_restart_releases_a_thread_left_busy_after_its_run_finished(
 
     async with _running(_app(db, FakeGraph())) as ops:
         store = ops._metadata_store
-        assert (await store.fetch_thread_row(stuck))["status"] == released_to
+        released = await store.fetch_thread_row(stuck)
+        assert released["status"] == released_to
+        # As the run's own settle would have: only a success changed the state.
+        assert (released["state_updated_at"] is not None) == (run_status == "success")
         # Not busy for longer than the timeout yet: it may still be settling.
         assert (await store.fetch_thread_row(fresh))["status"] == "busy"
+
+
+async def test_restart_releases_a_thread_left_busy_after_a_run_paused_on_interrupt(
+    tmp_path: Path,
+) -> None:
+    # A run that succeeded parked on ``interrupt()`` leaves its thread
+    # ``interrupted``, not ``idle``: the release reads the pause from the
+    # graph state, as the run's own settle would have, or the resume is lost.
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        stuck = await _stuck_thread(ops, run_status="success", thread_age_seconds=60)
+
+    paused = FakeGraph()
+    paused.pending_interrupts = (Interrupt(value={"question": "approve?"}),)
+    async with _running(_app(db, paused)) as ops:
+        released = await ops._metadata_store.fetch_thread_row(stuck)
+        assert released["status"] == "interrupted"
+        assert released["state_updated_at"] is not None
 
 
 async def test_stuck_thread_release_spares_a_thread_with_a_run_in_flight(
@@ -415,7 +447,8 @@ async def test_stuck_thread_release_spares_a_thread_with_a_run_in_flight(
     ) as ops:
         thread_id = await _stuck_thread(ops, run_status="error", thread_age_seconds=60)
         store = ops._metadata_store
-        # A second, live run on the thread (heartbeated, so never swept).
+        # A second run on the thread, still in flight: fresh, so inside the
+        # timeout window, not stale.
         await store.create_run(
             str(uuid4()),
             thread_id,
@@ -424,8 +457,62 @@ async def test_stuck_thread_release_spares_a_thread_with_a_run_in_flight(
             kwargs={},
             multitask_strategy="enqueue",
         )
-        await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        # The stuck thread (busy 60s) is past the timeout; the new run is not.
+        await ops.fail_orphaned_runs(stale_after_seconds=30)
         assert (await store.fetch_thread_row(thread_id))["status"] == "busy"
+
+
+async def test_stuck_thread_release_reads_mongos_naive_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Mongo hands timestamps back naive (UTC): the release must still compare
+    # them with its aware cutoff instead of raising and stranding every thread.
+    import motor.motor_asyncio
+
+    monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
+    store = MongoMetadataStore("mongodb://mock", db_name=f"c{uuid4().hex}")
+    await store.setup()
+    app, _graph = build_test_app(orphaned_run_timeout_seconds=None)
+    try:
+        async with app.router.lifespan_context(app):
+            ops = app.state.skeino.run_ops
+            ops._metadata_store = store
+            stuck, fresh = str(uuid4()), str(uuid4())
+            for thread_id, age_seconds in ((stuck, 60), (fresh, 0)):
+                await store.create_thread(
+                    thread_id, metadata={}, config={}, ttl=None, if_exists="raise"
+                )
+                run_id = str(uuid4())
+                await store.create_run(
+                    run_id,
+                    thread_id,
+                    "agent",
+                    metadata={},
+                    kwargs={},
+                    multitask_strategy="enqueue",
+                )
+                await store.update_run_status(run_id, "success")
+                await store.update_thread(thread_id, status_value="busy")
+                await store._threads.update_one(
+                    {"_id": thread_id},
+                    {
+                        "$set": {
+                            "updated_at": datetime.now(UTC)
+                            - timedelta(seconds=age_seconds)
+                        }
+                    },
+                )
+            # The premise: this backend really returns naive timestamps.
+            assert (await store.fetch_thread_row(stuck))["updated_at"].tzinfo is None
+
+            await ops.fail_orphaned_runs(stale_after_seconds=30)
+
+            released = await store.fetch_thread_row(stuck)
+            assert released["status"] == "idle"
+            assert released["state_updated_at"] is not None
+            assert (await store.fetch_thread_row(fresh))["status"] == "busy"
+    finally:
+        await store.aclose()
 
 
 async def test_sqlite_sweep_queries_use_an_index(tmp_path: Path) -> None:

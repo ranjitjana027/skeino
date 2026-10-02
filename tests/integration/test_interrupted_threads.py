@@ -14,7 +14,10 @@ import pytest
 from fastapi.testclient import TestClient
 from langgraph.types import Interrupt
 
+from skeino.schemas import RunCreateRequest
 from tests.conftest import build_test_app
+
+_THREAD = "44444444-4444-4444-4444-444444444444"
 
 
 def _new_thread(client: TestClient) -> str:
@@ -52,28 +55,33 @@ def test_thread_is_interrupted_while_it_waits_on_a_decision() -> None:
         assert body["interrupts"]
 
 
-def test_unreadable_state_falls_back_to_idle() -> None:
+async def test_unreadable_state_keeps_the_thread_busy_until_a_retry_reads_it() -> None:
+    # Guessing ``idle`` on an unreadable checkpoint would lose a pending
+    # interrupt for good. The thread stays ``busy``, queued for the settle
+    # retry, and settles from the real state once it can be read again.
     app, graph = build_test_app()
-
-    async def boom(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("checkpoint unavailable")
-
-    with TestClient(app) as client:
-        thread_id = _new_thread(client)
-        response = client.post(
-            f"/threads/{thread_id}/runs/wait",
-            json={"assistant_id": "test_agent", "input": {"messages": []}},
+    async with app.router.lifespan_context(app):
+        ops = app.state.skeino.run_ops
+        request = RunCreateRequest(
+            assistant_id="test_agent", input={"messages": []}, if_not_exists="create"
         )
-        assert response.status_code == 200
-        # Break state reads only after the run's own writes are done, then let
-        # the next run settle the thread: the run succeeded, so an unreadable
-        # checkpoint must not leave the thread claiming a pending decision.
+        await ops.wait_run(_THREAD, request)
+        read_state = graph.aget_state
+
+        async def boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("checkpoint unavailable")
+
         graph.aget_state = boom  # type: ignore[method-assign]
-        client.post(
-            f"/threads/{thread_id}/runs/wait",
-            json={"assistant_id": "test_agent", "input": {"messages": []}},
-        )
-        assert client.get(f"/threads/{thread_id}").json()["status"] == "idle"
+        await ops.wait_run(_THREAD, request)
+        thread = await ops._metadata_store.fetch_thread_row(_THREAD)
+        assert thread["status"] == "busy"
+        assert ops._unsettled_threads == {_THREAD}
+
+        graph.aget_state = read_state  # type: ignore[method-assign]
+        await ops.liveness_pass(stale_after_seconds=None)
+        thread = await ops._metadata_store.fetch_thread_row(_THREAD)
+        assert thread["status"] == "idle"
+        assert ops._unsettled_threads == set()
 
 
 def test_wait_output_carries_the_pending_interrupt() -> None:

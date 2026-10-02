@@ -188,6 +188,9 @@ class RunOps:
         # Threads whose run succeeded but whose settle write failed (or was
         # cancelled); retried every liveness pass so they don't stay ``busy``.
         self._unsettled_threads: set[str] = set()
+        # Streaming runs still being admitted (lock wait, row insert): a join
+        # waits for admission so it attaches to the producer, not to this task.
+        self._admitting: dict[str, asyncio.Task[Any]] = {}
 
     async def create_run(self, thread_id: str, request: RunCreateRequest) -> RunModel:
         """Start a background run and return its (pending) metadata immediately."""
@@ -215,13 +218,14 @@ class RunOps:
         graph state values). If the run is already terminal this returns at once.
         """
         run = await self.get_run(thread_id, run_id)  # 404 if unknown
+        await self._await_admission(run_id)
         task = self._registry.get(run_id)
         if task is None:
-            # The read above yields: the run may have finished, and its task
+            # The reads above yield: the run may have finished, and its task
             # been forgotten, in between. Use a fresh persisted status.
             run = await self.get_run(thread_id, run_id)
         if task is not None:
-            await self._registry.wait(run_id)
+            task = await self._registry.wait(run_id)
         elif run.status not in _TERMINAL_STATUSES:
             # No task to await and the run is still in flight — it is not
             # running in this process (e.g. another worker, or a row stranded
@@ -389,8 +393,9 @@ class RunOps:
                             )
                         else:
                             if str(superseded["status"]) == _RUN_SUCCESS:
-                                # Cancelled after ``success`` was saved but
-                                # before the thread was settled.
+                                # Cancelled after ``success`` was saved
+                                # (possibly before the thread was settled);
+                                # settling again is idempotent.
                                 await self._settle_thread_after_success(thread_id)
                             stream.publish(*_terminal_event_for_row(run_id, superseded))
                     if after_run is not None:
@@ -429,12 +434,12 @@ class RunOps:
                     kwargs=self._build_run_kwargs(request),
                     multitask_strategy=request.multitask_strategy,
                 )
-            except BaseException as exc:
+            except BaseException:
                 lock.release()
-                if isinstance(exc, asyncio.CancelledError):
-                    # The insert may have committed before the cancel landed.
-                    # The run never started, so the thread is not its to touch.
-                    await self._interrupt_row_only(run_id)
+                # The insert may have committed before it failed or was
+                # cancelled. The run never started, so the thread is not its
+                # to touch.
+                await self._interrupt_row_only(run_id)
                 if after_run is not None:
                     await after_run()  # no producer will run it
                 raise
@@ -442,6 +447,7 @@ class RunOps:
                 return start_producer(run_row)
             except BaseException:
                 lock.release()
+                await self._interrupt_row_only(run_id)
                 if after_run is not None:
                     await after_run()
                 raise
@@ -453,6 +459,8 @@ class RunOps:
         # client leaving while the run is queued doesn't stop the run.
         admit_task = self._registry.spawn(thread_id, run_id, admit())
         handed_off.set()  # from here admission, then the producer, owns after_run
+        self._admitting[run_id] = admit_task
+        admit_task.add_done_callback(lambda _t: self._admitting.pop(run_id, None))
         try:
             run, events, task = await (
                 admit_task
@@ -469,17 +477,16 @@ class RunOps:
             if current is not None and current.cancelling() > 0:
                 # The client left. ``cancel`` propagated into admission (which
                 # terminalizes its own row); ``continue`` lets it carry on.
-                if (
-                    request.on_disconnect == "cancel"
-                    and admit_task.done()
-                    and not admit_task.cancelled()
-                    and admit_task.exception() is None
-                ):
-                    # Admitted just before the client left: stop the producer.
-                    admit_task.result()[2].cancel()
-                elif not admit_task.done():
-                    # ``continue``: nobody is left to receive an admission error.
-                    admit_task.add_done_callback(self._log_abandoned_admission)
+                if admit_task.done():
+                    self._abandon_admission(
+                        admit_task, cancel_run=request.on_disconnect == "cancel"
+                    )
+                else:
+                    # ``continue``: admission carries on with nobody to hand
+                    # its result (or its error) to.
+                    admit_task.add_done_callback(
+                        lambda done: self._abandon_admission(done, cancel_run=False)
+                    )
                 raise
             # Superseded by interrupt/rollback while queued: the request itself
             # is fine, so answer it instead of leaking the cancel.
@@ -528,6 +535,9 @@ class RunOps:
         """
         run = await self.get_run(thread_id, run_id)  # 404 if unknown
         after = _parse_last_event_id(last_event_id)
+        # A run still being admitted has no event stream yet; once admitted it
+        # has one to attach to.
+        await self._await_admission(run_id)
         task = self._registry.get(run_id)
         stream = self._streams.get(thread_id, run_id)
         # A done producer may not have been finalized (stream closed) yet; its
@@ -655,6 +665,7 @@ class RunOps:
                                 attempt + 1,
                                 backoff,
                                 exc,
+                                exc=exc,
                             )
                             await asyncio.sleep(backoff)
                         else:
@@ -662,9 +673,10 @@ class RunOps:
 
             superseded = await self._finish_run_status(thread_id, run_id, _RUN_SUCCESS)
             if superseded is not None:
-                # Another worker already finalized the row (e.g. swept it as
-                # orphaned): report what the row says, not a contradicting
-                # success, and leave the thread to whoever finalized it.
+                # Another writer finalized the row first (e.g. swept it as
+                # orphaned), or it was deleted: report that outcome, not a
+                # contradicting success, and leave the thread to whoever
+                # finalized it.
                 stream.publish(*_terminal_event_for_row(run_id, superseded))
                 return 0
             await self._settle_thread_after_success(thread_id)
@@ -698,7 +710,8 @@ class RunOps:
             # subscribers from receiving the 'error' event.
             superseded = await self._mark_run_failed(run_id, thread_id, str(exc))
             if superseded is not None:
-                # e.g. a post-success step failed: the run did succeed.
+                # e.g. swept as orphaned, or deleted, while the graph ran:
+                # report that outcome rather than this failure.
                 stream.publish(*_terminal_event_for_row(run_id, superseded))
             else:
                 stream.publish("error", {"detail": str(exc), "run_id": run_id})
@@ -716,9 +729,10 @@ class RunOps:
 
         Mode filtering is the subscription's (``RunEventStream.subscribe``).
 
-        If the client goes away before the stream ends and
-        ``cancel_on_disconnect`` is set, the run is cancelled; otherwise it
-        keeps running for whoever joins next.
+        If the client goes away before the stream ends (or its queue
+        overflows, which is treated the same way) and ``cancel_on_disconnect``
+        is set, the run is cancelled; otherwise it keeps running for whoever
+        joins next.
         """
         completed = False
         try:
@@ -777,14 +791,33 @@ class RunOps:
             if task is not None:
                 try:
                     await self._registry.wait(run_id)
-                except BaseException:
+                except asyncio.CancelledError:
+                    current = self._registry.get(run_id) or task
                     if (
                         cancel_on_disconnect
-                        and not task.done()
-                        and not task.cancelling()
+                        and not current.done()
+                        and not current.cancelling()
                     ):
-                        task.cancel()
+                        current.cancel()
                     raise
+                except Exception as exc:
+                    # The run's finalizer failed (the registry logged it); the
+                    # state read below was never attempted.
+                    self._log_error(
+                        "Joined run %s did not finish cleanly: %s",
+                        run_id,
+                        exc,
+                        exc=exc,
+                    )
+                    yield sse_event(
+                        "error",
+                        {
+                            "detail": f"Run {run_id} did not finish cleanly.",
+                            "run_id": run_id,
+                        },
+                        None,
+                    )
+                    return
             row = await self._metadata_store.fetch_run_row(thread_id, run_id)
             output: JsonValue = None
             if (
@@ -956,7 +989,7 @@ class RunOps:
             await self._thread_ops.delete(thread_id)
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask the run
             self._log_warning(
-                "Could not delete ephemeral thread %s: %s", thread_id, exc
+                "Could not delete ephemeral thread %s: %s", thread_id, exc, exc=exc
             )
 
     async def list_runs(
@@ -1014,14 +1047,16 @@ class RunOps:
             await self._metadata_store.touch_runs(run_ids)
 
     async def fail_orphaned_runs(self, *, stale_after_seconds: float) -> list[str]:
-        """Fail in-flight runs whose owner stopped heartbeating; return their ids.
+        """Fail in-flight runs whose owner stopped heartbeating.
 
-        This process's own active runs are never touched, whatever their row
-        says. A thread still ``busy`` with nothing left in flight is moved to
-        ``error``, as when one of its runs fails normally; a thread a later run
-        already settled keeps its status. Each thread is released on its own,
-        so one failing store call cannot strand the rest ``busy``, and a failed
-        release is retried on the next pass.
+        Returns the ids of the runs this pass failed. This process's own active
+        runs are never touched, whatever their row says. A thread still
+        ``busy`` with nothing left in flight is moved to ``error``, as when one
+        of its runs fails normally; a thread a later run already settled keeps
+        its status. Each thread is released on its own, so one failing store
+        call cannot strand the rest ``busy``, and a failed release is retried
+        on the next pass. The pass ends with :meth:`_release_stuck_threads`,
+        which settles threads left ``busy`` with nothing in flight.
         """
         local = {run_id for _, run_id in self._registry.all_active()}
         rows = await self._metadata_store.fail_stale_runs(
@@ -1060,7 +1095,9 @@ class RunOps:
         The durable backstop for the in-process retry sets: a process that dies
         after a run's terminal status is saved but before its thread is moved
         off ``busy`` (a sweeper releasing an orphan's thread, or a run settling
-        after ``success``) leaves no record anywhere else. A thread qualifies
+        after ``success``) leaves no record anywhere else; neither does a
+        failed or interrupted run whose thread update failed, which has no
+        in-process retry. A thread qualifies
         once it has been ``busy`` for longer than the orphan timeout with no
         run in flight. It settles as its latest run would have left it: as
         after a clean finish on ``success``, ``idle`` on ``interrupted``, and
@@ -1103,7 +1140,10 @@ class RunOps:
                 else:
                     settled = _THREAD_ERROR
                 await self._metadata_store.update_thread(
-                    thread_id, status_value=settled
+                    thread_id,
+                    status_value=settled,
+                    # As the run's own settle would have: it changed the state.
+                    mark_state_updated=outcome == _RUN_SUCCESS,
                 )
             except Exception as exc:
                 # Still ``busy``, so the next pass finds it again.
@@ -1163,7 +1203,9 @@ class RunOps:
         return False
 
     async def shutdown(self) -> None:
-        """Cancel all in-flight background runs (runtime shutdown).
+        """Cancel every run task this process tracks (runtime shutdown).
+
+        That covers background and streaming runs alike.
 
         A task cancelled before it ever started executing never runs its own
         ``interrupted`` cleanup, so after cancelling we sweep the runs that were
@@ -1214,11 +1256,10 @@ class RunOps:
     ) -> None:
         """Apply the multitask strategy against the thread's active runs.
 
-        ``reject`` 409s when busy; ``interrupt`` cancels active background runs;
+        ``reject`` 409s when busy; ``interrupt`` cancels every active run
+        (background or streaming; running, queued, or still being admitted);
         ``rollback`` cancels and deletes them; ``enqueue`` is a no-op (the new
-        run's task simply waits on the execution lock). Streaming runs track
-        lock acquisition as a task, so queued streaming runs are cancellable
-        through the same path.
+        run's task simply waits on the execution lock).
         """
         active = self._registry.active_runs(thread_id)
         if not active:
@@ -1256,11 +1297,12 @@ class RunOps:
             # Cancelled while still queued for the lock (e.g. shutdown, or a
             # superseding interrupt/rollback) before execution began. No lock is
             # held to release; persist ``interrupted`` so the run row does not
-            # stay stuck at ``pending``.
+            # stay stuck at ``pending``. The run never started, so the thread
+            # (another run's, if any) is not its to touch.
             self._log_warning(
                 "Queued run %s cancelled for thread %s", run_id, thread_id
             )
-            await self._mark_run_interrupted(run_id, thread_id)
+            await self._interrupt_row_only(run_id)
             raise
         try:
             if await self._claim_run(thread_id, run_id) is not None:
@@ -1276,7 +1318,8 @@ class RunOps:
                 await self._finish_run_status(thread_id, run_id, _RUN_SUCCESS)
                 is not None
             ):
-                # Another worker already finalized the row; keep its outcome.
+                # Another writer finalized the row first (e.g. swept it as
+                # orphaned), or it was deleted; keep that outcome.
                 return 0
             await self._settle_thread_after_success(thread_id)
             total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
@@ -1293,8 +1336,8 @@ class RunOps:
             )
             superseded = await self._mark_run_interrupted(run_id, thread_id)
             if superseded is not None and str(superseded["status"]) == _RUN_SUCCESS:
-                # Cancelled after ``success`` was saved but before the thread
-                # was settled.
+                # Cancelled after ``success`` was saved (possibly before the
+                # thread was settled); settling again is idempotent.
                 await self._settle_thread_after_success(thread_id)
             raise
         except Exception as exc:
@@ -1380,6 +1423,7 @@ class RunOps:
                     "thread state: %s",
                     run_id,
                     exc,
+                    exc=exc,
                 )
         try:
             snapshot = await self._graph.aget_state(config)
@@ -1467,20 +1511,13 @@ class RunOps:
         ``idle``, such a thread is indistinguishable from one that has nothing
         pending.
 
-        A read failure falls back to ``idle``: the run did succeed, and the
-        checkpoint is the authority on what is pending either way.
+        A read failure raises rather than guessing ``idle``, which would lose a
+        pending interrupt for good: every caller leaves the thread ``busy`` and
+        retries (the settle retry, or the stuck-thread release).
         """
-        try:
-            snapshot = await self._graph.aget_state(
-                {"configurable": {"thread_id": thread_id}}
-            )
-        except Exception as exc:
-            self._log_warning(
-                "Failed to read state for thread %s after its run; reporting idle: %s",
-                thread_id,
-                exc,
-            )
-            return _THREAD_IDLE
+        snapshot = await self._graph.aget_state(
+            {"configurable": {"thread_id": thread_id}}
+        )
         if snapshot is None:
             return _THREAD_IDLE
         if _pending_interrupts(snapshot):
@@ -1584,17 +1621,39 @@ class RunOps:
             "langsmith_session_name": resolve_session_name(request.langsmith_tracer),
         }
 
-    def _log_abandoned_admission(self, task: asyncio.Task[Any]) -> None:
-        """Log an admission failure whose client already left."""
-        if not task.cancelled() and (exc := task.exception()) is not None:
+    def _abandon_admission(self, task: asyncio.Task[Any], *, cancel_run: bool) -> None:
+        """Settle an admission whose client already left.
+
+        A failure is logged, as nobody else will see it. A success detaches the
+        client's eager subscription, which no relay will ever drain, and with
+        ``cancel_run`` also stops the run.
+        """
+        if task.cancelled():
+            return
+        if (exc := task.exception()) is not None:
             self._log_error(
                 "Streaming run admission failed after its client left: %s",
                 exc,
                 exc=exc,
             )
+            return
+        run, events, producer = task.result()
+        stream = self._streams.get(str(run.thread_id), str(run.run_id))
+        if stream is not None:
+            stream.detach(events)
+        if cancel_run:
+            producer.cancel()
+
+    async def _await_admission(self, run_id: str) -> None:
+        """Wait, without cancelling it, for a streaming run's admission."""
+        admitting = self._admitting.get(run_id)
+        if admitting is not None:
+            await asyncio.wait({admitting})
 
     async def _settle_thread_after_success(self, thread_id: str) -> None:
-        """Settle a succeeded run's thread; never raises.
+        """Settle a succeeded run's thread; never raises an ordinary exception.
+
+        A cancel still propagates.
 
         The run's ``success`` is already saved, so a failure here must not turn
         it into an error. A failed (or cancelled) settle is queued for the
@@ -1620,18 +1679,18 @@ class RunOps:
     async def _retry_unsettled_threads(self) -> None:
         """Retry thread settles that failed after a run's ``success`` was saved.
 
-        A thread that is no longer ``busy``, or that a newer run now owns, is
-        dropped: whoever changed it settles it.
+        A thread that is gone or no longer ``busy`` is dropped: whoever changed
+        it settled it. One with a run in flight is skipped for now, not dropped:
+        that run may be the settle still in progress, or one whose own settle
+        could fail too.
         """
         for thread_id in sorted(self._unsettled_threads):
             try:
                 thread = await self._metadata_store.fetch_thread_row(thread_id)
-                if (
-                    thread is None
-                    or str(thread["status"]) != _THREAD_BUSY
-                    or await self._has_in_flight_runs(thread_id)
-                ):
+                if thread is None or str(thread["status"]) != _THREAD_BUSY:
                     self._unsettled_threads.discard(thread_id)
+                    continue
+                if await self._has_in_flight_runs(thread_id):
                     continue
             except Exception as exc:
                 self._log_error(
@@ -1644,10 +1703,12 @@ class RunOps:
             await self._settle_thread_after_success(thread_id)
 
     async def _claim_run(self, thread_id: str, run_id: str) -> _Outcome | None:
-        """Move an admitted run to ``running``; return its row if already final.
+        """Move an admitted run to ``running``.
 
-        Claimed before the thread is marked ``busy`` or the graph runs, so a
-        run another worker finalized meanwhile (e.g. swept as orphaned) neither
+        Returns ``None`` once claimed, or the winning outcome (its final row,
+        or a deleted outcome) if it can no longer run. Claimed before the
+        thread is marked ``busy`` or the graph runs, so a run finalized
+        elsewhere meanwhile (e.g. swept as orphaned) or deleted neither
         executes nor takes its thread back.
         """
         if await self._metadata_store.update_run_status(run_id, _RUN_RUNNING):
@@ -1666,8 +1727,9 @@ class RunOps:
         """Persist a terminal status; return the winning outcome if it lost.
 
         ``update_run_status`` only moves in-flight rows and a terminal status is
-        final, so a write that updated nothing lost to another writer (an orphan
-        sweep on another worker) that finalized the row first. A row that is
+        final, so a write that updated nothing lost to another writer that
+        finalized the row first: an orphan sweep on another worker, or this
+        run's own earlier ``success`` write. A row that is
         gone (its thread deleted, or the swept row deleted) lost too: its late
         owner must neither report an outcome of its own nor touch the thread.
         ``None`` means this write took effect.
@@ -1697,13 +1759,15 @@ class RunOps:
     async def _mark_run_failed(
         self, run_id: str, thread_id: str, error: str
     ) -> _Outcome | None:
-        """Persist error state for a failed run; best-effort, never raises.
+        """Persist error state for a failed run; best-effort.
 
-        The store outage that fails these writes is often the same one that
-        failed the run, so they must not mask the original exception or block
-        the client's 'error' event. Returns the persisted row when the run was
-        already finalized otherwise (e.g. ``success`` committed before a later
-        step failed), leaving the thread to that outcome.
+        Never raises an ordinary exception (a cancel still propagates). The
+        store outage that fails these writes is often the same one that failed
+        the run, so they must not mask the original exception or block the
+        client's 'error' event. Returns the winning outcome (the persisted row,
+        or a synthesized deleted outcome) when the run was already finalized
+        otherwise (e.g. an orphan sweep on another worker failed it first, or
+        its row was deleted), leaving the thread to that outcome.
         """
         try:
             superseded = await self._finish_run_status(
@@ -1723,10 +1787,12 @@ class RunOps:
     async def _mark_run_interrupted(
         self, run_id: str, thread_id: str
     ) -> _Outcome | None:
-        """Persist cancellation/disconnect state; best-effort, never raises.
+        """Persist cancellation/disconnect state; best-effort.
 
-        Returns the persisted row when the run was already finalized otherwise
-        (a cancel landing after ``success`` committed, or an orphan sweep),
+        Never raises an ordinary exception (a cancel still propagates). Returns
+        the winning outcome (the persisted row, or a synthesized deleted
+        outcome) when the run was already finalized otherwise (a cancel landing
+        after ``success`` committed, an orphan sweep, or a deleted row),
         leaving the thread to that outcome.
         """
         try:
@@ -1748,25 +1814,30 @@ class RunOps:
             return None
 
     async def _interrupt_row_only(self, run_id: str) -> None:
-        """Mark a superseded run ``interrupted``; best-effort, never raises.
+        """Mark a run that never started ``interrupted``, leaving its thread.
 
-        No-op when the row was never inserted, or is already terminal.
+        For a run stopped before it ran: superseded, its client left with
+        ``on_disconnect="cancel"``, its insert failed, or shutdown.
+        Best-effort, never raises an ordinary exception. No-op when the row was
+        never inserted, or is already terminal.
         """
         try:
             await self._metadata_store.update_run_status(
-                run_id, _RUN_INTERRUPTED, error="Run superseded."
+                run_id, _RUN_INTERRUPTED, error="Run cancelled before it started."
             )
         except Exception as exc:
             self._log_error(
-                "Failed to persist interrupted state for superseded run %s: %s",
+                "Failed to persist interrupted state for unstarted run %s: %s",
                 run_id,
                 exc,
                 exc=exc,
             )
 
-    def _log_warning(self, msg: str, *args: Any) -> None:
+    def _log_warning(
+        self, msg: str, *args: Any, exc: BaseException | None = None
+    ) -> None:
         if self._logger is not None:
-            self._logger.warning(msg, *args)
+            self._logger.warning(msg, *args, exc_info=exc)
 
     def _log_error(
         self, msg: str, *args: Any, exc: BaseException | None = None

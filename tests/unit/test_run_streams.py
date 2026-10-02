@@ -8,7 +8,10 @@ from skeino.streaming import (
     sse_event,
     stream_mode_matches,
 )
-from skeino.streaming.run_streams import SubscriberOverflowError
+from skeino.streaming.run_streams import (
+    _SUBSCRIBER_QUEUE_SIZE,
+    SubscriberOverflowError,
+)
 
 
 class _Clock:
@@ -156,6 +159,30 @@ async def test_resumable_subscriber_overflows_once_missed_events_are_evicted() -
     assert stream.subscriber_count == 0
 
 
+async def test_overflow_catch_up_keeps_the_subscribers_stream_modes() -> None:
+    # The history replay after an overflow must filter as the subscription
+    # did: a values-only join must not suddenly receive every other mode.
+    stream = RunEventStream("t", "r", resumable=True)
+    values_only = stream.subscribe(after=None, stream_modes=["values"])
+    for _ in range(_SUBSCRIBER_QUEUE_SIZE + 5):  # overflows the live queue
+        stream.publish("values", {})
+    stream.publish("custom", {})
+    stream.publish("updates", {})
+    stream.publish("end", {"status": "success"})
+    stream.close(now=0.0)
+
+    got = [event async for event in values_only]
+    assert [event.event for event in got] == ["values"] * (
+        _SUBSCRIBER_QUEUE_SIZE + 5
+    ) + ["end"]
+    # Nothing lost or repeated: the filtered-out ids are simply skipped.
+    assert [event.event_id for event in got] == [
+        *range(1, _SUBSCRIBER_QUEUE_SIZE + 6),
+        _SUBSCRIBER_QUEUE_SIZE + 8,
+    ]
+    assert stream.subscriber_count == 0
+
+
 async def test_subscriber_never_receives_events_at_or_below_its_cursor() -> None:
     stream = RunEventStream("t", "r", resumable=True)
     stream.publish("values", {})
@@ -288,3 +315,13 @@ async def test_replay_skips_events_the_subscriber_modes_reject() -> None:
     stream.close(now=0.0)
     replayed = stream.subscribe(after=-1, stream_modes=["values"])
     assert [event.event_id async for event in replayed] == [1, 3]
+
+
+def test_detach_releases_a_subscription_that_was_never_iterated() -> None:
+    stream = RunEventStream("t", "r", resumable=False)
+    abandoned = stream.subscribe(after=None)
+    assert stream.subscriber_count == 1
+    stream.detach(abandoned)
+    assert stream.subscriber_count == 0
+    stream.publish("values", {})  # nothing is queued for it any more
+    stream.detach(abandoned)  # idempotent
