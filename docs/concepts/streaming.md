@@ -67,13 +67,19 @@ The run executes in a server-side task, not in the request: the SSE response is
 one subscriber to the run's events. A subscriber's 256-event delivery queue
 holds only the events its `stream_mode` filter accepts, so a join that asks for
 `values` is not overflowed by `updates` or `custom` traffic it would never
-receive. A subscriber whose queue overflows receives an `error` event with code `subscriber_overflow` before its
-response closes. This event has no id: resumable clients can reconnect using
-their last successfully received event id, subject to the retained history
-window. Non-resumable clients cannot recover discarded output. Overflow is
-treated like a disconnect: it cancels the run if that subscriber would cancel on
-disconnect (`on_disconnect: "cancel"` for the creating stream,
-`cancel_on_disconnect=true` for a join).
+receive. When a subscriber's queue overflows on a resumable stream
+(`stream_resumable: true`) and every event it missed is still in the retained
+history, skeino catches it up from that history and keeps the response open;
+the client sees no gap and no error.
+
+Otherwise (a non-resumable stream, or missed events already evicted from
+history) the subscriber receives an `error` event with code
+`subscriber_overflow` before its response closes. This event has no id: a
+client of a resumable stream can reconnect with its last received event id,
+subject to the retained history window. A non-resumable client cannot recover
+the discarded output. This overflow is treated like a disconnect: it cancels
+the run if that subscriber would cancel on disconnect (`on_disconnect:
+"cancel"` for the creating stream, `cancel_on_disconnect=true` for a join).
 
 What a client disconnect does is the run
 request's `on_disconnect`:
@@ -233,7 +239,7 @@ are stringified, and arbitrary objects fall back to their public attributes.
 | `events` | `events` mode | raw LangGraph v2 event |
 | `updates` / `messages` / `messages-tuple` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode (`updates` deltas are output-key filtered) |
 | `end` | terminal, success / cancelled | `{run_id, status: "success", usage: {total_tokens}}`, or `{run_id, status: "interrupted"}`; `usage` is omitted when the event reports an outcome saved before the run's own finish |
-| `error` | terminal, failure | `{detail, run_id}`; a subscriber that fell behind gets `{code: "subscriber_overflow", detail, run_id}` with no `id` |
+| `error` | terminal, failure | `{detail, run_id}`; a subscriber that fell behind and cannot be caught up from retained history gets `{code: "subscriber_overflow", detail, run_id}` with no `id` |
 
 See [Threads & runs](threads-and-runs.md) for run lifecycle and the
 [HTTP reference](../api-reference/http.md) for the request schema.
