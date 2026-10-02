@@ -1,8 +1,7 @@
 """Structural interface shared by the metadata store implementations.
 
-Both :class:`skeino.persistence.MetadataStore` (Postgres-backed) and
-:class:`skeino.persistence.InMemoryMetadataStore` satisfy this protocol. The
-ops layer depends on :class:`MetadataStoreProtocol` rather than a concrete
+Every metadata store (Postgres, SQLite, MongoDB, in-memory) satisfies this
+protocol. The ops layer depends on :class:`MetadataStoreProtocol` rather than a concrete
 class so alternative backends can be plugged in without touching it.
 
 Every implementation returns the same row shapes, declared here as

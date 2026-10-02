@@ -15,12 +15,20 @@ operator's chosen database — falling back to ``skeino`` for pathless URIs.
 
 import logging
 from collections.abc import Collection, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException, status
-
+from skeino.persistence._common import (
+    missing_extra,
+    new_run_row,
+    new_thread_row,
+    resolve_sort_by,
+    thread_exists_error,
+    thread_reread_error,
+    ttl_payload,
+    utcnow,
+)
 from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES, RunRow, ThreadRow
 from skeino.persistence.uri import mongo_db_from_uri
 from skeino.schemas import (
@@ -34,16 +42,8 @@ from skeino.schemas import (
 )
 
 _DEFAULT_DB_NAME = "skeino"
-_THREAD_SORT_FIELDS: frozenset[str] = frozenset(
-    {"thread_id", "status", "created_at", "updated_at", "state_updated_at"}
-)
-_DEFAULT_SORT_BY = "updated_at"
 
 logger = logging.getLogger(__name__)
-
-
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
 
 
 class MongoMetadataStore:
@@ -62,10 +62,7 @@ class MongoMetadataStore:
         try:
             import motor.motor_asyncio  # optional dependency: skeino[mongodb]
         except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError(
-                "The 'mongodb' metadata store requires the skeino[mongodb] extra "
-                "(pip install 'skeino[mongodb]')."
-            ) from exc
+            raise missing_extra("metadata store", "mongodb") from exc
 
         self._client = motor.motor_asyncio.AsyncIOMotorClient(self._uri)
         db = self._client[self._db_name]
@@ -114,36 +111,22 @@ class MongoMetadataStore:
         """Insert a thread document and return its row."""
         from pymongo.errors import DuplicateKeyError
 
-        now = _utcnow()
-        ttl_payload = self._ttl_payload(ttl, now)
-        doc = {
-            "_id": thread_id,
-            "thread_id": thread_id,
-            "created_at": now,
-            "updated_at": now,
-            "state_updated_at": None,
-            "metadata": dict(metadata),
-            "config": dict(config),
-            "status": "idle",
-            "ttl": ttl_payload,
-        }
+        now = utcnow()
+        row = new_thread_row(
+            thread_id, now, metadata=metadata, config=config, ttl=ttl_payload(ttl, now)
+        )
         try:
-            await self._threads.insert_one(doc)
+            await self._threads.insert_one(
+                {**row, "_id": thread_id, "thread_id": thread_id}
+            )
         except DuplicateKeyError as exc:
             if if_exists == "do_nothing":
                 existing = await self.fetch_thread_row(thread_id)
                 if existing is not None:
                     return existing
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Thread {thread_id} insert conflicted but the row "
-                    "could not be re-read (concurrent delete?).",
-                ) from exc
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Thread {thread_id} already exists.",
-            ) from exc
-        return self._thread_row(doc)
+                raise thread_reread_error(thread_id) from exc
+            raise thread_exists_error(thread_id) from exc
+        return row
 
     async def update_thread(
         self,
@@ -155,7 +138,7 @@ class MongoMetadataStore:
         mark_state_updated: bool = False,
     ) -> None:
         """Update mutable thread fields."""
-        updates: dict[str, Any] = {"updated_at": _utcnow()}
+        updates: dict[str, Any] = {"updated_at": utcnow()}
         if status_value is not None:
             updates["status"] = status_value
         if config is not None:
@@ -163,7 +146,7 @@ class MongoMetadataStore:
         if metadata is not None:
             updates["metadata"] = dict(metadata)
         if mark_state_updated:
-            updates["state_updated_at"] = _utcnow()
+            updates["state_updated_at"] = utcnow()
         if len(updates) == 1:
             return
         await self._threads.update_one({"_id": thread_id}, {"$set": updates})
@@ -175,9 +158,7 @@ class MongoMetadataStore:
             query["_id"] = {"$in": [str(item) for item in request.ids]}
         if request.status is not None:
             query["status"] = request.status
-        sort_by = request.sort_by or _DEFAULT_SORT_BY
-        if sort_by not in _THREAD_SORT_FIELDS:
-            sort_by = _DEFAULT_SORT_BY
+        sort_by = resolve_sort_by(request)
         direction = 1 if request.sort_order == "asc" else -1
         cursor = (
             self._threads.find(query)
@@ -219,22 +200,19 @@ class MongoMetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> RunRow:
         """Insert a run document and return its row."""
-        now = _utcnow()
-        doc = {
-            "_id": run_id,
-            "run_id": run_id,
-            "thread_id": thread_id,
-            "assistant_id": assistant_id,
-            "created_at": now,
-            "updated_at": now,
-            "status": "pending",
-            "metadata": dict(metadata),
-            "kwargs": dict(kwargs),
-            "multitask_strategy": multitask_strategy,
-            "error": None,
-        }
-        await self._runs.insert_one(doc)
-        return self._run_row(doc)
+        row = new_run_row(
+            run_id,
+            thread_id,
+            utcnow(),
+            assistant_id=assistant_id,
+            metadata=metadata,
+            kwargs=kwargs,
+            multitask_strategy=multitask_strategy,
+        )
+        await self._runs.insert_one(
+            {**row, "_id": run_id, "run_id": run_id, "thread_id": thread_id}
+        )
+        return row
 
     async def update_run_status(
         self,
@@ -249,7 +227,7 @@ class MongoMetadataStore:
         """
         result = await self._runs.update_one(
             {"_id": run_id, "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)}},
-            {"$set": {"status": status_value, "updated_at": _utcnow(), "error": error}},
+            {"$set": {"status": status_value, "updated_at": utcnow(), "error": error}},
         )
         return bool(result.matched_count)
 
@@ -262,7 +240,7 @@ class MongoMetadataStore:
                 "_id": {"$in": list(run_ids)},
                 "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
             },
-            {"$set": {"updated_at": _utcnow()}},
+            {"$set": {"updated_at": utcnow()}},
         )
 
     async def fail_stale_runs(
@@ -286,7 +264,7 @@ class MongoMetadataStore:
         """
         from pymongo import ReturnDocument  # optional dependency: skeino[mongodb]
 
-        now = _utcnow()
+        now = utcnow()
         stale = {
             "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
             "updated_at": {"$lt": now - timedelta(seconds=stale_after_seconds)},
@@ -336,15 +314,3 @@ class MongoMetadataStore:
     async def delete_run(self, thread_id: str, run_id: str) -> None:
         """Delete a single run document scoped to its thread."""
         await self._runs.delete_one({"_id": run_id, "thread_id": thread_id})
-
-    @staticmethod
-    def _ttl_payload(
-        ttl: ThreadTtlConfig | None, now: datetime
-    ) -> dict[str, JsonValue] | None:
-        if ttl is None or ttl.ttl is None:
-            return None
-        return {
-            "strategy": ttl.strategy,
-            "ttl_minutes": ttl.ttl,
-            "expires_at": (now + timedelta(minutes=ttl.ttl)).isoformat(),
-        }

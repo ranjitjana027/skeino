@@ -40,6 +40,7 @@ from typing import Any, AsyncContextManager, AsyncIterator, Callable
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
+from skeino.persistence._common import missing_extra
 from skeino.persistence.enriching import build_run_enriching_checkpointer
 from skeino.persistence.uri import mongo_db_from_uri, normalize_sqlite_uri
 
@@ -110,6 +111,17 @@ async def open_checkpointer(
         yield checkpointer
 
 
+async def _run_setup(saver: Any, names: tuple[str, ...]) -> None:
+    """Call the first of ``names`` the saver defines, awaiting it if needed."""
+    for name in names:
+        setup_fn = getattr(saver, name, None)
+        if setup_fn is not None:
+            result = setup_fn()
+            if inspect.isawaitable(result):
+                await result
+            return
+
+
 # ---------------------------------------------------------------------------
 # Built-in builders
 # ---------------------------------------------------------------------------
@@ -120,22 +132,11 @@ async def open_checkpointer(
 async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSaver]:
     """Build an enrichment-wrapped async PostgreSQL checkpointer.
 
-    Requires the ``skeino[postgres]`` extra (psycopg + langgraph-checkpoint-
-    postgres), imported lazily so postgres stays optional.
-
-    The saver runs over an :class:`~psycopg_pool.AsyncConnectionPool` rather
-    than a single ``from_conn_string`` connection: a connection dropped by the
-    server or a connection pooler (e.g. a Supabase/pgbouncer idle-timeout or
-    recycle) is then detected and replaced on checkout, instead of wedging
-    *every* subsequent checkpoint read with ``OperationalError: the connection
-    is closed``. ``check=check_connection`` validates a connection before each
-    checkout; ``prepare_threshold=None`` disables client-side prepared
-    statements, which also keeps the saver correct behind a transaction-mode
-    pooler. The value must be ``None`` and not ``0``: psycopg prepares a
-    statement once its execution count reaches the threshold, so ``0`` prepares
-    on the *first* execution — the opposite of disabling.
-
-    ``pool_max_size`` (default 10) is read from ``spec.options``.
+    Runs over an ``AsyncConnectionPool`` so a connection dropped by the server
+    or a pooler is replaced on checkout instead of wedging every later read.
+    ``prepare_threshold=None`` (not ``0``, which prepares on first execution)
+    keeps it correct behind a transaction-mode pooler. ``pool_max_size``
+    (default 10) is read from ``spec.options``.
     """
     if not spec.uri:
         raise ValueError("Postgres checkpointer requires a connection URI.")
@@ -145,10 +146,7 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
         from psycopg.rows import DictRow, dict_row
         from psycopg_pool import AsyncConnectionPool
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "The 'postgres' checkpointer requires the skeino[postgres] extra "
-            "(pip install 'skeino[postgres]')."
-        ) from exc
+        raise missing_extra("checkpointer", "postgres") from exc
 
     setup_schema = bool(spec.options.get("setup_schema", True))
     max_size = int(spec.options.get("pool_max_size", 10))
@@ -172,10 +170,8 @@ async def _build_postgres(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoin
         await pool.open(wait=True)
         stack.push_async_callback(pool.close)
         inner = AsyncPostgresSaver(pool)
-        if setup_schema and hasattr(inner, "setup"):
-            result = inner.setup()
-            if inspect.isawaitable(result):
-                await result
+        if setup_schema:
+            await _run_setup(inner, ("setup",))
         yield build_run_enriching_checkpointer(inner)
 
 
@@ -188,10 +184,7 @@ async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoint
     try:
         from langgraph.checkpoint.mongodb import MongoDBSaver
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "The 'mongodb' checkpointer requires the skeino[mongodb] extra "
-            "(pip install 'skeino[mongodb]')."
-        ) from exc
+        raise missing_extra("checkpointer", "mongodb") from exc
 
     # MongoDBSaver.from_conn_string is a *sync* context manager (backed by a
     # synchronous pymongo client) that exposes the async checkpoint methods
@@ -209,13 +202,7 @@ async def _build_mongodb(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpoint
     )
     with saver_cm as saver:
         if setup_schema:
-            for setup_name in ("asetup", "setup"):
-                setup_fn = getattr(saver, setup_name, None)
-                if setup_fn is not None:
-                    result = setup_fn()
-                    if inspect.isawaitable(result):
-                        await result
-                    break
+            await _run_setup(saver, ("asetup", "setup"))
         # MongoDBSaver merges config metadata (and run_id) into checkpoint
         # metadata itself, so no run-enriching wrapper is needed here.
         yield saver
@@ -236,10 +223,7 @@ async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
     try:
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(
-            "The 'sqlite' checkpointer requires the skeino[sqlite] extra "
-            "(pip install 'skeino[sqlite]')."
-        ) from exc
+        raise missing_extra("checkpointer", "sqlite") from exc
 
     conn_string = normalize_sqlite_uri(spec.uri)
     setup_schema = bool(spec.options.get("setup_schema", True))
@@ -247,10 +231,8 @@ async def _build_sqlite(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointS
         saver = await stack.enter_async_context(
             AsyncSqliteSaver.from_conn_string(conn_string)
         )
-        if setup_schema and hasattr(saver, "setup"):
-            result = saver.setup()
-            if inspect.isawaitable(result):
-                await result
+        if setup_schema:
+            await _run_setup(saver, ("setup",))
         yield build_run_enriching_checkpointer(saver)
 
 
@@ -279,11 +261,5 @@ async def _build_redis(spec: CheckpointerSpec) -> AsyncIterator[BaseCheckpointSa
             AsyncRedisSaver.from_conn_string(spec.uri)
         )
         if setup_schema:
-            for setup_name in ("asetup", "setup"):
-                setup_fn = getattr(saver, setup_name, None)
-                if setup_fn is not None:
-                    result = setup_fn()
-                    if inspect.isawaitable(result):
-                        await result
-                    break
+            await _run_setup(saver, ("asetup", "setup"))
         yield build_run_enriching_checkpointer(saver)
