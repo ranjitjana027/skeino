@@ -157,16 +157,20 @@ class InMemoryMetadataStore:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
-        """Update an in-flight run's status; terminal rows are left as they are."""
+    ) -> bool:
+        """Update an in-flight run's status; return whether a row was updated.
+
+        Terminal rows are left as they are.
+        """
         row = self._runs.get(run_id)
         if row is None or row["status"] not in IN_FLIGHT_RUN_STATUSES:
-            return
+            return False
         row["status"] = status_value
         row["updated_at"] = _utcnow()
         # Always assign (clearing with None) — same semantics as the SQL/Mongo
         # stores, which unconditionally write the error column on update.
         row["error"] = error
+        return True
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""

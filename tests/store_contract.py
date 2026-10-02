@@ -471,11 +471,13 @@ class StoreContract:
         tid = _tid()
         await self._thread(store, tid)
         rid = str((await self._run(store, tid))["run_id"])
-        await store.update_run_status(rid, terminal, error="first")
+        assert await store.update_run_status(rid, "running") is True
+        assert await store.update_run_status(rid, terminal, error="first") is True
         before = await self._get_run(store, tid, rid)
         await asyncio.sleep(TICK)
+        # The late owner is told its write lost, so it can report the winner.
         for later in ("running", "success", "interrupted", "error"):
-            await store.update_run_status(rid, later, error="late")
+            assert await store.update_run_status(rid, later, error="late") is False
         assert await self._get_run(store, tid, rid) == before
 
     async def test_update_missing_run_is_a_silent_no_op(
@@ -483,7 +485,7 @@ class StoreContract:
     ) -> None:
         tid, rid = _tid(), _tid()
         await self._thread(store, tid)
-        await store.update_run_status(rid, "success")
+        assert await store.update_run_status(rid, "success") is False
         # No upsert: the id stays unknown and a later create starts it fresh.
         assert await store.fetch_run_row(tid, rid) is None
         assert (

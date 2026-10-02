@@ -142,7 +142,8 @@ the runs it owns: every `run_heartbeat_seconds` (default 30) it bumps their
 `orphaned_run_timeout_seconds` (default 120) has lost its process. The sweep
 runs at startup and on every heartbeat tick, and it sets such a run to `error`
 with an "orphaned" message. If the run's thread has nothing else in flight, the
-thread moves from `busy` to `error`.
+thread moves from `busy` to `error`. If that thread update fails, the sweeping
+process retries it on every later tick until it succeeds.
 
 The sweep is safe with several workers on one database. It never touches the
 sweeping process's own runs, and live runs elsewhere keep heartbeating. Each

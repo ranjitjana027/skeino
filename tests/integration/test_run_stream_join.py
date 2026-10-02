@@ -1093,3 +1093,145 @@ async def test_join_final_state_fails_closed_when_run_scoped_history_fails() -> 
         )
         assert [name for _, name, _ in joined] == ["error"]
         assert joined[0][2]["run_id"] == run_id
+
+
+# --- outcomes decided after the terminal write -----------------------------------
+
+
+async def test_superseded_stream_whose_insert_committed_is_not_stranded() -> None:
+    # The cancel lands after the row insert committed: the row must still be
+    # terminalized, or it would sit ``pending`` until the orphan sweep.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+        inserted, never = asyncio.Event(), asyncio.Event()
+        rows: list[Any] = []
+
+        async def insert_then_stall(*args: Any, **kwargs: Any) -> Any:
+            if inserted.is_set():
+                return await create_run(*args, **kwargs)
+            rows.append(await create_run(*args, **kwargs))
+            inserted.set()
+            await never.wait()
+            return rows[0]  # pragma: no cover - cancelled before this
+
+        store.create_run = insert_then_stall
+        queued = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="enqueue"))
+        )
+        await inserted.wait()
+        run, events = await asyncio.wait_for(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="interrupt")),
+            5,
+        )
+        await _drain(events)
+        with pytest.raises(HTTPException) as superseded:
+            await queued
+        assert superseded.value.status_code == 409
+        stranded = str(rows[0]["run_id"])
+        assert (await ops.get_run(_THREAD, stranded)).status == "interrupted"
+        # The superseding run owns the thread status.
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
+        assert not ops._lock_manager.get(_THREAD).locked()
+
+
+async def test_cancel_after_success_committed_reports_success() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        update_thread = store.update_thread
+        settling, never = asyncio.Event(), asyncio.Event()
+
+        async def stall_settle(thread_id: str, **kwargs: Any) -> Any:
+            if kwargs.get("mark_state_updated"):
+                settling.set()
+                await never.wait()
+            return await update_thread(thread_id, **kwargs)
+
+        store.update_thread = stall_settle
+        run, original = await ops.create_streaming_run(_THREAD, _request())
+        run_id = str(run.run_id)
+        body = asyncio.create_task(_drain(original))
+        await asyncio.wait_for(settling.wait(), 5)
+        # ``success`` is committed; now the run is cancelled (a superseding
+        # interrupt or shutdown — the cancel endpoint refuses terminal rows).
+        assert await ops._registry.cancel(run_id, wait=False)
+        frames = parse_frames(await asyncio.wait_for(body, 5))
+        store.update_thread = update_thread
+        assert frames[-1][1] == "end"
+        assert frames[-1][2]["status"] == "success"
+        assert (await ops.get_run(_THREAD, run_id)).status == "success"
+
+
+async def test_failure_after_success_committed_reports_success() -> None:
+    async with running_app() as (app, _graph, client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        update_thread = store.update_thread
+
+        async def fail_settle(thread_id: str, **kwargs: Any) -> Any:
+            if kwargs.get("mark_state_updated"):
+                raise RuntimeError("store blip")
+            return await update_thread(thread_id, **kwargs)
+
+        store.update_thread = fail_settle
+        run, original = await ops.create_streaming_run(_THREAD, _request())
+        frames = parse_frames(await asyncio.wait_for(_drain(original), 5))
+        store.update_thread = update_thread
+        assert frames[-1][1] == "end"
+        assert frames[-1][2]["status"] == "success"
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
+        # The failed step does not rewrite the thread as ``error`` either.
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] != "error"
+
+
+async def test_wait_fails_closed_when_run_scoped_history_fails() -> None:
+    # /runs/wait and /join read the same final state as a stream join: a
+    # fallback to the latest thread state could return a later run's output.
+    async with running_app() as (_app, graph, client):
+
+        async def broken_history(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            raise RuntimeError("history store down")
+            yield  # pragma: no cover - makes this an async generator
+
+        graph.aget_state_history = broken_history  # type: ignore[method-assign]
+        r = await client.post(
+            f"/threads/{_THREAD}/runs/wait",
+            json={
+                "assistant_id": "test_agent",
+                "input": {"messages": []},
+                "if_not_exists": "create",
+            },
+        )
+        assert r.status_code == 500
+        assert "Could not read the final state" in r.json()["detail"]
+
+
+async def test_background_run_failing_after_a_sweep_leaves_the_thread_alone() -> None:
+    # Another worker swept the run and a newer run made the thread busy; this
+    # run's late failure must not rewrite that thread as ``error``.
+    async with running_app() as (app, graph, client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        execute = ops._execute_graph_run
+
+        async def run_then_fail(*args: Any, **kwargs: Any) -> Any:
+            await execute(*args, **kwargs)
+            raise RuntimeError("graph failed late")
+
+        ops._execute_graph_run = run_then_fail
+        graph.invoke_gate = asyncio.Event()
+        run = await ops.create_run(_THREAD, _request(stream_resumable=False))
+        run_id = str(run.run_id)
+        await graph.invoke_started.wait()
+        await store.update_run_status(run_id, "error", error="orphaned elsewhere")
+        await store.update_thread(_THREAD, status_value="busy")
+        graph.invoke_gate.set()
+        await asyncio.wait_for(ops._registry.wait(run_id), 5)
+        row = await store.fetch_run_row(_THREAD, run_id)
+        assert row is not None
+        assert (row["status"], row["error"]) == ("error", "orphaned elsewhere")
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "busy"

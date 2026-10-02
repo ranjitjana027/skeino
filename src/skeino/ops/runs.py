@@ -162,6 +162,9 @@ class RunOps:
             retention_seconds=_DEFAULT_STREAM_RETENTION_SECS
         )
         self._logger = logger
+        # Threads whose orphaned runs were claimed but whose release failed;
+        # retried every liveness pass, since a later sweep never re-claims them.
+        self._unreleased_threads: set[str] = set()
 
     async def create_run(self, thread_id: str, request: RunCreateRequest) -> RunModel:
         """Start a background run and return its (pending) metadata immediately."""
@@ -327,13 +330,21 @@ class RunOps:
             self._registry.unregister_external(thread_id, run_id)
             current = asyncio.current_task()
             request_cancelled = current is not None and current.cancelling() > 0
-            if admit_task.done() and not admit_task.cancelled():
+            if (
+                admit_task.done()
+                and not admit_task.cancelled()
+                and admit_task.exception() is None
+            ):
                 # Admitted, then this request was cancelled before resuming.
                 lock.release()
                 await self._mark_run_interrupted(run_id, thread_id)
             elif request_cancelled:
                 # The client may have left mid-insert: don't strand the row.
                 await self._interrupt_if_created(run_id, thread_id)
+            elif admit_task.cancelled():
+                # Superseded, perhaps after the insert committed. Terminalize
+                # the row only: the superseding run owns the thread status.
+                await self._interrupt_row_only(run_id)
             if admit_task.cancelled() and not request_cancelled:
                 # Superseded by interrupt/rollback while queued: the request
                 # itself is fine, so answer it instead of leaking the cancel.
@@ -391,10 +402,14 @@ class RunOps:
             """Complete cleanup within the registry's awaited lifecycle."""
             try:
                 if task.cancelled():
-                    await self._mark_run_interrupted(run_id, thread_id)
-                    stream.publish(
-                        "end", {"run_id": run_id, "status": _RUN_INTERRUPTED}
-                    )
+                    superseded = await self._mark_run_interrupted(run_id, thread_id)
+                    if superseded is not None:
+                        # e.g. cancelled after ``success`` committed.
+                        stream.publish(*_terminal_event_for_row(run_id, superseded))
+                    else:
+                        stream.publish(
+                            "end", {"run_id": run_id, "status": _RUN_INTERRUPTED}
+                        )
                 if after_run is not None:
                     await after_run()
             finally:
@@ -603,8 +618,12 @@ class RunOps:
             )
             # Persist the failure best-effort; a store outage must not stop
             # subscribers from receiving the 'error' event.
-            await self._mark_run_failed(run_id, thread_id, str(exc))
-            stream.publish("error", {"detail": str(exc), "run_id": run_id})
+            superseded = await self._mark_run_failed(run_id, thread_id, str(exc))
+            if superseded is not None:
+                # e.g. a post-success step failed: the run did succeed.
+                stream.publish(*_terminal_event_for_row(run_id, superseded))
+            else:
+                stream.publish("error", {"detail": str(exc), "run_id": run_id})
             return 0
 
     async def _relay(
@@ -928,7 +947,8 @@ class RunOps:
         says. A thread still ``busy`` with nothing left in flight is moved to
         ``error``, as when one of its runs fails normally; a thread a later run
         already settled keeps its status. Each thread is released on its own,
-        so one failing store call cannot strand the rest ``busy``.
+        so one failing store call cannot strand the rest ``busy``, and a failed
+        release is retried on the next pass.
         """
         local = {run_id for _, run_id in self._registry.all_active()}
         rows = await self._metadata_store.fail_stale_runs(
@@ -944,16 +964,20 @@ class RunOps:
                 row["thread_id"],
                 stale_after_seconds,
             )
-        for thread_id in {str(row["thread_id"]) for row in rows}:
+        self._unreleased_threads.update(str(row["thread_id"]) for row in rows)
+        for thread_id in sorted(self._unreleased_threads):
             try:
                 await self._release_orphaned_thread(thread_id)
             except Exception as exc:
+                # Kept in ``_unreleased_threads``: the next pass retries it.
                 self._log_error(
                     "Failed to release thread %s after failing its orphaned runs: %s",
                     thread_id,
                     exc,
                     exc=exc,
                 )
+            else:
+                self._unreleased_threads.discard(thread_id)
         return [str(row["run_id"]) for row in rows]
 
     async def _release_orphaned_thread(self, thread_id: str) -> None:
@@ -1163,7 +1187,20 @@ class RunOps:
         if task is not None and not task.cancelled():
             result = task.result()
             tokens = result if isinstance(result, int) else 0
-        output = await self._final_state_values(thread_id, run_id)
+        try:
+            output = await self._final_state_values(
+                thread_id, run_id, raise_on_error=True
+            )
+        except Exception as exc:
+            # Fail closed: a fallback read could return a later run's state,
+            # and a null output would look like a run that produced nothing.
+            self._log_error(
+                "Failed to read the final state of run %s: %s", run_id, exc, exc=exc
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Could not read the final state of run {run_id}.",
+            ) from exc
         return output, tokens
 
     async def _final_state_values(
@@ -1405,18 +1442,26 @@ class RunOps:
         }
 
     async def _finish_run_status(
-        self, thread_id: str, run_id: str, status_value: RunStatus
+        self,
+        thread_id: str,
+        run_id: str,
+        status_value: RunStatus,
+        *,
+        error: str | None = None,
     ) -> RunRow | None:
         """Persist a terminal status; return the row if another writer won.
 
         ``update_run_status`` only moves in-flight rows and a terminal status is
-        final, so after the write the row holds either this status or the one
-        another writer (an orphan sweep on another worker) set first. ``None``
-        means this write took effect, or the row is gone (rollback / DELETE).
+        final, so a write that updated nothing lost to another writer (an orphan
+        sweep on another worker) that finalized the row first. ``None`` means
+        this write took effect, or the row is gone (rollback / DELETE).
         """
-        await self._metadata_store.update_run_status(run_id, status_value)
+        if await self._metadata_store.update_run_status(
+            run_id, status_value, error=error
+        ):
+            return None
         row = await self._metadata_store.fetch_run_row(thread_id, run_id)
-        if row is None or str(row["status"]) == status_value:
+        if row is None:
             return None
         self._log_warning(
             "Run %s finished as %s, but its row was already finalized as %s; "
@@ -1427,24 +1472,31 @@ class RunOps:
         )
         return row
 
-    async def _mark_run_failed(self, run_id: str, thread_id: str, error: str) -> None:
+    async def _mark_run_failed(
+        self, run_id: str, thread_id: str, error: str
+    ) -> RunRow | None:
         """Persist error state for a failed run; best-effort, never raises.
 
         The store outage that fails these writes is often the same one that
         failed the run, so they must not mask the original exception or block
-        the client's 'error' event.
+        the client's 'error' event. Returns the persisted row when the run was
+        already finalized otherwise (e.g. ``success`` committed before a later
+        step failed), leaving the thread to that outcome.
         """
         try:
-            await self._metadata_store.update_run_status(
-                run_id, _RUN_ERROR, error=error
+            superseded = await self._finish_run_status(
+                thread_id, run_id, _RUN_ERROR, error=error
             )
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_ERROR
-            )
+            if superseded is None:
+                await self._metadata_store.update_thread(
+                    thread_id, status_value=_THREAD_ERROR
+                )
+            return superseded
         except Exception as exc:
             self._log_error(
                 "Failed to persist error state for run %s: %s", run_id, exc, exc=exc
             )
+            return None
 
     async def _interrupt_if_created(self, run_id: str, thread_id: str) -> None:
         """Mark a possibly-inserted run ``interrupted``; best-effort, never raises."""
@@ -1461,18 +1513,43 @@ class RunOps:
         if row is not None:
             await self._mark_run_interrupted(run_id, thread_id)
 
-    async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> None:
-        """Persist cancellation/disconnect state; best-effort, never raises."""
+    async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> RunRow | None:
+        """Persist cancellation/disconnect state; best-effort, never raises.
+
+        Returns the persisted row when the run was already finalized otherwise
+        (a cancel landing after ``success`` committed, or an orphan sweep),
+        leaving the thread to that outcome.
+        """
         try:
-            await self._metadata_store.update_run_status(
-                run_id, _RUN_INTERRUPTED, error="Run interrupted."
+            superseded = await self._finish_run_status(
+                thread_id, run_id, _RUN_INTERRUPTED, error="Run interrupted."
             )
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_IDLE
-            )
+            if superseded is None:
+                await self._metadata_store.update_thread(
+                    thread_id, status_value=_THREAD_IDLE
+                )
+            return superseded
         except Exception as exc:
             self._log_error(
                 "Failed to persist interrupted state for run %s: %s",
+                run_id,
+                exc,
+                exc=exc,
+            )
+            return None
+
+    async def _interrupt_row_only(self, run_id: str) -> None:
+        """Mark a superseded run ``interrupted``; best-effort, never raises.
+
+        No-op when the row was never inserted, or is already terminal.
+        """
+        try:
+            await self._metadata_store.update_run_status(
+                run_id, _RUN_INTERRUPTED, error="Run superseded."
+            )
+        except Exception as exc:
+            self._log_error(
+                "Failed to persist interrupted state for superseded run %s: %s",
                 run_id,
                 exc,
                 exc=exc,

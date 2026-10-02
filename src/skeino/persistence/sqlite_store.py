@@ -364,15 +364,19 @@ class SqliteMetadataStore:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
-        """Update an in-flight run's status; terminal rows are left as they are."""
+    ) -> bool:
+        """Update an in-flight run's status; return whether a row was updated.
+
+        Terminal rows are left as they are.
+        """
         async with self._lock:
-            await self._conn.execute(
+            cursor = await self._conn.execute(
                 "UPDATE app_runs SET status = ?, updated_at = ?, error = ? "
                 "WHERE run_id = ? AND status IN ('pending', 'running')",
                 (status_value, _utcnow().isoformat(), error, run_id),
             )
             await self._conn.commit()
+        return bool(cursor.rowcount > 0)
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""

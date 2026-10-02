@@ -55,6 +55,11 @@ If the run is cancelled (`POST .../cancel`, a superseding `interrupt`/
 `rollback` run, or a disconnect with `on_disconnect: "cancel"`), the terminal
 event is `end` with `"status": "interrupted"`.
 
+The terminal event always matches the persisted run status. A run whose
+`success` was already saved when it was cancelled, or when a later step failed,
+still ends with `end` `"status": "success"`; one already failed by another
+worker's orphan sweep ends with that `error`.
+
 ## Disconnects
 
 The run executes in a server-side task, not in the request: the SSE response is

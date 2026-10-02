@@ -242,12 +242,16 @@ class MongoMetadataStore:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
-        """Update an in-flight run's status; terminal rows are left as they are."""
-        await self._runs.update_one(
+    ) -> bool:
+        """Update an in-flight run's status; return whether a row was updated.
+
+        Terminal rows are left as they are.
+        """
+        result = await self._runs.update_one(
             {"_id": run_id, "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)}},
             {"$set": {"status": status_value, "updated_at": _utcnow(), "error": error}},
         )
+        return bool(result.matched_count)
 
     async def touch_runs(self, run_ids: Sequence[str]) -> None:
         """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""

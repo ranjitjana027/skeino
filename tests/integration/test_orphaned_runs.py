@@ -215,6 +215,14 @@ async def test_one_failing_thread_release_does_not_strand_the_others(
         assert sorted(failed) == sorted([broken_run, other_run])
         assert (await fetch(other_thread))["status"] == "error"
         assert "Failed to release thread" in caplog.text
+        assert (await fetch(broken_thread))["status"] == "busy"
+
+        # The claimed run is never returned again, so the next pass must
+        # retry the release itself rather than wait for a sweep that never comes.
+        again = await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        assert again == []
+        assert (await fetch(broken_thread))["status"] == "error"
+        assert ops._unreleased_threads == set()
 
 
 async def test_sqlite_claim_loses_to_a_heartbeat_after_the_scan(

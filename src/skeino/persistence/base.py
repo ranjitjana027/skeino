@@ -124,12 +124,13 @@ class MetadataStoreProtocol(Protocol):
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Update the persisted status of an in-flight run.
 
         Only a ``pending``/``running`` row is updated: a terminal status is
         final. Once another process's orphan sweep has failed a run, its late
-        owner cannot flip it back to ``success`` or ``interrupted``.
+        owner cannot flip it back to ``success`` or ``interrupted``. Returns
+        whether a row was updated, so that owner can tell its write lost.
         """
         ...
 

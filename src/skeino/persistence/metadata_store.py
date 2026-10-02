@@ -566,8 +566,11 @@ class MetadataStore:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
-        """Update an in-flight run's status; terminal rows are left as they are."""
+    ) -> bool:
+        """Update an in-flight run's status; return whether a row was updated.
+
+        Terminal rows are left as they are.
+        """
         async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
@@ -578,7 +581,9 @@ class MetadataStore:
                     """,
                     (status_value, error, run_id),
                 )
+                updated = bool(cursor.rowcount > 0)
             await conn.commit()
+        return updated
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a single run row for a thread."""
