@@ -106,9 +106,14 @@ async def test_sweep_spares_live_runs_of_another_worker_and_fails_dead_ones(
     db = tmp_path / "skeino.db"
     graph_a = FakeGraph()
     graph_a.invoke_gate = asyncio.Event()
+    # A wide timeout: the live run must survive a slow CI runner delaying A's
+    # heartbeat, which a 0.3s window (six heartbeats) did not always allow.
+    timeout = 1.5
     async with (
-        _running(_app(db, graph_a)) as worker_a,
-        _running(_app(db, FakeGraph())) as worker_b,
+        _running(_app(db, graph_a, orphaned_run_timeout_seconds=timeout)) as worker_a,
+        _running(
+            _app(db, FakeGraph(), orphaned_run_timeout_seconds=timeout)
+        ) as worker_b,
     ):
         # Worker A executes a long run: its own heartbeat keeps it alive.
         live = await worker_a.create_run(
@@ -121,8 +126,8 @@ async def test_sweep_spares_live_runs_of_another_worker_and_fails_dead_ones(
         # A third worker died mid-run a moment ago (fresh, not yet stale).
         dead_thread, dead_run = await _crashed_run(worker_b, age_seconds=0)
 
-        # Several timeout windows pass; both workers sweep the shared store.
-        await asyncio.sleep(TIMEOUT * 3)
+        # The dead run goes stale while both workers sweep the shared store.
+        await asyncio.sleep(timeout * 1.5)
 
         live_status, _ = await _status(worker_b, str(live.thread_id), str(live.run_id))
         assert live_status == "running"  # B never kills A's heartbeating run
