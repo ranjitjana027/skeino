@@ -269,7 +269,8 @@ def create_thread(client: TestClient, **body: Any) -> str:
     return str(response.json()["thread_id"])
 
 
-def run_to_completion(client: TestClient, thread_id: str, content: str) -> dict:
+def start_run(client: TestClient, thread_id: str, content: str) -> dict:
+    """Create a background run; it is accepted ``pending`` (Platform semantics)."""
     response = client.post(
         f"/threads/{thread_id}/runs",
         json={
@@ -279,7 +280,19 @@ def run_to_completion(client: TestClient, thread_id: str, content: str) -> dict:
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["status"] == "success"
+    assert body["status"] == "pending", body
+    return body
+
+
+def run_to_completion(client: TestClient, thread_id: str, content: str) -> dict:
+    """Start a background run, join it, and return its persisted ``success`` row."""
+    run_id = start_run(client, thread_id, content)["run_id"]
+    joined = client.get(f"/threads/{thread_id}/runs/{run_id}/join")
+    assert joined.status_code == 200, joined.text
+    response = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "success", body
     return body
 
 
