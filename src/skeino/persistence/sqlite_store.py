@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -73,6 +74,18 @@ CREATE TABLE IF NOT EXISTS app_runs (
 _CREATE_RUNS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_app_runs_thread_created
 ON app_runs (thread_id, created_at DESC)
+"""
+# The orphan sweep scans in-flight runs on every heartbeat; partial, so it stays
+# the size of the in-flight set, not of the run history. Its predicate is the
+# sweep query's own, which is what lets SQLite use it.
+_CREATE_INFLIGHT_RUNS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_app_runs_inflight_updated
+ON app_runs (updated_at) WHERE status IN ('pending', 'running')
+"""
+# The sweep also looks for threads left ``busy`` (status filter, oldest first).
+_CREATE_THREADS_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_app_threads_status_updated
+ON app_threads (status, updated_at)
 """
 
 _THREAD_COLUMNS = (
@@ -127,6 +140,8 @@ class SqliteMetadataStore:
         await self._conn.execute(_CREATE_THREADS_SQL)
         await self._conn.execute(_CREATE_RUNS_SQL)
         await self._conn.execute(_CREATE_RUNS_INDEX_SQL)
+        await self._conn.execute(_CREATE_INFLIGHT_RUNS_INDEX_SQL)
+        await self._conn.execute(_CREATE_THREADS_STATUS_INDEX_SQL)
         await self._conn.commit()
 
     async def aclose(self) -> None:
@@ -363,15 +378,19 @@ class SqliteMetadataStore:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> None:
-        """Update a run's status field."""
+    ) -> bool:
+        """Update an in-flight run's status; return whether a row was updated.
+
+        Terminal rows are left as they are.
+        """
         async with self._lock:
-            await self._conn.execute(
+            cursor = await self._conn.execute(
                 "UPDATE app_runs SET status = ?, updated_at = ?, error = ? "
-                "WHERE run_id = ?",
+                "WHERE run_id = ? AND status IN ('pending', 'running')",
                 (status_value, _utcnow().isoformat(), error, run_id),
             )
             await self._conn.commit()
+        return bool(cursor.rowcount > 0)
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""
@@ -416,6 +435,67 @@ class SqliteMetadataStore:
                 (thread_id, run_id),
             )
             await self._conn.commit()
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
+        if not run_ids:
+            return
+        now = _utcnow().isoformat()
+        async with self._lock:
+            await self._conn.executemany(
+                "UPDATE app_runs SET updated_at = ? "
+                "WHERE run_id = ? AND status IN ('pending', 'running')",
+                [(now, run_id) for run_id in run_ids],
+            )
+            await self._conn.commit()
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark in-flight runs not heartbeated within the window ``error``.
+
+        Staleness is decided on parsed datetimes rather than by comparing the
+        stored ISO strings in SQL. Each row is claimed with an update
+        conditioned on it still being in flight *and* on the ``updated_at`` that
+        was read, so a heartbeat from another process sharing the file that
+        lands between the scan and the claim wins. A failure rolls back every
+        claim, so no run is failed without being reported.
+        """
+        now = _utcnow()
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        excluded = set(exclude_run_ids)
+        failed: list[RunRow] = []
+        async with self._lock:
+            try:
+                cursor = await self._conn.execute(
+                    f"SELECT {_RUN_COLUMNS} FROM app_runs "  # nosec B608 - static columns
+                    "WHERE status IN ('pending', 'running')"
+                )
+                for raw in await cursor.fetchall():
+                    row = self._run_row(raw)
+                    run_id = str(row["run_id"])
+                    if run_id in excluded or row["updated_at"] >= cutoff:
+                        continue
+                    claimed = await self._conn.execute(
+                        "UPDATE app_runs SET status = 'error', error = ?, "
+                        "updated_at = ? WHERE run_id = ? AND updated_at = ? "
+                        "AND status IN ('pending', 'running')",
+                        (error, now.isoformat(), run_id, raw[4]),
+                    )
+                    if claimed.rowcount:
+                        row["status"] = "error"
+                        row["error"] = error
+                        row["updated_at"] = now
+                        failed.append(row)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                raise
+        return failed
 
     @staticmethod
     def _ttl_payload(

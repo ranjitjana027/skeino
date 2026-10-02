@@ -6,8 +6,9 @@ Use this when wiring a skeino-backed FastAPI app programmatically. For
 after parsing the manifest.
 """
 
+import asyncio
 import logging
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import AsyncIterator, Awaitable, Callable, Mapping
 
@@ -42,7 +43,7 @@ from skeino.persistence.uri import (
     normalize_sqlite_uri,
 )
 from skeino.registry import GraphRegistry
-from skeino.streaming import Streamer
+from skeino.streaming import RunStreamRegistry, Streamer
 
 GraphBuilder = Callable[
     [BaseCheckpointSaver | None],
@@ -224,6 +225,12 @@ def create_app(
                 assistant_ops=assistant_ops,
                 lock_manager=ThreadLockManager(),
                 registry=BackgroundRunRegistry(),
+                streams=RunStreamRegistry(
+                    retention_seconds=settings.resumable_stream_ttl_seconds,
+                    max_retained_streams=settings.resumable_stream_max_retained_runs,
+                    max_history_events=settings.resumable_stream_max_events,
+                    max_history_bytes=settings.resumable_stream_max_bytes,
+                ),
                 logger=logger,
             )
 
@@ -234,11 +241,25 @@ def create_app(
                 settings=settings,
             )
             app_instance.state.registry = registry
+            # Fail runs orphaned by a previous process before serving (those
+            # whose heartbeat is already past the window), then keep this
+            # process's runs alive and keep sweeping on a timer.
+            orphan_timeout = settings.orphaned_run_timeout_seconds
+            await run_ops.liveness_pass(stale_after_seconds=orphan_timeout)
+            liveness = asyncio.create_task(
+                run_ops.maintain_runs(
+                    heartbeat_seconds=settings.run_heartbeat_seconds,
+                    stale_after_seconds=orphan_timeout,
+                )
+            )
             logger.info("skeino runtime initialised (graphs=%s)", list(compiled))
             try:
                 yield
             finally:
                 logger.info("skeino runtime shutting down")
+                liveness.cancel()
+                with suppress(asyncio.CancelledError):
+                    await liveness
                 # Cancel any in-flight background runs so their tasks unwind
                 # (persist ``interrupted``, release locks) before resources close.
                 await run_ops.shutdown()

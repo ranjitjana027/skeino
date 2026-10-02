@@ -33,6 +33,9 @@ SORT_KEYS = ("thread_id", "status", "created_at", "updated_at", "state_updated_a
 
 # Short pause so successive writes get distinct timestamps on every backend.
 TICK = 0.005
+# Heartbeat window for the orphan-sweep tests: well above TICK and Mongo's
+# millisecond timestamp precision, short enough to keep the suite fast.
+STALE = 0.25
 
 
 def _tid() -> str:
@@ -448,23 +451,41 @@ class StoreContract:
         run = await self._run(store, tid)
         rid = str(run["run_id"])
         await asyncio.sleep(TICK)
-        await store.update_run_status(rid, "error", error="boom")
-        failed = await self._get_run(store, tid, rid)
-        assert failed is not None
-        assert (failed["status"], failed["error"]) == ("error", "boom")
-        assert failed["updated_at"] > run["updated_at"]
-        assert failed["created_at"] == run["created_at"]
+        await store.update_run_status(rid, "running", error="boom")
+        flagged = await self._get_run(store, tid, rid)
+        assert flagged is not None
+        assert (flagged["status"], flagged["error"]) == ("running", "boom")
+        assert flagged["updated_at"] > run["updated_at"]
+        assert flagged["created_at"] == run["created_at"]
         await store.update_run_status(rid, "success")
-        retried = await self._get_run(store, tid, rid)
-        assert retried is not None
-        assert (retried["status"], retried["error"]) == ("success", None)
+        finished = await self._get_run(store, tid, rid)
+        assert finished is not None
+        assert (finished["status"], finished["error"]) == ("success", None)
+
+    @pytest.mark.parametrize("terminal", ["success", "error", "interrupted"])
+    async def test_terminal_run_status_is_final(
+        self, store: MetadataStoreProtocol, terminal: str
+    ) -> None:
+        # Another worker's orphan sweep can fail a run whose owner is merely
+        # late; the owner's later write must not flip it back.
+        tid = _tid()
+        await self._thread(store, tid)
+        rid = str((await self._run(store, tid))["run_id"])
+        assert await store.update_run_status(rid, "running") is True
+        assert await store.update_run_status(rid, terminal, error="first") is True
+        before = await self._get_run(store, tid, rid)
+        await asyncio.sleep(TICK)
+        # The late owner is told its write lost, so it can report the winner.
+        for later in ("running", "success", "interrupted", "error"):
+            assert await store.update_run_status(rid, later, error="late") is False
+        assert await self._get_run(store, tid, rid) == before
 
     async def test_update_missing_run_is_a_silent_no_op(
         self, store: MetadataStoreProtocol
     ) -> None:
         tid, rid = _tid(), _tid()
         await self._thread(store, tid)
-        await store.update_run_status(rid, "success")
+        assert await store.update_run_status(rid, "success") is False
         # No upsert: the id stays unknown and a later create starts it fresh.
         assert await store.fetch_run_row(tid, rid) is None
         assert (
@@ -472,6 +493,74 @@ class StoreContract:
         )
         run = await self._run(store, tid, run_id=rid)
         assert (run["status"], run["error"]) == ("pending", None)
+
+    # --- run liveness (heartbeat + orphan sweep) -------------------------------
+
+    async def test_fail_stale_runs_claims_only_unheartbeated_in_flight_runs(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        ids = {
+            name: str((await self._run(store, tid))["run_id"])
+            for name in ("pending", "running", "fresh", "excluded", "done")
+        }
+        await store.update_run_status(ids["running"], "running")
+        await store.update_run_status(ids["done"], "success")
+        await asyncio.sleep(STALE + TICK)
+        await store.touch_runs([ids["fresh"]])  # heartbeat keeps it alive
+
+        failed = await store.fail_stale_runs(
+            stale_after_seconds=STALE,
+            exclude_run_ids=[ids["excluded"]],
+            error="orphaned",
+        )
+        assert sorted(_ids(failed, "run_id")) == sorted(
+            [ids["pending"], ids["running"]]
+        )
+        assert all((r["status"], r["error"]) == ("error", "orphaned") for r in failed)
+        # The sweep releases each claimed run's thread, so rows must name it.
+        assert all(str(r["thread_id"]) == str(tid) for r in failed)
+        for name in ("pending", "running"):
+            row = await self._get_run(store, tid, ids[name])
+            assert (row["status"], row["error"]) == ("error", "orphaned")
+        for name, expected in (
+            ("fresh", "pending"),
+            ("excluded", "pending"),
+            ("done", "success"),
+        ):
+            assert (await self._get_run(store, tid, ids[name]))["status"] == expected
+
+        # Claimed once: a second sweep (another worker) reports nothing.
+        again = await store.fail_stale_runs(
+            stale_after_seconds=STALE, exclude_run_ids=[], error="orphaned"
+        )
+        assert _ids(again, "run_id") == [ids["excluded"]]
+
+    async def test_touch_runs_leaves_terminal_and_unknown_runs_alone(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        rid = str((await self._run(store, tid))["run_id"])
+        await store.update_run_status(rid, "success")
+        before = await self._get_run(store, tid, rid)
+        await asyncio.sleep(TICK)
+        await store.touch_runs([rid, _tid()])
+        await store.touch_runs([])
+        assert await self._get_run(store, tid, rid) == before
+
+    async def test_touch_runs_bumps_in_flight_updated_at(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        run = await self._run(store, tid)
+        await asyncio.sleep(TICK)
+        await store.touch_runs([str(run["run_id"])])
+        touched = await self._get_run(store, tid, str(run["run_id"]))
+        assert touched["updated_at"] > run["updated_at"]
+        assert touched["status"] == "pending"
 
     async def test_run_lookups_are_scoped_to_their_thread(
         self, store: MetadataStoreProtocol

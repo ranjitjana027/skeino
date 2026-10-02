@@ -125,9 +125,49 @@ and — on failure — an `error` message. List a thread's runs with
 - `DELETE /threads/{id}/runs/{run_id}` removes a **terminal** run row (it returns
   **409** while the run is still active — cancel it first).
 
-A live SSE stream (`/runs/stream`) is cancelled by the client disconnecting;
-cross-request cancellation of a streaming run (reconnect/resume) is a planned
-follow-up.
+Streaming runs (`/runs/stream`) execute in a server-side task like background
+runs, so they can be cancelled, joined (`/join` for the output,
+`/runs/{run_id}/stream` for the events), and outlive a disconnecting client
+unless the run asked for `on_disconnect: "cancel"`. See
+[Streaming](streaming.md#joining-a-run-stream).
+
+### Orphaned runs
+
+A run executes in the process that started it. A graceful shutdown marks its
+in-flight runs `interrupted`, but a crash, OOM kill, or hard restart cannot. To
+keep such rows from staying `pending`/`running` forever (with pollers waiting
+on them and their thread stuck `busy`), every process **heartbeats**
+the runs it owns: every `run_heartbeat_seconds` (default 30) it bumps their
+`updated_at`. A `pending`/`running` run whose `updated_at` is older than
+`orphaned_run_timeout_seconds` (default 120) has lost its process. The sweep
+runs at startup and on every heartbeat tick, and it sets such a run to `error`
+with an "orphaned" message. If the run's thread has nothing else in flight, the
+thread moves from `busy` to `error`. If that thread update fails, the sweeping
+process retries it on every later tick until it succeeds. A run that was swept
+before it started (still queued, say) never executes: its owner sees the final
+row, reports that outcome (on its stream, for streaming runs), and leaves the
+thread alone.
+
+The retry record lives in the sweeping process. If that process dies too, if a
+run's process dies after saving `success` but before settling its thread, or if
+a failed or interrupted run's own thread update failed (it has no in-process
+retry), the sweep also releases any thread that has been `busy` for longer than
+`orphaned_run_timeout_seconds` with no run in flight. The thread settles as its
+latest run would have left it: as after a clean finish if that run succeeded,
+`idle` if it was interrupted, and `error` otherwise.
+
+Settling a thread after `success` reads the graph state to decide between
+`idle` and `interrupted`. If that read (or the thread update) fails, the thread
+stays `busy` and the settle is retried on the next liveness pass, rather than
+guessing `idle` and losing a pending interrupt.
+
+The sweep is safe with several workers on one database. It never touches the
+sweeping process's own runs, and live runs elsewhere keep heartbeating. Each
+row is also claimed with a conditional update, so only one sweeper reports it.
+On Postgres the comparison uses the database clock, so worker clock skew does
+not matter. LangGraph Platform re-queues an orphaned run and fails it once its
+retries are exhausted. skeino keeps no run input to retry with, so it fails the
+run directly. Set `orphaned_run_timeout_seconds=None` to disable the sweep.
 
 ## Stateless runs
 
@@ -180,9 +220,9 @@ already busy:
 | `rollback` | Cancel **and delete** the active run, then start the new one. |
 | `interrupt` | Cancel the active run (left `interrupted`), then start the new one. |
 
-`interrupt`/`rollback` cancel active **background** runs. A live SSE streaming run
-has no cancellable server-side handle, so a new run queues behind it instead
-(consistent with `enqueue`) until resumable streaming lands.
+`interrupt`/`rollback` cancel active runs, streaming ones included, and also a
+streaming run still queued for the thread lock or still being created: it is
+dropped before it starts, and its own `POST .../runs/stream` gets **409**.
 
 !!! info "Single-process scope"
     Locks are in-process `asyncio` locks, which is correct for a single-process

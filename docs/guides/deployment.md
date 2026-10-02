@@ -25,6 +25,18 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
     single-run-per-thread invariant across a cluster, either run a single worker
     process or front the deployment with routing that pins a thread to one
     worker. A shared, cross-process lock service is out of scope for v1.
+    The same holds for joining a run's event stream
+    (`GET /threads/{id}/runs/{run_id}/stream`): events are buffered in the
+    worker running the run, so pin a thread to one worker for joins to work.
+
+!!! info "Crashed workers and their runs"
+    A run whose worker dies without a graceful shutdown is marked `error` once
+    its heartbeat is `orphaned_run_timeout_seconds` (default 120 s) stale: at
+    startup or on any later sweep tick, by the restarted process or any
+    surviving worker sharing the database. Postgres judges staleness by the
+    database clock; with SQLite or MongoDB shared across hosts, keep worker
+    clocks synchronised (NTP). See
+    [Orphaned runs](../concepts/threads-and-runs.md#orphaned-runs).
 
 ## Use Postgres
 

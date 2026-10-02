@@ -2,7 +2,7 @@
 
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_CORS_METHODS: Final[list[str]] = [
     "GET",
@@ -50,6 +50,61 @@ class SkeinoSettings(BaseModel):
         "(durable graph state, ephemeral thread/run list) fails loudly at startup.",
     )
 
+    # Run liveness
+    run_heartbeat_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="How often each process refreshes the updated_at of the "
+        "runs it is executing, marking them alive.",
+    )
+    orphaned_run_timeout_seconds: float | None = Field(
+        default=120.0,
+        gt=0,
+        description="A pending/running run whose updated_at is older than this "
+        "has lost the process executing it (crash, OOM kill, restart) and is "
+        "marked error, freeing its thread. Swept at startup and every "
+        "run_heartbeat_seconds. Must be at least three times run_heartbeat_seconds, "
+        "so one failed heartbeat pass is tolerated (default: 4 beats). Workers "
+        "sharing a SQLite/MongoDB store need synchronised clocks. None disables "
+        "the sweep.",
+    )
+
+    # Streaming
+    resumable_stream_ttl_seconds: float = Field(
+        default=600.0,
+        ge=0,
+        description="How long a finished run created with stream_resumable=true "
+        "keeps its buffered SSE events for replay via "
+        "GET /threads/{thread_id}/runs/{run_id}/stream. Events are buffered in "
+        "process memory for the run's whole lifetime plus this window, subject "
+        "to the configured event and byte limits and to "
+        "resumable_stream_max_retained_runs, which can evict a finished buffer "
+        "early. 0 drops them as soon as the "
+        "run ends (a join then gets the final state only).",
+    )
+    resumable_stream_max_retained_runs: int = Field(
+        default=16,
+        ge=0,
+        description="Maximum finished resumable streams retained per worker. "
+        "Oldest finished buffers are evicted first; joins then return final "
+        "state instead of replay. 0 disables finished history retention.",
+    )
+    resumable_stream_max_events: int = Field(
+        default=10_000,
+        ge=1,
+        description="Maximum number of recent SSE events retained per resumable "
+        "thread-scoped run for replay. Older events are evicted; a join whose "
+        "Last-Event-ID predates the retained window returns 409.",
+    )
+    resumable_stream_max_bytes: int = Field(
+        default=16 * 1024 * 1024,
+        ge=1,
+        description="Maximum encoded SSE frame bytes retained per resumable "
+        "thread-scoped run. Older events are evicted when this budget is "
+        "exceeded; a join whose Last-Event-ID predates the retained window "
+        "returns 409.",
+    )
+
     # Assistant identity
     default_assistant_id: str | None = Field(
         default=None,
@@ -71,3 +126,14 @@ class SkeinoSettings(BaseModel):
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
     cors_methods: list[str] = Field(default_factory=lambda: list(DEFAULT_CORS_METHODS))
     cors_headers: list[str] = Field(default_factory=lambda: ["*"])
+
+    @model_validator(mode="after")
+    def _orphan_timeout_outlasts_heartbeat(self) -> "SkeinoSettings":
+        timeout = self.orphaned_run_timeout_seconds
+        if timeout is not None and timeout < 3 * self.run_heartbeat_seconds:
+            raise ValueError(
+                "orphaned_run_timeout_seconds must be at least three times "
+                "run_heartbeat_seconds, or one failed heartbeat pass can get a "
+                "live run failed."
+            )
+        return self

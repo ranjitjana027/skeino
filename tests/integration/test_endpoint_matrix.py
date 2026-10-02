@@ -149,6 +149,9 @@ HAPPY: dict[Route, Callable[[World], httpx.Response]] = {
     ("GET", f"{T}/runs/{{run_id}}/join"): lambda w: w.client.get(
         f"/threads/{w.thread_id}/runs/{w.run_id}/join"
     ),
+    ("GET", f"{T}/runs/{{run_id}}/stream"): lambda w: w.client.get(
+        f"/threads/{w.thread_id}/runs/{w.run_id}/stream"
+    ),
     ("POST", f"{T}/runs/{{run_id}}/cancel"): _cancel_in_flight,
     ("DELETE", f"{T}/runs/{{run_id}}"): lambda w: w.client.delete(
         f"/threads/{w.thread_id}/runs/{w.run_id}"
@@ -159,7 +162,11 @@ HAPPY: dict[Route, Callable[[World], httpx.Response]] = {
     ("POST", "/runs/batch"): lambda w: w.client.post("/runs/batch", json=[RUN, RUN]),
 }
 
-STREAMING = {("POST", f"{T}/runs/stream"), ("POST", "/runs/stream")}
+STREAMING = {
+    ("GET", f"{T}/runs/{{run_id}}/stream"),
+    ("POST", f"{T}/runs/stream"),
+    ("POST", "/runs/stream"),
+}
 
 
 def _openapi_routes(client: TestClient) -> dict[Route, set[int]]:

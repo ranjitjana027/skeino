@@ -14,8 +14,12 @@ before spawning a new run.
 """
 
 import asyncio
+import logging
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Coroutine
+
+logger = logging.getLogger(__name__)
 
 
 class BackgroundRunRegistry:
@@ -24,6 +28,8 @@ class BackgroundRunRegistry:
     def __init__(self) -> None:
         """Initialise empty task / active-run / admission-lock maps."""
         self._tasks: dict[str, asyncio.Task[Any]] = {}
+        self._completion: dict[str, asyncio.Future[None]] = {}
+        self._finalizer_tasks: set[asyncio.Task[None]] = set()
         self._active_by_thread: dict[str, set[str]] = {}
         self._admission_locks: dict[str, asyncio.Lock] = {}
 
@@ -47,9 +53,10 @@ class BackgroundRunRegistry:
         A task-backed run that has finished is pruned synchronously here rather
         than waiting for its ``add_done_callback`` to fire on the next loop tick
         — otherwise a just-completed run could still read as active and make an
-        admission decision (e.g. ``reject``) 409 incorrectly. Externally
-        registered runs (live streams, no task) stay active until explicitly
-        unregistered.
+        admission decision (e.g. ``reject``) 409 incorrectly. A finished task
+        whose finalizer is still pending stays active until finalization ends.
+        An externally registered run with no task (a streaming run's reserved
+        slot) stays active until a task spawned under its id finishes.
         """
         run_ids = self._active_by_thread.get(thread_id)
         if not run_ids:
@@ -57,7 +64,7 @@ class BackgroundRunRegistry:
         active: set[str] = set()
         for run_id in list(run_ids):
             task = self._tasks.get(run_id)
-            if task is not None and task.done():
+            if task is not None and task.done() and run_id not in self._completion:
                 self._forget(thread_id, run_id)
                 continue
             active.add(run_id)
@@ -76,7 +83,12 @@ class BackgroundRunRegistry:
         return self._tasks.get(run_id)
 
     def spawn(
-        self, thread_id: str, run_id: str, coro: Coroutine[Any, Any, Any]
+        self,
+        thread_id: str,
+        run_id: str,
+        coro: Coroutine[Any, Any, Any],
+        *,
+        finalize: Callable[[], Awaitable[None]] | None = None,
     ) -> asyncio.Task[Any]:
         """Schedule ``coro`` as a tracked background task and return it.
 
@@ -86,20 +98,64 @@ class BackgroundRunRegistry:
         task = asyncio.create_task(coro)
         self._tasks[run_id] = task
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
-        task.add_done_callback(lambda _t: self._forget(thread_id, run_id))
+        if finalize is None:
+            # A task may hand its run to a successor it spawns under the same
+            # id (a streaming run's admission starts its producer): only forget
+            # the run if this task is still the one tracked for it.
+            task.add_done_callback(
+                lambda done: (
+                    self._forget(thread_id, run_id)
+                    if self._tasks.get(run_id) is done
+                    else None
+                )
+            )
+        else:
+            completion = asyncio.get_running_loop().create_future()
+            self._completion[run_id] = completion
+
+            # A failure is logged here and re-raised by wait()/cancel(); mark it
+            # retrieved so an unawaited failure doesn't warn again at GC.
+            completion.add_done_callback(
+                lambda f: None if f.cancelled() else f.exception()
+            )
+
+            async def finish() -> None:
+                try:
+                    await finalize()
+                except asyncio.CancelledError:
+                    if not completion.done():
+                        completion.cancel()
+                    raise
+                except BaseException as exc:
+                    logger.error("Finalizing run %s failed", run_id, exc_info=exc)
+                    if not completion.done():
+                        completion.set_exception(exc)
+                    if not isinstance(exc, Exception):
+                        raise
+                else:
+                    if not completion.done():
+                        completion.set_result(None)
+                finally:
+                    self._completion.pop(run_id, None)
+                    self._forget(thread_id, run_id)
+
+            def start_finalizer(_task: asyncio.Task[Any]) -> None:
+                cleanup = asyncio.create_task(finish())
+                self._finalizer_tasks.add(cleanup)
+                cleanup.add_done_callback(self._finalizer_tasks.discard)
+
+            task.add_done_callback(start_finalizer)
         return task
 
     def register_external(self, thread_id: str, run_id: str) -> None:
-        """Mark a run active without a tracked task (e.g. a live streaming run).
+        """Mark a run active without a tracked task.
 
-        Such a run counts toward admission (so ``reject`` sees it) but has no
-        cancellable task — :meth:`cancel` returns ``False`` for it.
+        Used to reserve a streaming run's slot under the admission lock, before
+        its cancellable admission task is spawned. Such a run counts toward
+        admission (so ``reject`` sees it) but has no cancellable task —
+        :meth:`cancel` returns ``False`` for it.
         """
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
-
-    def unregister_external(self, thread_id: str, run_id: str) -> None:
-        """Drop a run registered with :meth:`register_external`."""
-        self._forget(thread_id, run_id)
 
     def _forget(self, thread_id: str, run_id: str) -> None:
         """Drop a finished run from the task / active maps."""
@@ -110,6 +166,25 @@ class BackgroundRunRegistry:
             if not active:
                 del self._active_by_thread[thread_id]
 
+    async def wait(self, run_id: str) -> asyncio.Task[Any] | None:
+        """Wait for execution and finalization without cancelling either.
+
+        Follows a hand-off: when the awaited task spawned a successor under
+        the same run id, that one is awaited too. Returns the last task
+        awaited (the one that ran the run), or ``None`` if none was tracked.
+        """
+        awaited: asyncio.Task[Any] | None = None
+        completion: asyncio.Future[None] | None = None
+        while (task := self._tasks.get(run_id)) is not None and task is not awaited:
+            awaited = task
+            # Read per task, before it ends: its finalizer drops the entry, and
+            # a successor registers its own at spawn.
+            completion = self._completion.get(run_id)
+            await asyncio.wait({task})
+        if completion is not None:
+            await asyncio.shield(completion)
+        return awaited
+
     async def cancel(self, run_id: str, *, wait: bool) -> bool:
         """Cancel a live run task. Return whether one existed.
 
@@ -119,17 +194,29 @@ class BackgroundRunRegistry:
         into this coroutine.
         """
         task = self._tasks.get(run_id)
+        completion = self._completion.get(run_id)
         if task is None:
             return False
-        task.cancel()
+        if not task.cancelling():
+            task.cancel()
         if wait:
             await asyncio.wait({task})
+            if completion is not None:
+                await asyncio.shield(completion)
         return True
 
     async def shutdown(self) -> None:
         """Cancel and await every tracked task (runtime shutdown)."""
         tasks = list(self._tasks.values())
+        completions = list(self._completion.values())
         for task in tasks:
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
         if tasks:
             await asyncio.wait(set(tasks))
+        if completions:
+            # Shield the shared futures: cancelling shutdown must not cancel
+            # them for wait()/cancel() callers. Failures are already logged.
+            await asyncio.gather(
+                *(asyncio.shield(c) for c in completions), return_exceptions=True
+            )

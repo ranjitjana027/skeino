@@ -74,6 +74,12 @@ class FakeGraph:
         # completion immediately (the default cooperative behaviour).
         self.invoke_gate: asyncio.Event | None = None
         self.invoke_started: asyncio.Event = asyncio.Event()
+        # Same for streaming: with ``stream_gate`` set, ``astream`` yields its
+        # first event, signals ``stream_started``, and parks on the gate before
+        # the rest — a streaming run observably mid-flight, for disconnect /
+        # join / Last-Event-ID tests.
+        self.stream_gate: asyncio.Event | None = None
+        self.stream_started: asyncio.Event = asyncio.Event()
         # --- Paused-for-human-input mode ---
         # Interrupts reported by every snapshot, as a real graph does while it
         # waits on ``interrupt()``. Lets tests exercise what a run that ends
@@ -251,8 +257,11 @@ class FakeGraph:
             raise pending_error
 
         self._fire_usage_callbacks(config)
-        for event in events:
+        for index, event in enumerate(events):
             yield event
+            if index == 0 and self.stream_gate is not None:
+                self.stream_started.set()
+                await self.stream_gate.wait()
         state["messages"] = final_messages
         self.history_by_thread.setdefault(thread_id, []).append(
             self._snapshot(thread_id, state)
@@ -356,8 +365,12 @@ class FakeGraph:
 def build_test_app(
     *,
     assistant_id: str = "test_agent",
+    **settings_overrides: Any,
 ) -> tuple[FastAPI, FakeGraph]:
-    """Build a skeino FastAPI app backed by a fresh FakeGraph + in-memory store."""
+    """Build a skeino FastAPI app backed by a fresh FakeGraph + in-memory store.
+
+    ``settings_overrides`` are passed through to :class:`SkeinoSettings`.
+    """
     graph = FakeGraph()
     settings = SkeinoSettings(
         default_assistant_id=assistant_id,
@@ -365,6 +378,7 @@ def build_test_app(
         assistant_description="skeino test agent",
         server_version="0.0.1-test",
         welcome_message="hello",
+        **settings_overrides,
     )
     app = create_app(
         graphs={assistant_id: lambda _ckpt: graph},

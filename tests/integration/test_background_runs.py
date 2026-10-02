@@ -7,6 +7,8 @@ parks ``ainvoke`` until released, making the in-flight window deterministic.
 """
 
 import asyncio
+from typing import Any
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -277,9 +279,9 @@ async def test_shutdown_marks_queued_run_interrupted() -> None:
     assert (await run_ops.get_run(_THREAD, str(queued.run_id))).status == "interrupted"
 
 
-async def test_join_live_streaming_run_is_409() -> None:
-    # A live streaming run is registered as external (no joinable task); joining
-    # it must fail fast rather than return a non-terminal snapshot.
+async def test_join_streaming_run_returns_its_output() -> None:
+    # A streaming run executes in a tracked task (it publishes to its event
+    # stream), so /join can await it like a background run and return output.
     app, _ = build_test_app()
     async with app.router.lifespan_context(app):
         run_ops = app.state.skeino.run_ops
@@ -290,13 +292,35 @@ async def test_join_live_streaming_run_is_409() -> None:
             stream_mode="values",
         )
         run, stream = await run_ops.create_streaming_run(_THREAD, request)
-        await stream.__anext__()  # start the generator (emit metadata)
-        try:
-            with pytest.raises(HTTPException) as exc:
-                await run_ops.join_run(_THREAD, str(run.run_id))
-            assert exc.value.status_code == 409
-        finally:
-            await stream.aclose()  # runs the generator's finally → releases lock
+        await stream.__anext__()  # metadata
+        output = await run_ops.join_run(_THREAD, str(run.run_id))
+        assert output == {"messages": [{"type": "ai", "content": "streamed"}]}
+        await stream.aclose()
+
+
+async def test_join_in_flight_run_without_task_is_409() -> None:
+    # A row that says ``running`` but has no task in this process (another
+    # worker, or stranded by a crash) cannot be joined: fail fast rather than
+    # return a non-terminal snapshot.
+    app, _ = build_test_app()
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        run = await run_ops.create_run(_THREAD, _req())
+        await run_ops.join_run(_THREAD, str(run.run_id))
+        stranded = await run_ops._metadata_store.create_run(
+            str(uuid4()),
+            _THREAD,
+            "test_agent",
+            metadata={},
+            kwargs={},
+            multitask_strategy="enqueue",
+        )
+        await run_ops._metadata_store.update_run_status(
+            str(stranded["run_id"]), "running"
+        )
+        with pytest.raises(HTTPException) as exc:
+            await run_ops.join_run(_THREAD, str(stranded["run_id"]))
+        assert exc.value.status_code == 409
 
 
 async def test_join_returns_404_when_run_deleted_concurrently() -> None:
@@ -324,3 +348,40 @@ async def test_shutdown_cancels_in_flight_runs() -> None:
     # Lifespan exit cancelled the background task via run_ops.shutdown().
     final = await run_ops.get_run(_THREAD, str(run.run_id))
     assert final.status == "interrupted"
+
+
+async def test_join_refreshes_a_status_that_finished_while_it_was_read() -> None:
+    # The run finishes, and its task is forgotten, while join's first status
+    # read is in flight: a stale ``running`` snapshot must not become a 409.
+    app, graph = build_test_app()
+    async with app.router.lifespan_context(app):
+        ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        run = await ops.create_run(
+            _THREAD,
+            RunCreateRequest(
+                assistant_id="test_agent",
+                input={"messages": []},
+                if_not_exists="create",
+            ),
+        )
+        await graph.invoke_started.wait()
+        get_run = ops.get_run
+        calls = 0
+
+        async def finishes_during_read(thread_id: str, run_id: str) -> Any:
+            nonlocal calls
+            calls += 1
+            snapshot = await get_run(thread_id, run_id)
+            if calls == 1:
+                task = ops._registry.get(run_id)
+                graph.invoke_gate.set()
+                await asyncio.wait({task})
+                while ops._registry.get(run_id) is not None:
+                    await asyncio.sleep(0)
+            return snapshot
+
+        ops.get_run = finishes_during_read
+        output = await ops.join_run(str(run.thread_id), str(run.run_id))
+        assert calls == 2
+        assert isinstance(output, dict) and output.get("messages")
