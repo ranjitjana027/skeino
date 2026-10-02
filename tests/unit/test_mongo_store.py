@@ -45,13 +45,15 @@ async def test_setup_uses_uri_database(monkeypatch: pytest.MonkeyPatch) -> None:
         await store.aclose()
 
 
+@pytest.mark.parametrize("marks_busy", [True, False])
 async def test_release_busy_thread_loses_to_a_run_started_after_its_check(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, marks_busy: bool
 ) -> None:
     # #140: threads and runs are separate collections, so the in-flight check
     # and the write are two operations. A run another worker starts between
-    # them sets the thread ``busy`` (bumping its status version): the
-    # compare-and-set must then fail instead of overwriting that status.
+    # them bumps the thread's version (on insert, and again when it marks the
+    # thread ``busy``): the compare-and-set must then fail. Without the busy
+    # write too: a queued run waiting for the thread is still in flight.
     import motor.motor_asyncio
 
     monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
@@ -76,7 +78,8 @@ async def test_release_busy_thread_loses_to_a_run_started_after_its_check(
                 kwargs={},
                 multitask_strategy="enqueue",
             )
-            await store.update_thread(tid, status_value="busy")
+            if marks_busy:
+                await store.update_thread(tid, status_value="busy")
             return found
 
         store._runs.find_one = racing

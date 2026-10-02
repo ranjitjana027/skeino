@@ -169,7 +169,7 @@ class MongoMetadataStore:
         change: dict[str, Any] = {"$set": updates}
         if status_value is not None:
             # Lets ``release_busy_thread`` detect a status written meanwhile.
-            change["$inc"] = {"status_version": 1}
+            change["$inc"] = {"version": 1}
         await self._threads.update_one({"_id": thread_id}, change)
 
     async def release_busy_thread(
@@ -184,13 +184,16 @@ class MongoMetadataStore:
         Threads and runs are separate collections, so the check cannot be one
         atomic write without a multi-document transaction (which needs a
         replica set). Instead the write is a compare-and-set on the thread's
-        ``status_version``, which every status write bumps. A run marks its
-        thread ``busy`` only after its row exists, so a run created after the
-        in-flight check either bumps the version first (and this write loses)
-        or sets ``busy`` after it (and wins).
+        ``version``, which every status write bumps and :meth:`create_run`
+        bumps right after inserting the run. The version is read before the
+        in-flight check, so a run inserted after the check bumps it before
+        this write (and the write loses) or after it (the run then counts as
+        created after the release). The one gap is a process dying between a
+        run's insert and its bump: that ``pending`` row is treated as created
+        after the release, and the orphan sweep fails it once it goes stale.
         """
         doc = await self._threads.find_one(
-            {"_id": thread_id, "status": "busy"}, {"status_version": 1}
+            {"_id": thread_id, "status": "busy"}, {"version": 1}
         )
         if doc is None:
             return False
@@ -212,9 +215,9 @@ class MongoMetadataStore:
                 "_id": thread_id,
                 "status": "busy",
                 # ``None`` also matches a thread written before the counter.
-                "status_version": doc.get("status_version"),
+                "version": doc.get("version"),
             },
-            {"$set": updates, "$inc": {"status_version": 1}},
+            {"$set": updates, "$inc": {"version": 1}},
         )
         return bool(result.matched_count)
 
@@ -284,6 +287,9 @@ class MongoMetadataStore:
             "error": None,
         }
         await self._runs.insert_one(doc)
+        # After the insert, so ``release_busy_thread`` either sees this run in
+        # flight or loses its compare-and-set to this bump.
+        await self._threads.update_one({"_id": thread_id}, {"$inc": {"version": 1}})
         return self._run_row(doc)
 
     async def update_run_status(
