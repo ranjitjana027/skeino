@@ -1,20 +1,19 @@
-"""In-process registry of background run tasks.
+"""In-process concurrency primitives: background run tasks and per-thread locks.
 
-Each run executes inside an :class:`asyncio.Task` tracked here so that the
-server can return immediately (background create), await a task (wait / join),
-or cancel it (cancel + multitask interrupt/rollback). The map is process-local
-— the same single-process scope assumption as :class:`ThreadLockManager`; a
-clustered deployment would need a shared task service.
+Runs execute in :class:`asyncio.Task` objects tracked by
+:class:`BackgroundRunRegistry`, so the server can return immediately
+(background create), await a task (wait / join), or cancel it (cancel +
+multitask interrupt/rollback). :class:`ThreadLockManager` serialises execution
+per thread; the ``enqueue`` strategy is simply a run waiting on that lock.
 
-This is a pure concurrency primitive: it tracks task lifecycle and serialises
-admission per thread, but knows nothing about persistence or the multitask
-*policy* (reject/enqueue/interrupt/rollback). The policy lives in ``RunOps``,
-which decides — under the admission lock exposed here — what to cancel or delete
-before spawning a new run.
+Both are process-local (skeino v1 is single-process); a clustered deployment
+would need shared services. They know nothing about persistence or the
+multitask *policy*, which ``RunOps`` applies under the admission lock here.
 """
 
 import asyncio
 import logging
+from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Coroutine
@@ -220,3 +219,15 @@ class BackgroundRunRegistry:
             await asyncio.gather(
                 *(asyncio.shield(c) for c in completions), return_exceptions=True
             )
+
+
+class ThreadLockManager:
+    """Per-thread asyncio locks, created on demand."""
+
+    def __init__(self) -> None:
+        """Initialise an empty lock map."""
+        self._locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+    def get(self, thread_id: str) -> asyncio.Lock:
+        """Return the lock for ``thread_id``."""
+        return self._locks[thread_id]
