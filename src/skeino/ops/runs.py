@@ -86,19 +86,25 @@ def _parse_last_event_id(value: str | None) -> int | None:
 
     Ids are the per-run integer counter skeino assigns (``1``, ``2``, ...);
     ``-1`` — what the SDK's ``useStream`` sends to mean "from the beginning" —
-    replays everything. Blank means no header. Anything else is a client bug,
-    and replaying from a guessed position would silently drop or repeat
-    events, so it is a 422.
+    replays everything. Blank means no header. Anything else (including a
+    negative id other than ``-1``) is a client bug, and replaying from a
+    guessed position would silently drop or repeat events, so it is a 422.
     """
     if value is None or not value.strip():
         return None
     try:
-        return int(value.strip())
-    except ValueError as exc:
+        last_event_id = int(value.strip())
+    except ValueError:
+        last_event_id = None
+    if last_event_id is None or last_event_id < -1:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid Last-Event-ID {value!r}: expected an integer event id.",
-        ) from exc
+            detail=(
+                f"Invalid Last-Event-ID {value!r}: expected an event id "
+                "(a non-negative integer) or -1."
+            ),
+        )
+    return last_event_id
 
 
 def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
@@ -1170,26 +1176,51 @@ class RunOps:
             )
 
     async def liveness_pass(self, *, stale_after_seconds: float | None) -> None:
-        """One heartbeat + orphan sweep; failures are logged, never raised.
+        """One heartbeat, then one sweep; failures are logged, never raised.
 
         A metadata-store blip must neither crash startup nor stop liveness
         tracking for good: the next pass simply tries again.
         """
-        try:
-            await self.heartbeat_runs()
-            await self._retry_unsettled_threads()
-            if stale_after_seconds is not None:
-                await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
-        except Exception as exc:
-            self._log_error("Run heartbeat / orphan sweep failed: %s", exc, exc=exc)
+        await self._heartbeat_pass()
+        await self._sweep_pass(stale_after_seconds=stale_after_seconds)
 
     async def maintain_runs(
         self, *, heartbeat_seconds: float, stale_after_seconds: float | None
     ) -> None:
-        """Run :meth:`liveness_pass` every ``heartbeat_seconds``, forever."""
-        while True:
-            await asyncio.sleep(heartbeat_seconds)
-            await self.liveness_pass(stale_after_seconds=stale_after_seconds)
+        """Heartbeat and sweep every ``heartbeat_seconds``, forever.
+
+        The two run on independent schedules: a slow sweep (many stuck
+        threads, a slow store) must not delay this process's heartbeats past
+        the orphan timeout, or another worker would fail its live runs.
+        """
+
+        async def every(interval: float, step: Callable[[], Awaitable[None]]) -> None:
+            while True:
+                await asyncio.sleep(interval)
+                await step()
+
+        async with asyncio.TaskGroup() as group:
+            group.create_task(every(heartbeat_seconds, self._heartbeat_pass))
+            group.create_task(
+                every(
+                    heartbeat_seconds,
+                    lambda: self._sweep_pass(stale_after_seconds=stale_after_seconds),
+                )
+            )
+
+    async def _heartbeat_pass(self) -> None:
+        try:
+            await self.heartbeat_runs()
+        except Exception as exc:
+            self._log_error("Run heartbeat failed: %s", exc, exc=exc)
+
+    async def _sweep_pass(self, *, stale_after_seconds: float | None) -> None:
+        try:
+            await self._retry_unsettled_threads()
+            if stale_after_seconds is not None:
+                await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
+        except Exception as exc:
+            self._log_error("Run orphan sweep failed: %s", exc, exc=exc)
 
     async def _has_in_flight_runs(self, thread_id: str) -> bool:
         if self._registry.active_runs(thread_id):

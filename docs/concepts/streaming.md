@@ -129,7 +129,7 @@ finished-history limit and remain subject to the per-run event and byte caps.
 | Run finished otherwise (not resumable, retention expired, or no `Last-Event-ID`) | `200`: final `values` (no `id`) then `end` `{run_id, status}` — or `error` if the run failed |
 | Unknown thread, unknown run, or a run of another thread | `404` |
 | Run `pending`/`running` with no task or stream on this server; or `Last-Event-ID` predates retained history, or is ahead of the run's last event id | `409` |
-| `Last-Event-ID` not an integer, malformed `stream_mode` | `422` |
+| `Last-Event-ID` not an integer (or negative other than `-1`), malformed `stream_mode` | `422` |
 
 LangGraph Platform reports an unknown run as a `200` stream carrying an
 `error` event; skeino checks before the response starts so clients get a real

@@ -391,12 +391,19 @@ async def test_join_run_under_another_thread_is_404_and_leaks_nothing() -> None:
         graph.stream_gate.set()  # type: ignore[union-attr]
 
 
-async def test_join_with_malformed_last_event_id_is_422() -> None:
+@pytest.mark.parametrize("last_event_id", ["1700000000000-0", "-2"])
+async def test_join_with_malformed_last_event_id_is_422(last_event_id: str) -> None:
+    # ``-1`` is the only negative cursor (replay from the start); a smaller
+    # one must not alias to it.
     async with running_app() as (app, graph, client):
         run_id, _ = await _start_and_leave(app, graph)
-        r = await client.get(
-            f"/threads/{_THREAD}/runs/{run_id}/stream",
-            headers={"Last-Event-ID": "1700000000000-0"},
+        # Bounded: a cursor wrongly accepted would tail the gated run forever.
+        r = await asyncio.wait_for(
+            client.get(
+                f"/threads/{_THREAD}/runs/{run_id}/stream",
+                headers={"Last-Event-ID": last_event_id},
+            ),
+            timeout=5,
         )
         assert r.status_code == 422
         graph.stream_gate.set()  # type: ignore[union-attr]

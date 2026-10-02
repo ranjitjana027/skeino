@@ -395,6 +395,35 @@ async def _stuck_thread(
     return thread_id
 
 
+async def test_a_slow_sweep_does_not_delay_heartbeats(tmp_path: Path) -> None:
+    # A sweep stuck on a slow store must not hold back this process's
+    # heartbeats past the orphan timeout, or another worker fails its runs.
+    async with _running(_app(tmp_path / "skeino.db", FakeGraph())) as ops:
+        sweeping, release = asyncio.Event(), asyncio.Event()
+        heartbeats = 0
+        heartbeat = ops.heartbeat_runs
+
+        async def stalled(**_kwargs: Any) -> list[Any]:
+            sweeping.set()
+            await release.wait()
+            return []
+
+        async def counted() -> None:
+            nonlocal heartbeats
+            heartbeats += 1
+            await heartbeat()
+
+        ops._metadata_store.fail_stale_runs = stalled
+        ops.heartbeat_runs = counted
+        try:
+            await asyncio.wait_for(sweeping.wait(), timeout=5)
+            heartbeats = 0
+            await asyncio.sleep(HEARTBEAT * 6)
+            assert heartbeats >= 3
+        finally:
+            release.set()
+
+
 @pytest.mark.parametrize(
     ("run_status", "released_to"),
     [("error", "error"), ("success", "idle"), ("interrupted", "idle")],
