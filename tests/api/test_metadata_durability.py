@@ -11,6 +11,7 @@ from tests.api.conftest import (
     create_thread,
     message_contents,
     run_to_completion,
+    start_run,
 )
 
 
@@ -45,18 +46,14 @@ def test_metadata_and_state_survive_restart(metadata_backend: Backend) -> None:
 def test_failed_run_error_status_survives_restart(metadata_backend: Backend) -> None:
     with api_client(metadata_backend, graph_builder=build_failing_graph) as client:
         thread_id = create_thread(client)
-        r = client.post(
-            f"/threads/{thread_id}/runs",
-            json={
-                "assistant_id": "echo_agent",
-                "input": {"messages": [{"role": "user", "content": "boom"}]},
-            },
-        )
-        assert r.status_code == 500
+        run_id = start_run(client, thread_id, "boom")["run_id"]
+        joined = client.get(f"/threads/{thread_id}/runs/{run_id}/join")
+        assert joined.status_code == 500
+        assert "node boom" in joined.json()["detail"]
 
     with api_client(metadata_backend) as client:
         errored = client.get(f"/threads/{thread_id}/runs?status=error").json()
-        assert len(errored) == 1
+        assert [r["run_id"] for r in errored] == [run_id]
 
     if metadata_backend.name == "postgres":
         # RunModel does not expose the error message over the wire; check the
