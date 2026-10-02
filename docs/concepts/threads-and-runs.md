@@ -136,7 +136,7 @@ unless the run asked for `on_disconnect: "cancel"`. See
 A run executes in the process that started it. A graceful shutdown marks its
 in-flight runs `interrupted`, but a crash, OOM kill, or hard restart cannot. To
 keep such rows from staying `pending`/`running` forever (with pollers waiting
-on them and `enqueue` runs queued behind them), every process **heartbeats**
+on them and their thread stuck `busy`), every process **heartbeats**
 the runs it owns: every `run_heartbeat_seconds` (default 30) it bumps their
 `updated_at`. A `pending`/`running` run whose `updated_at` is older than
 `orphaned_run_timeout_seconds` (default 120) has lost its process. The sweep
@@ -203,9 +203,9 @@ already busy:
 | `rollback` | Cancel **and delete** the active run, then start the new one. |
 | `interrupt` | Cancel the active run (left `interrupted`), then start the new one. |
 
-`interrupt`/`rollback` cancel active runs, streaming ones included. A run still
-queued for the thread lock has no task yet, so a new run queues behind it
-(consistent with `enqueue`).
+`interrupt`/`rollback` cancel active runs, streaming ones included, and also a
+streaming run still queued for the thread lock or still being created: it is
+dropped before it starts, and its own `POST .../runs/stream` gets **409**.
 
 !!! info "Single-process scope"
     Locks are in-process `asyncio` locks, which is correct for a single-process

@@ -132,3 +132,64 @@ async def test_admission_serialises_per_thread() -> None:
         ["a-enter", "a-exit", "b-enter", "b-exit"],
         ["b-enter", "b-exit", "a-enter", "a-exit"],
     )
+
+
+async def test_finalizer_failure_is_logged_and_reraised_to_waiters(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reg = BackgroundRunRegistry()
+
+    async def work() -> None:
+        return None
+
+    async def finalize() -> None:
+        raise RuntimeError("cleanup broke")
+
+    reg.spawn("t", "r", work(), finalize=finalize)
+    with pytest.raises(RuntimeError, match="cleanup broke"):
+        await reg.wait("r")
+    assert "Finalizing run r failed" in caplog.text
+    assert reg.active_runs("t") == set()
+
+
+async def test_shutdown_survives_a_failing_finalizer() -> None:
+    reg = BackgroundRunRegistry()
+    finalized: list[str] = []
+
+    async def work() -> None:
+        await asyncio.sleep(100)
+
+    async def failing() -> None:
+        raise RuntimeError("cleanup broke")
+
+    async def ok() -> None:
+        finalized.append("ok")
+
+    reg.spawn("t", "bad", work(), finalize=failing)
+    reg.spawn("t", "good", work(), finalize=ok)
+    await reg.shutdown()  # does not raise
+    assert finalized == ["ok"]
+    assert reg.all_active() == []
+
+
+async def test_cancelling_shutdown_does_not_cancel_shared_finalization() -> None:
+    reg = BackgroundRunRegistry()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def work() -> None:
+        await asyncio.sleep(100)
+
+    async def finalize() -> None:
+        entered.set()
+        await release.wait()
+
+    reg.spawn("t", "r", work(), finalize=finalize)
+    stopping = asyncio.create_task(reg.shutdown())
+    await entered.wait()
+    waiter = asyncio.create_task(reg.wait("r"))
+    await asyncio.sleep(0)
+    stopping.cancel()
+    await asyncio.wait({stopping})
+    release.set()
+    await asyncio.wait_for(waiter, 1)  # completes normally, not cancelled
+    assert reg.active_runs("t") == set()

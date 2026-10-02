@@ -451,16 +451,32 @@ class StoreContract:
         run = await self._run(store, tid)
         rid = str(run["run_id"])
         await asyncio.sleep(TICK)
-        await store.update_run_status(rid, "error", error="boom")
-        failed = await self._get_run(store, tid, rid)
-        assert failed is not None
-        assert (failed["status"], failed["error"]) == ("error", "boom")
-        assert failed["updated_at"] > run["updated_at"]
-        assert failed["created_at"] == run["created_at"]
+        await store.update_run_status(rid, "running", error="boom")
+        flagged = await self._get_run(store, tid, rid)
+        assert flagged is not None
+        assert (flagged["status"], flagged["error"]) == ("running", "boom")
+        assert flagged["updated_at"] > run["updated_at"]
+        assert flagged["created_at"] == run["created_at"]
         await store.update_run_status(rid, "success")
-        retried = await self._get_run(store, tid, rid)
-        assert retried is not None
-        assert (retried["status"], retried["error"]) == ("success", None)
+        finished = await self._get_run(store, tid, rid)
+        assert finished is not None
+        assert (finished["status"], finished["error"]) == ("success", None)
+
+    @pytest.mark.parametrize("terminal", ["success", "error", "interrupted"])
+    async def test_terminal_run_status_is_final(
+        self, store: MetadataStoreProtocol, terminal: str
+    ) -> None:
+        # Another worker's orphan sweep can fail a run whose owner is merely
+        # late; the owner's later write must not flip it back.
+        tid = _tid()
+        await self._thread(store, tid)
+        rid = str((await self._run(store, tid))["run_id"])
+        await store.update_run_status(rid, terminal, error="first")
+        before = await self._get_run(store, tid, rid)
+        await asyncio.sleep(TICK)
+        for later in ("running", "success", "interrupted", "error"):
+            await store.update_run_status(rid, later, error="late")
+        assert await self._get_run(store, tid, rid) == before
 
     async def test_update_missing_run_is_a_silent_no_op(
         self, store: MetadataStoreProtocol

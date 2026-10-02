@@ -365,11 +365,11 @@ class SqliteMetadataStore:
         *,
         error: str | None = None,
     ) -> None:
-        """Update a run's status field."""
+        """Update an in-flight run's status; terminal rows are left as they are."""
         async with self._lock:
             await self._conn.execute(
                 "UPDATE app_runs SET status = ?, updated_at = ?, error = ? "
-                "WHERE run_id = ?",
+                "WHERE run_id = ? AND status IN ('pending', 'running')",
                 (status_value, _utcnow().isoformat(), error, run_id),
             )
             await self._conn.commit()
@@ -441,34 +441,42 @@ class SqliteMetadataStore:
         """Mark in-flight runs not heartbeated within the window ``error``.
 
         Staleness is decided on parsed datetimes rather than by comparing the
-        stored ISO strings in SQL, and each row is claimed with an update
-        conditioned on it still being in flight.
+        stored ISO strings in SQL. Each row is claimed with an update
+        conditioned on it still being in flight *and* on the ``updated_at`` that
+        was read, so a heartbeat from another process sharing the file that
+        lands between the scan and the claim wins. A failure rolls back every
+        claim, so no run is failed without being reported.
         """
         now = _utcnow()
         cutoff = now - timedelta(seconds=stale_after_seconds)
         excluded = set(exclude_run_ids)
         failed: list[RunRow] = []
         async with self._lock:
-            cursor = await self._conn.execute(
-                f"SELECT {_RUN_COLUMNS} FROM app_runs "  # nosec B608 - static columns
-                "WHERE status IN ('pending', 'running')"
-            )
-            candidates = [self._run_row(row) for row in await cursor.fetchall()]
-            for row in candidates:
-                run_id = str(row["run_id"])
-                if run_id in excluded or row["updated_at"] >= cutoff:
-                    continue
-                claimed = await self._conn.execute(
-                    "UPDATE app_runs SET status = 'error', error = ?, updated_at = ? "
-                    "WHERE run_id = ? AND status IN ('pending', 'running')",
-                    (error, now.isoformat(), run_id),
+            try:
+                cursor = await self._conn.execute(
+                    f"SELECT {_RUN_COLUMNS} FROM app_runs "  # nosec B608 - static columns
+                    "WHERE status IN ('pending', 'running')"
                 )
-                if claimed.rowcount:
-                    row["status"] = "error"
-                    row["error"] = error
-                    row["updated_at"] = now
-                    failed.append(row)
-            await self._conn.commit()
+                for raw in await cursor.fetchall():
+                    row = self._run_row(raw)
+                    run_id = str(row["run_id"])
+                    if run_id in excluded or row["updated_at"] >= cutoff:
+                        continue
+                    claimed = await self._conn.execute(
+                        "UPDATE app_runs SET status = 'error', error = ?, "
+                        "updated_at = ? WHERE run_id = ? AND updated_at = ? "
+                        "AND status IN ('pending', 'running')",
+                        (error, now.isoformat(), run_id, raw[4]),
+                    )
+                    if claimed.rowcount:
+                        row["status"] = "error"
+                        row["error"] = error
+                        row["updated_at"] = now
+                        failed.append(row)
+                await self._conn.commit()
+            except BaseException:
+                await self._conn.rollback()
+                raise
         return failed
 
     @staticmethod

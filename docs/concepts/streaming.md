@@ -62,8 +62,10 @@ one subscriber to the run's events. A subscriber whose 256-event delivery queue
 overflows receives an `error` event with code `subscriber_overflow` before its
 response closes. This event has no id: resumable clients can reconnect using
 their last successfully received event id, subject to the retained history
-window. Non-resumable clients cannot recover discarded output. Overflow follows
-the run's cancel/continue disconnect policy.
+window. Non-resumable clients cannot recover discarded output. Overflow is
+treated like a disconnect: it cancels the run if that subscriber would cancel on
+disconnect (`on_disconnect: "cancel"` for the creating stream,
+`cancel_on_disconnect=true` for a join).
 
 What a client disconnect does is the run
 request's `on_disconnect`:
@@ -188,9 +190,10 @@ Streaming runs are hardened against transient backend failures:
   error surfaces instead.
 - **Permanent errors fail fast.** Programming errors (`ValueError`, `KeyError`,
   …) are never retried.
-- **Disconnect handling.** The run's task releases the thread lock in a
-  `finally` block (and a done-callback, for a task cancelled before it
-  started), so neither a dropped connection nor a cancel wedges the thread.
+- **Disconnect handling.** After the run's task ends (success, error, or
+  cancelled, even before it started), a tracked finalizer releases the thread
+  lock and closes the event stream, so neither a dropped connection nor a
+  cancel wedges the thread.
 
 ## Serialization on the wire
 
@@ -219,7 +222,7 @@ are stringified, and arbitrary objects fall back to their public attributes.
 | `events` | `events` mode | raw LangGraph v2 event |
 | `updates` / `messages` / `messages-tuple` / `tasks` / `checkpoints` / `debug` / `custom` | matching mode | LangGraph chunk for that mode (`updates` deltas are output-key filtered) |
 | `end` | terminal, success / cancelled | `{run_id, status: "success", usage: {total_tokens}}`, or `{run_id, status: "interrupted"}` |
-| `error` | terminal, failure | `{detail, run_id}` |
+| `error` | terminal, failure | `{detail, run_id}`; a subscriber that fell behind gets `{code: "subscriber_overflow", detail, run_id}` with no `id` |
 
 See [Threads & runs](threads-and-runs.md) for run lifecycle and the
 [HTTP reference](../api-reference/http.md) for the request schema.

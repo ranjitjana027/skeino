@@ -42,8 +42,9 @@ class ThreadRow(TypedDict):
 
 
 #: Run statuses that mean "not finished yet": the rows a heartbeat keeps alive
-#: and an orphan sweep may fail.
-IN_FLIGHT_RUN_STATUSES: Final[frozenset[str]] = frozenset({"pending", "running"})
+#: and an orphan sweep may fail. The SQL stores spell the same set as
+#: ``status IN ('pending', 'running')``; the store contract pins them together.
+IN_FLIGHT_RUN_STATUSES: Final[frozenset[RunStatus]] = frozenset({"pending", "running"})
 
 
 class RunRow(TypedDict):
@@ -124,7 +125,12 @@ class MetadataStoreProtocol(Protocol):
         *,
         error: str | None = None,
     ) -> None:
-        """Update the persisted run status."""
+        """Update the persisted status of an in-flight run.
+
+        Only a ``pending``/``running`` row is updated: a terminal status is
+        final. Once another process's orphan sweep has failed a run, its late
+        owner cannot flip it back to ``success`` or ``interrupted``.
+        """
         ...
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
@@ -169,5 +175,10 @@ class MetadataStoreProtocol(Protocol):
         stopped heartbeating), and it is not in ``exclude_run_ids`` (the
         caller's own live runs). Each row is claimed with a conditional update,
         so concurrent sweepers never both report the same run.
+
+        Heartbeats and the staleness cutoff must come from one clock: Postgres
+        uses the database's ``NOW()``; the SQLite and MongoDB stores use the
+        writing process's clock, so workers sharing them need synchronised
+        clocks.
         """
         ...

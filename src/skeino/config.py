@@ -63,8 +63,10 @@ class SkeinoSettings(BaseModel):
         description="A pending/running run whose updated_at is older than this "
         "has lost the process executing it (crash, OOM kill, restart) and is "
         "marked error, freeing its thread. Swept at startup and every "
-        "run_heartbeat_seconds. Must exceed run_heartbeat_seconds with room for "
-        "a missed beat or two (default: 4 beats). None disables the sweep.",
+        "run_heartbeat_seconds. Must be at least three times run_heartbeat_seconds, "
+        "so one failed heartbeat pass is tolerated (default: 4 beats). Workers "
+        "sharing a SQLite/MongoDB store need synchronised clocks. None disables "
+        "the sweep.",
     )
 
     # Streaming
@@ -75,7 +77,9 @@ class SkeinoSettings(BaseModel):
         "keeps its buffered SSE events for replay via "
         "GET /threads/{thread_id}/runs/{run_id}/stream. Events are buffered in "
         "process memory for the run's whole lifetime plus this window, subject "
-        "to the configured event and byte limits. 0 drops them as soon as the "
+        "to the configured event and byte limits and to "
+        "resumable_stream_max_retained_runs, which can evict a finished buffer "
+        "early. 0 drops them as soon as the "
         "run ends (a join then gets the final state only).",
     )
     resumable_stream_max_retained_runs: int = Field(
@@ -126,10 +130,10 @@ class SkeinoSettings(BaseModel):
     @model_validator(mode="after")
     def _orphan_timeout_outlasts_heartbeat(self) -> "SkeinoSettings":
         timeout = self.orphaned_run_timeout_seconds
-        if timeout is not None and timeout <= 2 * self.run_heartbeat_seconds:
+        if timeout is not None and timeout < 3 * self.run_heartbeat_seconds:
             raise ValueError(
-                "orphaned_run_timeout_seconds must exceed twice "
-                "run_heartbeat_seconds, or live runs are failed after one late "
-                "heartbeat."
+                "orphaned_run_timeout_seconds must be at least three times "
+                "run_heartbeat_seconds, or one failed heartbeat pass can get a "
+                "live run failed."
             )
         return self

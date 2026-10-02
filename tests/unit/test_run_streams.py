@@ -123,6 +123,39 @@ async def test_slow_subscriber_is_detached_when_its_bounded_queue_fills() -> Non
         await slow.__anext__()
 
 
+@pytest.mark.parametrize("after", [None, -1], ids=["live-tail", "replay-all"])
+async def test_resumable_subscriber_catches_up_from_history_after_overflow(
+    after: int | None,
+) -> None:
+    # A long replay (or a slow client) lets the live queue fill; with the
+    # events still retained, the subscriber resumes from history, losing none.
+    stream = RunEventStream("t", "r", resumable=True)
+    for _ in range(300):
+        stream.publish("values", {})
+    joined = stream.subscribe(after=after)
+    first = await joined.__anext__() if after is not None else None
+    for _ in range(300):
+        stream.publish("values", {})
+    stream.publish("end", {"status": "success"})
+    stream.close(now=0.0)
+    rest = [event.event_id async for event in joined]
+    got = ([first.event_id] if first is not None else []) + rest
+    start = 1 if after is not None else 301
+    assert got == list(range(start, 602))
+    assert stream.subscriber_count == 0
+
+
+async def test_resumable_subscriber_overflows_once_missed_events_are_evicted() -> None:
+    stream = RunEventStream("t", "r", resumable=True, max_history_events=300)
+    joined = stream.subscribe(after=None)
+    for _ in range(600):  # overflows the queue and evicts what it missed
+        stream.publish("values", {})
+    with pytest.raises(SubscriberOverflowError):
+        async for _ in joined:
+            pass
+    assert stream.subscriber_count == 0
+
+
 async def test_close_preserves_all_events_when_queue_is_exactly_full() -> None:
     stream = RunEventStream("t", "r", resumable=False)
     slow = stream.subscribe(after=None)

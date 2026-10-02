@@ -567,14 +567,14 @@ class MetadataStore:
         *,
         error: str | None = None,
     ) -> None:
-        """Update the persisted run status."""
+        """Update an in-flight run's status; terminal rows are left as they are."""
         async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     """
                     UPDATE app_runs
                     SET status = %s, updated_at = NOW(), error = %s
-                    WHERE run_id = %s
+                    WHERE run_id = %s AND status IN ('pending', 'running')
                     """,
                     (status_value, error, run_id),
                 )

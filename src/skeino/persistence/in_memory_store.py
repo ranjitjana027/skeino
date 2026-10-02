@@ -158,9 +158,9 @@ class InMemoryMetadataStore:
         *,
         error: str | None = None,
     ) -> None:
-        """Update a run's status field."""
+        """Update an in-flight run's status; terminal rows are left as they are."""
         row = self._runs.get(run_id)
-        if row is None:
+        if row is None or row["status"] not in IN_FLIGHT_RUN_STATUSES:
             return
         row["status"] = status_value
         row["updated_at"] = _utcnow()

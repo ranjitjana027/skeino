@@ -65,11 +65,11 @@ Prefix: `/threads/{thread_id}`
 | --- | --- | --- | --- | --- |
 | `POST` | `/threads/{thread_id}/runs` | `RunCreateRequest` | `RunModel` | **Background** create — returns immediately with a `pending`/`running` run. Header: `Location`. |
 | `POST` | `/threads/{thread_id}/runs/wait` | `RunCreateRequest` | output values | Run to completion and return the final graph state values (plus `__interrupt__` if it ended parked). Header: `X-Tokens-Used`. |
-| `POST` | `/threads/{thread_id}/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`). See [Streaming](../concepts/streaming.md). |
+| `POST` | `/threads/{thread_id}/runs/stream` | `RunCreateRequest` | SSE stream | Stream events (`text/event-stream`). `409` if an `interrupt`/`rollback` run supersedes it while it is still queued. See [Streaming](../concepts/streaming.md). |
 | `GET` | `/threads/{thread_id}/runs` | — | `list[RunModel]` | List runs. Query: `limit`, `offset`, `status`. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}` | — | `RunModel` | Fetch a single run. |
 | `GET` | `/threads/{thread_id}/runs/{run_id}/join` | — | output values | Wait for a run to finish and return the final graph state values (plus `__interrupt__` if it ended parked). |
-| `GET` | `/threads/{thread_id}/runs/{run_id}/stream` | — | SSE stream | **Join** a run's event stream (SDK `runs.joinStream`). Replays retained events after the `Last-Event-ID` header (`-1` = from the start if still retained; needs `stream_resumable: true`), then tails live events. Query: `stream_mode` (single mode, JSON array, or repeated), `cancel_on_disconnect` (default `false`). `404` unknown thread/run, `409` run in flight with no stream on this server or cursor predates retained history, `422` malformed `Last-Event-ID`/`stream_mode`. See [Streaming](../concepts/streaming.md#joining-a-run-stream). |
+| `GET` | `/threads/{thread_id}/runs/{run_id}/stream` | — | SSE stream | **Join** a run's event stream (SDK `runs.joinStream`). Replays retained events after the `Last-Event-ID` header (`-1` = from the start if still retained; needs `stream_resumable: true`), then tails live events. Query: `stream_mode` (single mode, JSON array, or repeated), `cancel_on_disconnect` (default `false`). `404` unknown thread/run, `409` run `pending`/`running` with no task or stream on this server, or cursor predates retained history, `422` malformed `Last-Event-ID`/`stream_mode`. See [Streaming](../concepts/streaming.md#joining-a-run-stream). |
 | `POST` | `/threads/{thread_id}/runs/{run_id}/cancel` | — | `204` | Cancel an in-flight run. Query: `action` (`interrupt`\|`rollback`), `wait`. |
 | `DELETE` | `/threads/{thread_id}/runs/{run_id}` | — | `204` | Delete a terminal run row (`409` if still active). |
 

@@ -7,6 +7,7 @@ parks ``ainvoke`` until released, making the in-flight window deterministic.
 """
 
 import asyncio
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -305,9 +306,19 @@ async def test_join_in_flight_run_without_task_is_409() -> None:
         run_ops = app.state.skeino.run_ops
         run = await run_ops.create_run(_THREAD, _req())
         await run_ops.join_run(_THREAD, str(run.run_id))
-        await run_ops._metadata_store.update_run_status(str(run.run_id), "running")
+        stranded = await run_ops._metadata_store.create_run(
+            str(uuid4()),
+            _THREAD,
+            "test_agent",
+            metadata={},
+            kwargs={},
+            multitask_strategy="enqueue",
+        )
+        await run_ops._metadata_store.update_run_status(
+            str(stranded["run_id"]), "running"
+        )
         with pytest.raises(HTTPException) as exc:
-            await run_ops.join_run(_THREAD, str(run.run_id))
+            await run_ops.join_run(_THREAD, str(stranded["run_id"]))
         assert exc.value.status_code == 409
 
 

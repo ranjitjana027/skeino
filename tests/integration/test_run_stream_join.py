@@ -25,6 +25,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -420,8 +421,18 @@ async def test_join_in_flight_run_with_no_stream_in_process_is_409() -> None:
         run_ops = app.state.skeino.run_ops
         run = await run_ops.create_run(_THREAD, _request())
         await run_ops.join_run(_THREAD, str(run.run_id))
-        await run_ops._metadata_store.update_run_status(str(run.run_id), "running")
-        r = await client.get(f"/threads/{_THREAD}/runs/{run.run_id}/stream")
+        stranded = await run_ops._metadata_store.create_run(
+            str(uuid4()),
+            _THREAD,
+            "test_agent",
+            metadata={},
+            kwargs={},
+            multitask_strategy="enqueue",
+        )
+        await run_ops._metadata_store.update_run_status(
+            str(stranded["run_id"]), "running"
+        )
+        r = await client.get(f"/threads/{_THREAD}/runs/{stranded['run_id']}/stream")
         assert r.status_code == 409
 
 
@@ -538,6 +549,7 @@ async def test_overflow_reports_error_and_honors_disconnect_policy(
         assert frames[0][0] is None
         assert frames[0][1] == "error"
         assert frames[0][2]["code"] == "subscriber_overflow"
+        assert frames[0][2]["run_id"] == str(run.run_id)
         assert not stream.closed
         if cancel:
             await asyncio.wait({task})
@@ -610,8 +622,9 @@ async def test_overflow_cancels_once_while_interruption_write_is_pending() -> No
             await persist(run_id, thread_id)
 
         ops._mark_run_interrupted = delayed_interrupt
+        # Non-resumable: a resumable subscriber recovers from history instead.
         run, events = await ops.create_streaming_run(
-            _THREAD, _request(on_disconnect="cancel")
+            _THREAD, _request(on_disconnect="cancel", stream_resumable=False)
         )
         await events.__anext__()
         await graph.stream_started.wait()
@@ -678,9 +691,66 @@ async def test_interrupt_cancels_stream_while_waiting_for_execution_lock() -> No
         lock.release()
         run, events = await asyncio.wait_for(replacement, 5)
         await _drain(events)
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(HTTPException) as superseded:
             await queued
+        assert superseded.value.status_code == 409
+        assert "superseded" in superseded.value.detail
         assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
+        assert not lock.locked()
+
+
+async def test_interrupt_supersedes_a_stream_while_its_row_is_being_inserted() -> None:
+    # The lock is free but the row insert is slow: the run still has no
+    # producer task, yet ``interrupt`` must cancel it rather than queue behind.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+        inserting, never = asyncio.Event(), asyncio.Event()
+
+        async def slow_first_insert(*args: Any, **kwargs: Any) -> Any:
+            if not inserting.is_set():
+                inserting.set()
+                await never.wait()
+            return await create_run(*args, **kwargs)
+
+        store.create_run = slow_first_insert
+        queued = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="enqueue"))
+        )
+        await inserting.wait()
+        graph.stream_gate = None
+        run, events = await asyncio.wait_for(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="interrupt")),
+            5,
+        )
+        await _drain(events)
+        with pytest.raises(HTTPException) as superseded:
+            await queued
+        assert superseded.value.status_code == 409
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
+        assert not ops._lock_manager.get(_THREAD).locked()
+
+
+async def test_join_reports_error_when_final_state_cannot_be_read() -> None:
+    # A checkpointer outage must not turn into a clean, empty "success" stream.
+    async with running_app() as (app, graph, client):
+        run_ops = app.state.skeino.run_ops
+        run, original = await run_ops.create_streaming_run(
+            _THREAD, _request(stream_resumable=False)
+        )
+        _ = [f async for f in original]
+
+        async def outage(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("checkpointer down")
+
+        graph.aget_state_history = None  # type: ignore[assignment]
+        graph.aget_state = outage  # type: ignore[method-assign]
+        r = await client.get(f"/threads/{_THREAD}/runs/{run.run_id}/stream")
+        frames = parse_frames(r.text)
+        assert [(i, e) for i, e, _ in frames] == [(None, "error")]
+        assert frames[0][2]["run_id"] == str(run.run_id)
+        assert "final state" in frames[0][2]["detail"]
 
 
 def test_ops_join_rejects_bad_last_event_id_before_streaming() -> None:

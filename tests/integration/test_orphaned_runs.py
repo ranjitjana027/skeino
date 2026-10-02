@@ -1,8 +1,8 @@
 """Runs orphaned by a dead process are failed, not left ``running`` forever.
 
 A run's task lives in the process that started it. When that process dies
-without a graceful shutdown, its rows stay ``pending``/``running`` and pollers
-(and ``enqueue`` runs) wait forever. Each process heartbeats the runs it owns;
+without a graceful shutdown, its rows stay ``pending``/``running``, its threads
+stay ``busy``, and pollers wait forever. Each process heartbeats the runs it owns;
 a run whose heartbeat stopped is failed with a reason and its thread released.
 
 Two apps over one SQLite file stand in for two workers (or a restart) sharing
@@ -173,6 +173,79 @@ async def test_thread_with_other_in_flight_work_stays_busy(tmp_path: Path) -> No
         await ops.join_run(thread_id, str(live.run_id))
 
 
+@pytest.mark.parametrize("settled", ["idle", "interrupted"])
+async def test_sweep_leaves_a_thread_a_later_run_already_settled(
+    tmp_path: Path, settled: str
+) -> None:
+    # A quick restart skips a not-yet-stale orphan; a new run then finishes on
+    # the thread. The later sweep fails the orphan but must not turn the
+    # settled thread to "error" (an interrupted one would lose its resume).
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id, run_id = await _crashed_run(ops, age_seconds=3600)
+        await ops._metadata_store.update_thread(thread_id, status_value=settled)
+        assert await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT) == [run_id]
+        assert (await _status(ops, thread_id, run_id))[0] == "error"
+        thread = await ops._metadata_store.fetch_thread_row(thread_id)
+        assert thread["status"] == settled
+
+
+async def test_one_failing_thread_release_does_not_strand_the_others(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        broken_thread, broken_run = await _crashed_run(ops, age_seconds=3600)
+        other_thread, other_run = await _crashed_run(ops, age_seconds=3600)
+        store = ops._metadata_store
+        fetch = store.fetch_thread_row
+
+        async def flaky(thread_id: str) -> Any:
+            if thread_id == broken_thread:
+                raise sqlite3.OperationalError("database is locked")
+            return await fetch(thread_id)
+
+        store.fetch_thread_row = flaky
+        failed = await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        store.fetch_thread_row = fetch
+        assert sorted(failed) == sorted([broken_run, other_run])
+        assert (await fetch(other_thread))["status"] == "error"
+        assert "Failed to release thread" in caplog.text
+
+
+async def test_sqlite_claim_loses_to_a_heartbeat_after_the_scan(
+    tmp_path: Path,
+) -> None:
+    # Another process sharing the file heartbeats the run between this
+    # sweeper's scan and its claim: the claim must not fail the live run.
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id, run_id = await _crashed_run(ops, age_seconds=3600)
+        store = ops._metadata_store
+        execute = store._conn.execute
+
+        async def heartbeat_before_claim(sql: str, *args: Any) -> Any:
+            if sql.startswith("UPDATE app_runs SET status = 'error'"):
+                await execute(
+                    "UPDATE app_runs SET updated_at = ? WHERE run_id = ?",
+                    (datetime.now(UTC).isoformat(), run_id),
+                )
+            return await execute(sql, *args)
+
+        store._conn.execute = heartbeat_before_claim
+        try:
+            assert await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT) == []
+        finally:
+            store._conn.execute = execute
+        assert (await _status(ops, thread_id, run_id))[0] == "running"
+
+
 async def test_a_failing_sweep_is_logged_not_raised(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -187,15 +260,24 @@ async def test_a_failing_sweep_is_logged_not_raised(
 
 
 @pytest.mark.parametrize(
-    ("heartbeat", "timeout"), [(30.0, 60.0), (30.0, 10.0)], ids=["2x", "below"]
+    ("heartbeat", "timeout"),
+    [(30.0, 89.9), (30.0, 60.0), (30.0, 10.0)],
+    ids=["just-under-3x", "2x", "below"],
 )
-def test_orphan_timeout_must_outlast_two_heartbeats(
+def test_orphan_timeout_must_cover_three_heartbeats(
     heartbeat: float, timeout: float
 ) -> None:
     with pytest.raises(ValueError, match="orphaned_run_timeout_seconds"):
         SkeinoSettings(
             run_heartbeat_seconds=heartbeat, orphaned_run_timeout_seconds=timeout
         )
+
+
+def test_orphan_timeout_of_exactly_three_heartbeats_is_accepted() -> None:
+    settings = SkeinoSettings(
+        run_heartbeat_seconds=30.0, orphaned_run_timeout_seconds=90.0
+    )
+    assert settings.orphaned_run_timeout_seconds == 90.0
 
 
 def test_orphan_sweep_can_be_disabled() -> None:

@@ -21,6 +21,7 @@ from skeino.concurrency import BackgroundRunRegistry, ThreadLockManager
 from skeino.ops.assistants import AssistantOps
 from skeino.ops.threads import ThreadOps
 from skeino.persistence import MetadataStoreProtocol, RunRow
+from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES
 from skeino.schemas import (
     CancelAction,
     JsonValue,
@@ -290,30 +291,63 @@ class RunOps:
         async with self._registry.admission(thread_id):
             await self._resolve_multitask(thread_id, request.multitask_strategy)
             self._registry.register_external(thread_id, run_id)
-        # Track lock acquisition as a cancellable task. This keeps queued
-        # streaming runs interruptible before they have a producer task.
-        lock_task = self._registry.spawn(thread_id, run_id, lock.acquire())
+
+        async def admit() -> RunRow:
+            await lock.acquire()
+            try:
+                return await self._metadata_store.create_run(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    assistant_id=request.assistant_id,
+                    metadata=request.metadata,
+                    kwargs=self._build_run_kwargs(request),
+                    multitask_strategy=request.multitask_strategy,
+                )
+            except BaseException:
+                lock.release()
+                raise
+
+        # Lock wait and row insert run as one tracked, cancellable task, so an
+        # ``interrupt``/``rollback`` can supersede this run at any point before
+        # its producer task exists (there is no await between the two).
+        admit_task = self._registry.spawn(thread_id, run_id, admit())
         try:
-            await lock_task
-            # The short handoff is synchronous: preserve active admission while
-            # metadata and stream setup await, then producer task takes over.
-            self._registry.register_external(thread_id, run_id)
+            run_row = await admit_task
+        except asyncio.CancelledError:
+            self._registry.unregister_external(thread_id, run_id)
+            current = asyncio.current_task()
+            request_cancelled = current is not None and current.cancelling() > 0
+            if admit_task.done() and not admit_task.cancelled():
+                # Admitted, then this request was cancelled before resuming.
+                lock.release()
+                await self._mark_run_interrupted(run_id, thread_id)
+            elif request_cancelled:
+                # The client may have left mid-insert: don't strand the row.
+                await self._interrupt_if_created(run_id, thread_id)
+            if admit_task.cancelled() and not request_cancelled:
+                # Superseded by interrupt/rollback while queued: the request
+                # itself is fine, so answer it instead of leaking the cancel.
+                self._log_warning(
+                    "Queued streaming run %s on thread %s was superseded "
+                    "before it started",
+                    run_id,
+                    thread_id,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Run {run_id} was superseded by a newer run "
+                    "(multitask_strategy) before it started.",
+                ) from None
+            raise
         except BaseException:
             self._registry.unregister_external(thread_id, run_id)
             raise
+        # From here to spawning the producer nothing awaits, so admission never
+        # sees this run without a cancellable task.
         try:
-            run_row = await self._metadata_store.create_run(
-                run_id=run_id,
-                thread_id=thread_id,
-                assistant_id=request.assistant_id,
-                metadata=request.metadata,
-                kwargs=self._build_run_kwargs(request),
-                multitask_strategy=request.multitask_strategy,
-            )
             run = self._run_row_to_model(run_row)
         except BaseException:
             lock.release()
-            self._registry.unregister_external(thread_id, run_id)
             raise
 
         stream = self._streams.open(
@@ -359,6 +393,7 @@ class RunOps:
         return run, self._relay(
             events,
             task,
+            run_id=run_id,
             stream_modes=(),
             cancel_on_disconnect=request.on_disconnect == "cancel",
         )
@@ -413,6 +448,7 @@ class RunOps:
             return self._relay(
                 stream.subscribe(after=after),
                 task,
+                run_id=run_id,
                 stream_modes=stream_modes,
                 cancel_on_disconnect=cancel_on_disconnect,
             )
@@ -554,6 +590,7 @@ class RunOps:
         events: AsyncGenerator[StreamEvent, None],
         task: asyncio.Task[Any] | None,
         *,
+        run_id: str,
         stream_modes: Sequence[str],
         cancel_on_disconnect: bool,
     ) -> AsyncIterator[str]:
@@ -570,11 +607,25 @@ class RunOps:
                     yield event.frame
             completed = True
         except SubscriberOverflowError as exc:
-            if cancel_on_disconnect and task is not None and not task.cancelling():
+            cancelled = (
+                cancel_on_disconnect and task is not None and not task.cancelling()
+            )
+            if cancelled and task is not None:
                 task.cancel()
             completed = True
+            self._log_warning(
+                "Subscriber to run %s overflowed and was detached; %s",
+                run_id,
+                "cancelling the run" if cancelled else "the run continues",
+            )
             yield sse_event(
-                "error", {"code": "subscriber_overflow", "detail": str(exc)}, None
+                "error",
+                {
+                    "code": "subscriber_overflow",
+                    "detail": str(exc),
+                    "run_id": run_id,
+                },
+                None,
             )
         finally:
             # Decide before awaiting: on a disconnect this runs inside an
@@ -603,14 +654,47 @@ class RunOps:
         ``id`` — they are not part of the run's event sequence, so there is
         nothing to resume from.
         """
-        if task is not None:
-            try:
-                await self._registry.wait(run_id)
-            except BaseException:
-                if cancel_on_disconnect and not task.done() and not task.cancelling():
-                    task.cancel()
-                raise
-        row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        try:
+            if task is not None:
+                try:
+                    await self._registry.wait(run_id)
+                except BaseException:
+                    if (
+                        cancel_on_disconnect
+                        and not task.done()
+                        and not task.cancelling()
+                    ):
+                        task.cancel()
+                    raise
+            row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+            output: JsonValue = None
+            if (
+                row is not None
+                and str(row["status"]) != _RUN_ERROR
+                and stream_mode_matches("values", stream_modes)
+            ):
+                output = await self._final_state_values(
+                    thread_id, run_id, raise_on_error=True
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Headers are already sent: report on the stream, never end clean.
+            self._log_error(
+                "Failed to read final state for joined run %s: %s",
+                run_id,
+                exc,
+                exc=exc,
+            )
+            yield sse_event(
+                "error",
+                {
+                    "detail": f"Could not read the final state of run {run_id}.",
+                    "run_id": run_id,
+                },
+                None,
+            )
+            return
         if row is None:
             # Deleted while we waited (rollback / DELETE).
             yield sse_event(
@@ -627,10 +711,8 @@ class RunOps:
                 None,
             )
             return
-        if stream_mode_matches("values", stream_modes):
-            output = await self._final_state_values(thread_id, run_id)
-            if isinstance(output, dict):
-                yield sse_event("values", self._streamer.filter_values(output), None)
+        if isinstance(output, dict):
+            yield sse_event("values", self._streamer.filter_values(output), None)
         yield sse_event("end", {"run_id": run_id, "status": run_status}, None)
 
     # ------------------------------------------------------------------
@@ -803,7 +885,7 @@ class RunOps:
     # A run's task lives in the process that started it. If that process dies
     # without a graceful shutdown (crash, OOM kill, ``docker kill``), its
     # ``pending``/``running`` rows stay that way forever: pollers wait on a run
-    # that will never finish, and ``enqueue`` runs may queue behind it. Every
+    # that will never finish, and its thread stays ``busy``. Every
     # process therefore heartbeats the runs it owns (bumping ``updated_at``),
     # and fails in-flight rows whose heartbeat has stopped. That is LangGraph
     # Platform's outcome too — it re-queues such runs and, once retries are
@@ -821,8 +903,10 @@ class RunOps:
         """Fail in-flight runs whose owner stopped heartbeating; return their ids.
 
         This process's own active runs are never touched, whatever their row
-        says. A thread left with nothing in flight is moved off ``busy`` to
-        ``error``, as when one of its runs fails normally.
+        says. A thread still ``busy`` with nothing left in flight is moved to
+        ``error``, as when one of its runs fails normally; a thread a later run
+        already settled keeps its status. Each thread is released on its own,
+        so one failing store call cannot strand the rest ``busy``.
         """
         local = {run_id for _, run_id in self._registry.all_active()}
         rows = await self._metadata_store.fail_stale_runs(
@@ -839,11 +923,25 @@ class RunOps:
                 stale_after_seconds,
             )
         for thread_id in {str(row["thread_id"]) for row in rows}:
-            if not await self._has_in_flight_runs(thread_id):
-                await self._metadata_store.update_thread(
-                    thread_id, status_value=_THREAD_ERROR
+            try:
+                await self._release_orphaned_thread(thread_id)
+            except Exception as exc:
+                self._log_error(
+                    "Failed to release thread %s after failing its orphaned runs: %s",
+                    thread_id,
+                    exc,
+                    exc=exc,
                 )
         return [str(row["run_id"]) for row in rows]
+
+    async def _release_orphaned_thread(self, thread_id: str) -> None:
+        thread = await self._metadata_store.fetch_thread_row(thread_id)
+        if thread is None or str(thread["status"]) != _THREAD_BUSY:
+            return
+        if not await self._has_in_flight_runs(thread_id):
+            await self._metadata_store.update_thread(
+                thread_id, status_value=_THREAD_ERROR
+            )
 
     async def liveness_pass(self, *, stale_after_seconds: float | None) -> None:
         """One heartbeat + orphan sweep; failures are logged, never raised.
@@ -869,7 +967,7 @@ class RunOps:
     async def _has_in_flight_runs(self, thread_id: str) -> bool:
         if self._registry.active_runs(thread_id):
             return True
-        for status_value in ("pending", "running"):
+        for status_value in sorted(IN_FLIGHT_RUN_STATUSES):
             rows = await self._metadata_store.list_run_rows(
                 thread_id, limit=1, offset=0, status_value=status_value
             )
@@ -1041,7 +1139,9 @@ class RunOps:
         output = await self._final_state_values(thread_id, run_id)
         return output, tokens
 
-    async def _final_state_values(self, thread_id: str, run_id: str) -> JsonValue:
+    async def _final_state_values(
+        self, thread_id: str, run_id: str, *, raise_on_error: bool = False
+    ) -> JsonValue:
         """Return the requested run's final graph state values (its output).
 
         Reads the most recent checkpoint tagged with this ``run_id`` so a
@@ -1052,7 +1152,8 @@ class RunOps:
         run-scoped checkpoint is available (e.g. no checkpointer).
 
         Whatever checkpoint answers, a run parked on ``interrupt()`` reports it
-        — see :meth:`_output_with_interrupts`.
+        — see :meth:`_output_with_interrupts`. A failed state read returns
+        ``None`` (logged) unless ``raise_on_error``, which re-raises it.
         """
         config = {"configurable": {"thread_id": thread_id}}
         get_history = getattr(self._graph, "aget_state_history", None)
@@ -1073,6 +1174,8 @@ class RunOps:
         try:
             snapshot = await self._graph.aget_state(config)
         except Exception as exc:
+            if raise_on_error:
+                raise
             self._log_error(
                 "Failed to read final state for thread %s: %s",
                 thread_id,
@@ -1289,6 +1392,21 @@ class RunOps:
             self._log_error(
                 "Failed to persist error state for run %s: %s", run_id, exc, exc=exc
             )
+
+    async def _interrupt_if_created(self, run_id: str, thread_id: str) -> None:
+        """Mark a possibly-inserted run ``interrupted``; best-effort, never raises."""
+        try:
+            row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        except Exception as exc:
+            self._log_error(
+                "Failed to check run %s after its request was cancelled: %s",
+                run_id,
+                exc,
+                exc=exc,
+            )
+            return
+        if row is not None:
+            await self._mark_run_interrupted(run_id, thread_id)
 
     async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> None:
         """Persist cancellation/disconnect state; best-effort, never raises."""

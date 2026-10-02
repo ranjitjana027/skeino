@@ -13,6 +13,7 @@ matching the checkpointer builder, so graph state and metadata share the
 operator's chosen database — falling back to ``skeino`` for pathless URIs.
 """
 
+import logging
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -37,6 +38,8 @@ _THREAD_SORT_FIELDS: frozenset[str] = frozenset(
     {"thread_id", "status", "created_at", "updated_at", "state_updated_at"}
 )
 _DEFAULT_SORT_BY = "updated_at"
+
+logger = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -240,9 +243,9 @@ class MongoMetadataStore:
         *,
         error: str | None = None,
     ) -> None:
-        """Update a run's status field."""
+        """Update an in-flight run's status; terminal rows are left as they are."""
         await self._runs.update_one(
-            {"_id": run_id},
+            {"_id": run_id, "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)}},
             {"$set": {"status": status_value, "updated_at": _utcnow(), "error": error}},
         )
 
@@ -269,7 +272,13 @@ class MongoMetadataStore:
 
         Each candidate is claimed with ``find_one_and_update`` on the same
         stale filter, so a heartbeat (or another sweeper) that lands between
-        the scan and the claim wins.
+        the scan and the claim wins. Each claim commits on its own, so if the
+        scan fails after some claims succeeded those runs are still returned
+        (and the failure logged) rather than failed without a report.
+
+        Staleness compares ``updated_at`` values written by each worker's own
+        clock, so workers sharing the database need synchronised clocks (NTP);
+        skew eats into ``orphaned_run_timeout_seconds - run_heartbeat_seconds``.
         """
         from pymongo import ReturnDocument  # optional dependency: skeino[mongodb]
 
@@ -280,14 +289,24 @@ class MongoMetadataStore:
             "_id": {"$nin": list(exclude_run_ids)},
         }
         failed: list[RunRow] = []
-        async for doc in self._runs.find(stale, {"_id": 1}):
-            claimed = await self._runs.find_one_and_update(
-                {**stale, "_id": doc["_id"]},
-                {"$set": {"status": "error", "error": error, "updated_at": now}},
-                return_document=ReturnDocument.AFTER,
+        try:
+            async for doc in self._runs.find(stale, {"_id": 1}):
+                claimed = await self._runs.find_one_and_update(
+                    {**stale, "_id": doc["_id"]},
+                    {"$set": {"status": "error", "error": error, "updated_at": now}},
+                    return_document=ReturnDocument.AFTER,
+                )
+                if claimed is not None:
+                    failed.append(self._run_row(claimed))
+        except Exception as exc:
+            if not failed:
+                raise
+            logger.error(
+                "Orphan sweep stopped after claiming %d run(s); the rest are "
+                "retried on the next sweep",
+                len(failed),
+                exc_info=exc,
             )
-            if claimed is not None:
-                failed.append(self._run_row(claimed))
         return failed
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:

@@ -99,14 +99,14 @@ async def test_run_rows_match_contract_keys_through_error_lifecycle(
     assert set(created) == RUN_KEYS
     assert created["error"] is None  # present-but-empty at create
 
-    await store.update_run_status(rid, "error", error="boom")
-    failed = await store.fetch_run_row(tid, rid)
-    assert failed is not None
-    assert set(failed) == RUN_KEYS
-    assert failed["error"] == "boom"
+    await store.update_run_status(rid, "running", error="boom")
+    flagged = await store.fetch_run_row(tid, rid)
+    assert flagged is not None
+    assert set(flagged) == RUN_KEYS
+    assert flagged["error"] == "boom"
 
     # A later update without an error must clear it, not leave it stale.
-    await store.update_run_status(rid, "running")
+    await store.update_run_status(rid, "success")
     rows = await store.list_run_rows(tid, limit=10, offset=0, status_value=None)
     assert [set(row) for row in rows] == [RUN_KEYS]
     assert rows[0]["error"] is None

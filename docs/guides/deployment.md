@@ -32,7 +32,10 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
 !!! info "Crashed workers and their runs"
     A run whose worker dies without a graceful shutdown is marked `error` once
     its heartbeat is `orphaned_run_timeout_seconds` (default 120 s) stale: at
-    the next startup, or by any surviving worker sharing the database. See
+    startup or on any later sweep tick, by the restarted process or any
+    surviving worker sharing the database. Postgres judges staleness by the
+    database clock; with SQLite or MongoDB shared across hosts, keep worker
+    clocks synchronised (NTP). See
     [Orphaned runs](../concepts/threads-and-runs.md#orphaned-runs).
 
 ## Use Postgres

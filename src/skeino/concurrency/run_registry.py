@@ -14,9 +14,12 @@ before spawning a new run.
 """
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Coroutine
+
+logger = logging.getLogger(__name__)
 
 
 class BackgroundRunRegistry:
@@ -50,9 +53,10 @@ class BackgroundRunRegistry:
         A task-backed run that has finished is pruned synchronously here rather
         than waiting for its ``add_done_callback`` to fire on the next loop tick
         — otherwise a just-completed run could still read as active and make an
-        admission decision (e.g. ``reject``) 409 incorrectly. Externally
-        registered runs (live streams, no task) stay active until explicitly
-        unregistered.
+        admission decision (e.g. ``reject``) 409 incorrectly. A finished task
+        whose finalizer is still pending stays active until finalization ends.
+        Externally registered runs (a streaming run's reserved slot) stay active
+        until explicitly unregistered.
         """
         run_ids = self._active_by_thread.get(thread_id)
         if not run_ids:
@@ -100,13 +104,28 @@ class BackgroundRunRegistry:
             completion = asyncio.get_running_loop().create_future()
             self._completion[run_id] = completion
 
+            # A failure is logged here and re-raised by wait()/cancel(); mark it
+            # retrieved so an unawaited failure doesn't warn again at GC.
+            completion.add_done_callback(
+                lambda f: None if f.cancelled() else f.exception()
+            )
+
             async def finish() -> None:
                 try:
                     await finalize()
+                except asyncio.CancelledError:
+                    if not completion.done():
+                        completion.cancel()
+                    raise
                 except BaseException as exc:
-                    completion.set_exception(exc)
+                    logger.error("Finalizing run %s failed", run_id, exc_info=exc)
+                    if not completion.done():
+                        completion.set_exception(exc)
+                    if not isinstance(exc, Exception):
+                        raise
                 else:
-                    completion.set_result(None)
+                    if not completion.done():
+                        completion.set_result(None)
                 finally:
                     self._completion.pop(run_id, None)
                     self._forget(thread_id, run_id)
@@ -120,9 +139,10 @@ class BackgroundRunRegistry:
         return task
 
     def register_external(self, thread_id: str, run_id: str) -> None:
-        """Mark a run active without a tracked task (e.g. a live streaming run).
+        """Mark a run active without a tracked task.
 
-        Such a run counts toward admission (so ``reject`` sees it) but has no
+        Used to reserve a streaming run's slot under the admission lock, before
+        its cancellable admission task is spawned. Such a run counts toward admission (so ``reject`` sees it) but has no
         cancellable task — :meth:`cancel` returns ``False`` for it.
         """
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
@@ -179,4 +199,8 @@ class BackgroundRunRegistry:
         if tasks:
             await asyncio.wait(set(tasks))
         if completions:
-            await asyncio.gather(*completions)
+            # Shield the shared futures: cancelling shutdown must not cancel
+            # them for wait()/cancel() callers. Failures are already logged.
+            await asyncio.gather(
+                *(asyncio.shield(c) for c in completions), return_exceptions=True
+            )

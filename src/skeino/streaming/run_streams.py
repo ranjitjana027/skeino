@@ -170,7 +170,23 @@ class RunEventStream:
         of ``None`` replays nothing (live tail only). The replay snapshot and
         the live registration happen in one synchronous step, so no event is
         lost or duplicated between them.
+
+        A resumable subscriber whose live queue overflows (for example while a
+        long replay is still being sent) catches up from the retained history
+        instead of failing; it only gets :class:`SubscriberOverflowError` once
+        the events it missed have been evicted. A non-resumable one has no
+        history to fall back on and fails at the first overflow.
         """
+        delivered = after if after is not None else self._next_id - 1
+        replay, queue = self._attach(after)
+        return self._drain(replay, queue, delivered)
+
+    def _attach(
+        self, after: int | None
+    ) -> tuple[
+        list[StreamEvent],
+        asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
+    ]:
         replay = (
             [e for e in self._history if e.event_id > after]
             if after is not None
@@ -183,23 +199,37 @@ class RunEventStream:
             queue.put_nowait(None)
         else:
             self._subscribers.add(queue)
-        return self._drain(replay, queue)
+        return replay, queue
 
     async def _drain(
         self,
         replay: list[StreamEvent],
         queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
+        delivered: int,
     ) -> AsyncGenerator[StreamEvent, None]:
         try:
-            for event in replay:
-                yield event
-            while not (self.closed and queue.empty()):
-                event_or_end = await queue.get()
-                if event_or_end is None:
-                    break
-                if isinstance(event_or_end, SubscriberOverflowError):
-                    raise event_or_end
-                yield event_or_end
+            while True:
+                for event in replay:
+                    yield event
+                    delivered = event.event_id
+                overflow: SubscriberOverflowError | None = None
+                while not (self.closed and queue.empty()):
+                    event_or_end = await queue.get()
+                    if event_or_end is None:
+                        break
+                    if isinstance(event_or_end, SubscriberOverflowError):
+                        overflow = event_or_end
+                        break
+                    yield event_or_end
+                    delivered = event_or_end.event_id
+                if overflow is None:
+                    return
+                if not self.resumable or self.cursor_expired(delivered):
+                    raise overflow
+                # Everything after ``delivered`` is still retained: resume from
+                # history with a fresh live queue.
+                self._subscribers.discard(queue)
+                replay, queue = self._attach(delivered)
         finally:
             self._subscribers.discard(queue)
 
@@ -208,9 +238,11 @@ class RunStreamRegistry:
     """Process-local map of run id → :class:`RunEventStream`, with retention.
 
     A closed resumable stream is kept for ``retention_seconds`` so a client
-    that comes back after the run ended can still replay it; a closed
-    non-resumable stream (no history to replay) is dropped at once. Expired
-    streams are swept on every ``open``/``get``/``close``.
+    that comes back after the run ended can still replay it, unless more than
+    ``max_retained_streams`` finished streams are held, in which case the
+    oldest are evicted early. A closed non-resumable stream (no history to
+    replay) is dropped at once. Expired streams are swept on every
+    ``open``/``get``/``close``.
     """
 
     def __init__(
