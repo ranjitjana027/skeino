@@ -104,6 +104,11 @@ class RunEventStream:
         return self.closed_at is not None
 
     @property
+    def last_event_id(self) -> int:
+        """Id of the most recently published event (``0`` before the first)."""
+        return self._next_id - 1
+
+    @property
     def subscriber_count(self) -> int:
         """Number of subscribers currently attached (live, not yet drained)."""
         return len(self._subscribers)
@@ -177,7 +182,7 @@ class RunEventStream:
         the events it missed have been evicted. A non-resumable one has no
         history to fall back on and fails at the first overflow.
         """
-        delivered = after if after is not None else self._next_id - 1
+        delivered = after if after is not None else self.last_event_id
         replay, queue = self._attach(after)
         return self._drain(replay, queue, delivered)
 
@@ -220,6 +225,8 @@ class RunEventStream:
                     if isinstance(event_or_end, SubscriberOverflowError):
                         overflow = event_or_end
                         break
+                    if event_or_end.event_id <= delivered:
+                        continue  # already delivered (or before the cursor)
                     yield event_or_end
                     delivered = event_or_end.event_id
                 if overflow is None:

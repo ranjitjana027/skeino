@@ -156,6 +156,17 @@ async def test_resumable_subscriber_overflows_once_missed_events_are_evicted() -
     assert stream.subscriber_count == 0
 
 
+async def test_subscriber_never_receives_events_at_or_below_its_cursor() -> None:
+    stream = RunEventStream("t", "r", resumable=True)
+    stream.publish("values", {})
+    ahead = stream.subscribe(after=3)
+    for _ in range(4):
+        stream.publish("values", {})
+    stream.close(now=0.0)
+    assert stream.last_event_id == 5
+    assert [e.event_id async for e in ahead] == [4, 5]
+
+
 async def test_close_preserves_all_events_when_queue_is_exactly_full() -> None:
     stream = RunEventStream("t", "r", resumable=False)
     slow = stream.subscribe(after=None)

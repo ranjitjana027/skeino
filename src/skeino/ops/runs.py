@@ -115,6 +115,16 @@ def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
     return tuple(from_tasks)
 
 
+def _terminal_event_for_row(run_id: str, row: RunRow) -> tuple[str, dict[str, Any]]:
+    """Return the terminal stream event matching a finalized run row."""
+    if str(row["status"]) == _RUN_ERROR:
+        return "error", {
+            "detail": str(row.get("error") or "Run failed."),
+            "run_id": run_id,
+        }
+    return "end", {"run_id": run_id, "status": str(row["status"])}
+
+
 def _session_name_of(kwargs: Any) -> str | None:
     """Read the LangSmith session a stored run was traced into, if any."""
     if isinstance(kwargs, dict):
@@ -427,16 +437,22 @@ class RunOps:
         after = _parse_last_event_id(last_event_id)
         task = self._registry.get(run_id)
         stream = self._streams.get(thread_id, run_id)
-        stream_finished_without_history = (
-            stream is not None
-            and not stream.resumable
-            and (stream.closed or (task is not None and task.done()))
+        # A done producer may not have been finalized (stream closed) yet; its
+        # ``end`` is already published, so a live tail would see nothing.
+        producer_finished = stream is not None and (
+            stream.closed or (task is not None and task.done())
         )
-        if (
-            stream is not None
-            and not stream_finished_without_history
-            and not (after is None and stream.closed)
+        if stream is not None and not (
+            producer_finished and (after is None or not stream.resumable)
         ):
+            if after is not None and after > stream.last_event_id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Last-Event-ID {after} is ahead of run {run_id}'s event "
+                        f"stream (last id {stream.last_event_id})."
+                    ),
+                )
             if after is not None and stream.cursor_expired(after):
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -547,7 +563,13 @@ class RunOps:
                         else:
                             raise
 
-            await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
+            superseded = await self._finish_run_status(thread_id, run_id, _RUN_SUCCESS)
+            if superseded is not None:
+                # Another worker already finalized the row (e.g. swept it as
+                # orphaned): report what the row says, not a contradicting
+                # success, and leave the thread to whoever finalized it.
+                stream.publish(*_terminal_event_for_row(run_id, superseded))
+                return 0
             await self._metadata_store.update_thread(
                 thread_id,
                 status_value=await self._settled_thread_status(thread_id),
@@ -1083,7 +1105,12 @@ class RunOps:
             usage_handler, _ = await self._execute_graph_run(
                 thread_id, request, run_id=run_id
             )
-            await self._metadata_store.update_run_status(run_id, _RUN_SUCCESS)
+            if (
+                await self._finish_run_status(thread_id, run_id, _RUN_SUCCESS)
+                is not None
+            ):
+                # Another worker already finalized the row; keep its outcome.
+                return 0
             await self._metadata_store.update_thread(
                 thread_id,
                 status_value=await self._settled_thread_status(thread_id),
@@ -1164,6 +1191,9 @@ class RunOps:
                 ):
                     return self._output_with_interrupts(snapshot)
             except Exception as exc:
+                if raise_on_error:
+                    # The latest thread state may belong to a later run.
+                    raise
                 # Run-scoped read is best-effort; fall back to the latest state.
                 self._log_warning(
                     "Run-scoped state read failed for run %s; using latest "
@@ -1373,6 +1403,29 @@ class RunOps:
             ),
             "langsmith_session_name": resolve_session_name(request.langsmith_tracer),
         }
+
+    async def _finish_run_status(
+        self, thread_id: str, run_id: str, status_value: RunStatus
+    ) -> RunRow | None:
+        """Persist a terminal status; return the row if another writer won.
+
+        ``update_run_status`` only moves in-flight rows and a terminal status is
+        final, so after the write the row holds either this status or the one
+        another writer (an orphan sweep on another worker) set first. ``None``
+        means this write took effect, or the row is gone (rollback / DELETE).
+        """
+        await self._metadata_store.update_run_status(run_id, status_value)
+        row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        if row is None or str(row["status"]) == status_value:
+            return None
+        self._log_warning(
+            "Run %s finished as %s, but its row was already finalized as %s; "
+            "keeping the persisted status",
+            run_id,
+            status_value,
+            row["status"],
+        )
+        return row
 
     async def _mark_run_failed(self, run_id: str, thread_id: str, error: str) -> None:
         """Persist error state for a failed run; best-effort, never raises.

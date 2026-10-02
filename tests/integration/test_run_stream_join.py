@@ -856,7 +856,12 @@ async def test_stateless_response_waits_for_delayed_cleanup() -> None:
         assert str(run.run_id) not in ops._streams._streams
 
 
-async def test_no_cursor_join_during_finalization_returns_final_state() -> None:
+@pytest.mark.parametrize("resumable", [False, True])
+async def test_no_cursor_join_during_finalization_returns_final_state(
+    resumable: bool,
+) -> None:
+    # The producer is done (its ``end`` is published) but its finalizer has
+    # not closed the stream yet: a live tail would see nothing.
     async with running_app() as (app, _graph, _client):
         ops = app.state.skeino.run_ops
         entered, release = asyncio.Event(), asyncio.Event()
@@ -866,7 +871,7 @@ async def test_no_cursor_join_during_finalization_returns_final_state() -> None:
             await release.wait()
 
         run, original = await ops.create_streaming_run(
-            _THREAD, _request(stream_resumable=False), after_run=cleanup
+            _THREAD, _request(stream_resumable=resumable), after_run=cleanup
         )
         response = asyncio.create_task(_drain(original))
         await entered.wait()
@@ -997,3 +1002,94 @@ async def test_shutdown_interrupts_streaming_run_and_ends_its_subscribers() -> N
 
 async def _events_of(subscription: AsyncIterator[Any]) -> list[Any]:
     return [event async for event in subscription]
+
+
+# --- a producer that loses the terminal write to another worker's sweep -------
+
+
+async def test_streaming_run_swept_by_another_worker_keeps_the_swept_outcome() -> None:
+    async with running_app() as (app, graph, client):
+        run_ops = app.state.skeino.run_ops
+        store = run_ops._metadata_store
+        graph.stream_gate = asyncio.Event()
+        run, original = await run_ops.create_streaming_run(_THREAD, _request())
+        run_id = str(run.run_id)
+        body = asyncio.create_task(_drain(original))
+        await graph.stream_started.wait()
+        # Another worker decides this run is orphaned and settles the thread.
+        await store.update_run_status(run_id, "error", error="orphaned elsewhere")
+        await store.update_thread(_THREAD, status_value="error")
+        graph.stream_gate.set()
+        frames = parse_frames(await asyncio.wait_for(body, 5))
+        assert frames[-1][1] == "error"
+        assert frames[-1][2] == {"detail": "orphaned elsewhere", "run_id": run_id}
+        assert "end" not in [name for _, name, _ in frames]
+        assert (await run_ops.get_run(_THREAD, run_id)).status == "error"
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "error"
+
+
+async def test_background_run_swept_by_another_worker_leaves_thread_alone() -> None:
+    async with running_app() as (app, graph, client):
+        run_ops = app.state.skeino.run_ops
+        store = run_ops._metadata_store
+        graph.invoke_gate = asyncio.Event()
+        run = await run_ops.create_run(_THREAD, _request(stream_resumable=False))
+        run_id = str(run.run_id)
+        await graph.invoke_started.wait()
+        task = run_ops._registry.get(run_id)
+        assert task is not None
+        await store.update_run_status(run_id, "error", error="orphaned elsewhere")
+        await store.update_thread(_THREAD, status_value="error")
+        graph.invoke_gate.set()
+        await asyncio.wait_for(run_ops._registry.wait(run_id), 5)
+        assert (await run_ops.get_run(_THREAD, run_id)).status == "error"
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "error"
+
+
+# --- cursors ahead of the run, fail-closed final state ------------------------
+
+
+async def test_join_with_cursor_ahead_of_the_run_is_409() -> None:
+    async with running_app() as (app, graph, client):
+        run_id, _task = await _start_and_leave(app, graph)
+        # Bounded: accepting the cursor would tail the parked run forever.
+        r = await asyncio.wait_for(
+            client.get(
+                f"/threads/{_THREAD}/runs/{run_id}/stream",
+                headers={"Last-Event-ID": "999"},
+            ),
+            5,
+        )
+        assert r.status_code == 409
+        assert "ahead" in r.json()["detail"]
+        assert graph.stream_gate is not None
+        graph.stream_gate.set()
+
+
+async def test_join_final_state_fails_closed_when_run_scoped_history_fails() -> None:
+    # Falling back to the latest thread state could report a later run's state
+    # as this run's output: report an error instead.
+    async with running_app() as (app, graph, client):
+        created = await client.post(
+            f"/threads/{_THREAD}/runs/stream",
+            json={
+                "assistant_id": "test_agent",
+                "input": {"messages": []},
+                "if_not_exists": "create",
+                "stream_mode": ["values"],
+            },
+        )
+        run_id = parse_frames(created.text)[0][2]["run_id"]
+
+        async def broken_history(*_args: Any, **_kwargs: Any) -> AsyncIterator[Any]:
+            raise RuntimeError("history store down")
+            yield  # pragma: no cover - makes this an async generator
+
+        graph.aget_state_history = broken_history  # type: ignore[method-assign]
+        joined = parse_frames(
+            (await client.get(f"/threads/{_THREAD}/runs/{run_id}/stream")).text
+        )
+        assert [name for _, name, _ in joined] == ["error"]
+        assert joined[0][2]["run_id"] == run_id
