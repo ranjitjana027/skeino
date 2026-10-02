@@ -886,3 +886,114 @@ async def test_no_cursor_join_during_finalization_returns_final_state() -> None:
         await response
         assert [name for _, name, _ in frames] == ["values", "end"]
         assert all(event_id is None for event_id, _, _ in frames)
+
+
+# --- review follow-ups: final-state joins, background disconnects, shutdown ---
+
+
+def _join_finished_real_run(graph_name: str) -> list[tuple[str, Any]]:
+    """Run a real graph to completion over /runs/stream, then join it with no
+    ``Last-Event-ID`` so the join synthesizes final-state events."""
+    from tests.real_graphs import ASSISTANT_ID, parse_sse, real_client, user_input
+
+    with real_client(graph_name) as client:
+        thread_id = str(uuid4())
+        client.post("/threads", json={"thread_id": thread_id})
+        body = client.post(
+            f"/threads/{thread_id}/runs/stream",
+            json={
+                "assistant_id": ASSISTANT_ID,
+                "input": user_input(),
+                "stream_mode": ["values"],
+            },
+        ).text
+        run_id = next(d for n, d in parse_sse(body) if n == "metadata")["run_id"]
+        joined = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
+        assert joined.status_code == 200
+        return parse_sse(joined.text)
+
+
+@pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
+def test_join_finished_real_run_filters_final_state_by_output_schema(
+    graph_name: str,
+) -> None:
+    events = _join_finished_real_run(graph_name)
+    assert [n for n, _ in events] == ["values", "end"]
+    values = events[0][1]
+    assert "messages" in values
+    assert "internal" not in values
+
+
+def test_join_finished_real_run_paused_on_interrupt_carries_the_interrupt() -> None:
+    events = _join_finished_real_run("interrupting")
+    values = next(d for n, d in events if n == "values")
+    assert values["__interrupt__"][0]["value"] == "approve?"
+
+
+@pytest.mark.parametrize(
+    ("cancel_on_disconnect", "expected"),
+    [(True, "interrupted"), (False, "success")],
+)
+async def test_joiner_of_background_run_disconnect_honors_cancel_on_disconnect(
+    cancel_on_disconnect: bool, expected: str
+) -> None:
+    async with running_app() as (app, graph, client):
+        run_ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        created = await client.post(
+            f"/threads/{_THREAD}/runs",
+            json={
+                "assistant_id": "test_agent",
+                "input": {"messages": []},
+                "if_not_exists": "create",
+            },
+        )
+        run_id = created.json()["run_id"]
+        await graph.invoke_started.wait()
+        task = run_ops._registry.get(run_id)
+        assert task is not None
+        joined = await run_ops.join_run_stream(
+            _THREAD,
+            run_id,
+            stream_modes=[],
+            last_event_id=None,
+            cancel_on_disconnect=cancel_on_disconnect,
+        )
+        pending = asyncio.ensure_future(joined.__anext__())  # type: ignore[attr-defined]
+        await asyncio.sleep(0.05)
+        assert not pending.done()  # waiting on the background run
+        pending.cancel()  # the joining client goes away
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        graph.invoke_gate.set()
+        await asyncio.wait({task}, timeout=5)
+        assert task.done()
+        assert (await run_ops.get_run(_THREAD, run_id)).status == expected
+
+
+async def test_shutdown_interrupts_streaming_run_and_ends_its_subscribers() -> None:
+    app, graph = build_test_app()
+    graph.stream_gate = asyncio.Event()
+    async with app.router.lifespan_context(app):
+        run_ops = app.state.skeino.run_ops
+        run, original = await run_ops.create_streaming_run(_THREAD, _request())
+        run_id = str(run.run_id)
+        assert "event: metadata" in await original.__anext__()
+        await graph.stream_started.wait()
+        stream = run_ops._streams.get(_THREAD, run_id)
+        assert stream is not None
+        joiner = stream.subscribe(after=-1)
+        store = run_ops._metadata_store
+    # Lifespan exit cancelled the parked producer and awaited its finalizer.
+    events = await asyncio.wait_for(_events_of(joiner), 5)
+    assert events[0].event == "metadata"
+    assert events[-1].event == "end"
+    assert parse_frames(events[-1].frame)[0][2]["status"] == "interrupted"
+    row = await store.fetch_run_row(_THREAD, run_id)
+    assert row is not None and row["status"] == "interrupted"
+    assert not run_ops._lock_manager.get(_THREAD).locked()
+    await original.aclose()
+
+
+async def _events_of(subscription: AsyncIterator[Any]) -> list[Any]:
+    return [event async for event in subscription]

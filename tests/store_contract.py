@@ -517,6 +517,8 @@ class StoreContract:
             [ids["pending"], ids["running"]]
         )
         assert all((r["status"], r["error"]) == ("error", "orphaned") for r in failed)
+        # The sweep releases each claimed run's thread, so rows must name it.
+        assert all(str(r["thread_id"]) == str(tid) for r in failed)
         for name in ("pending", "running"):
             row = await self._get_run(store, tid, ids[name])
             assert (row["status"], row["error"]) == ("error", "orphaned")
