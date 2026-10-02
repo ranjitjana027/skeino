@@ -26,6 +26,12 @@ uvicorn app:app --host 0.0.0.0 --port 8000 --workers 4
     process or front the deployment with routing that pins a thread to one
     worker. A shared, cross-process lock service is out of scope for v1.
 
+!!! info "Crashed workers and their runs"
+    A run whose worker dies without a graceful shutdown is marked `error` once
+    its heartbeat is `orphaned_run_timeout_seconds` (default 120 s) stale: at
+    the next startup, or by any surviving worker sharing the database. See
+    [Orphaned runs](../concepts/threads-and-runs.md#orphaned-runs).
+
 ## Use Postgres
 
 Production deployments should set a durable `checkpointer_scheme` (e.g.

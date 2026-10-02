@@ -129,6 +129,27 @@ A live SSE stream (`/runs/stream`) is cancelled by the client disconnecting;
 cross-request cancellation of a streaming run (reconnect/resume) is a planned
 follow-up.
 
+### Orphaned runs
+
+A run executes in the process that started it. A graceful shutdown marks its
+in-flight runs `interrupted`, but a crash, OOM kill, or hard restart cannot. To
+keep such rows from staying `pending`/`running` forever (with pollers waiting
+on them and `enqueue` runs queued behind them), every process **heartbeats**
+the runs it owns: every `run_heartbeat_seconds` (default 30) it bumps their
+`updated_at`. A `pending`/`running` run whose `updated_at` is older than
+`orphaned_run_timeout_seconds` (default 120) has lost its process. The sweep
+runs at startup and on every heartbeat tick, and it sets such a run to `error`
+with an "orphaned" message. If the run's thread has nothing else in flight, the
+thread moves from `busy` to `error`.
+
+The sweep is safe with several workers on one database. It never touches the
+sweeping process's own runs, and live runs elsewhere keep heartbeating. Each
+row is also claimed with a conditional update, so only one sweeper reports it.
+On Postgres the comparison uses the database clock, so worker clock skew does
+not matter. LangGraph Platform re-queues an orphaned run and fails it once its
+retries are exhausted. skeino keeps no run input to retry with, so it fails the
+run directly. Set `orphaned_run_timeout_seconds=None` to disable the sweep.
+
 ## Stateless runs
 
 When there is nothing to continue — a one-shot question, a scheduled job, a

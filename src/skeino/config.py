@@ -2,7 +2,7 @@
 
 from typing import Final
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_CORS_METHODS: Final[list[str]] = [
     "GET",
@@ -50,6 +50,23 @@ class SkeinoSettings(BaseModel):
         "(durable graph state, ephemeral thread/run list) fails loudly at startup.",
     )
 
+    # Run liveness
+    run_heartbeat_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="How often each process refreshes the updated_at of the "
+        "runs it is executing, marking them alive.",
+    )
+    orphaned_run_timeout_seconds: float | None = Field(
+        default=120.0,
+        gt=0,
+        description="A pending/running run whose updated_at is older than this "
+        "has lost the process executing it (crash, OOM kill, restart) and is "
+        "marked error, freeing its thread. Swept at startup and every "
+        "run_heartbeat_seconds. Must exceed run_heartbeat_seconds with room for "
+        "a missed beat or two (default: 4 beats). None disables the sweep.",
+    )
+
     # Assistant identity
     default_assistant_id: str | None = Field(
         default=None,
@@ -71,3 +88,14 @@ class SkeinoSettings(BaseModel):
     cors_origins: list[str] = Field(default_factory=lambda: ["*"])
     cors_methods: list[str] = Field(default_factory=lambda: list(DEFAULT_CORS_METHODS))
     cors_headers: list[str] = Field(default_factory=lambda: ["*"])
+
+    @model_validator(mode="after")
+    def _orphan_timeout_outlasts_heartbeat(self) -> "SkeinoSettings":
+        timeout = self.orphaned_run_timeout_seconds
+        if timeout is not None and timeout <= 2 * self.run_heartbeat_seconds:
+            raise ValueError(
+                "orphaned_run_timeout_seconds must exceed twice "
+                "run_heartbeat_seconds, or live runs are failed after one late "
+                "heartbeat."
+            )
+        return self

@@ -12,8 +12,9 @@ database drivers differ (``status``, ``metadata``, …) — the contract is the
 key set, not the inner types.
 """
 
+from collections.abc import Collection, Sequence
 from datetime import datetime
-from typing import Any, Protocol, TypedDict, runtime_checkable
+from typing import Any, Final, Protocol, TypedDict, runtime_checkable
 from uuid import UUID
 
 from skeino.schemas import (
@@ -38,6 +39,11 @@ class ThreadRow(TypedDict):
     config: dict[str, Any]
     status: Any  # ThreadStatus at runtime; loose so drivers' str passes
     ttl: dict[str, Any] | None
+
+
+#: Run statuses that mean "not finished yet": the rows a heartbeat keeps alive
+#: and an orphan sweep may fail.
+IN_FLIGHT_RUN_STATUSES: Final[frozenset[str]] = frozenset({"pending", "running"})
 
 
 class RunRow(TypedDict):
@@ -138,4 +144,30 @@ class MetadataStoreProtocol(Protocol):
 
     async def delete_run(self, thread_id: str, run_id: str) -> None:
         """Delete a single run row, scoped to its thread."""
+        ...
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Heartbeat: bump ``updated_at`` on the given runs that are in flight.
+
+        Called periodically by the process executing them, so a ``pending`` /
+        ``running`` row whose ``updated_at`` stops moving has lost its owner.
+        Terminal rows are left untouched.
+        """
+        ...
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark orphaned in-flight runs ``error`` and return them.
+
+        A run is orphaned when it is ``pending`` or ``running`` and its
+        ``updated_at`` is more than ``stale_after_seconds`` old (its owner has
+        stopped heartbeating), and it is not in ``exclude_run_ids`` (the
+        caller's own live runs). Each row is claimed with a conditional update,
+        so concurrent sweepers never both report the same run.
+        """
         ...

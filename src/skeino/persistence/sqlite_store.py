@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -416,6 +417,59 @@ class SqliteMetadataStore:
                 (thread_id, run_id),
             )
             await self._conn.commit()
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
+        if not run_ids:
+            return
+        now = _utcnow().isoformat()
+        async with self._lock:
+            await self._conn.executemany(
+                "UPDATE app_runs SET updated_at = ? "
+                "WHERE run_id = ? AND status IN ('pending', 'running')",
+                [(now, run_id) for run_id in run_ids],
+            )
+            await self._conn.commit()
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark in-flight runs not heartbeated within the window ``error``.
+
+        Staleness is decided on parsed datetimes rather than by comparing the
+        stored ISO strings in SQL, and each row is claimed with an update
+        conditioned on it still being in flight.
+        """
+        now = _utcnow()
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        excluded = set(exclude_run_ids)
+        failed: list[RunRow] = []
+        async with self._lock:
+            cursor = await self._conn.execute(
+                f"SELECT {_RUN_COLUMNS} FROM app_runs "  # nosec B608 - static columns
+                "WHERE status IN ('pending', 'running')"
+            )
+            candidates = [self._run_row(row) for row in await cursor.fetchall()]
+            for row in candidates:
+                run_id = str(row["run_id"])
+                if run_id in excluded or row["updated_at"] >= cutoff:
+                    continue
+                claimed = await self._conn.execute(
+                    "UPDATE app_runs SET status = 'error', error = ?, updated_at = ? "
+                    "WHERE run_id = ? AND status IN ('pending', 'running')",
+                    (error, now.isoformat(), run_id),
+                )
+                if claimed.rowcount:
+                    row["status"] = "error"
+                    row["error"] = error
+                    row["updated_at"] = now
+                    failed.append(row)
+            await self._conn.commit()
+        return failed
 
     @staticmethod
     def _ttl_payload(

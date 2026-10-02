@@ -6,8 +6,9 @@ Use this when wiring a skeino-backed FastAPI app programmatically. For
 after parsing the manifest.
 """
 
+import asyncio
 import logging
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import AsyncIterator, Awaitable, Callable, Mapping
 
@@ -234,11 +235,25 @@ def create_app(
                 settings=settings,
             )
             app_instance.state.registry = registry
+            # Fail runs orphaned by a previous process before serving (those
+            # whose heartbeat is already past the window), then keep this
+            # process's runs alive and keep sweeping on a timer.
+            orphan_timeout = settings.orphaned_run_timeout_seconds
+            await run_ops.liveness_pass(stale_after_seconds=orphan_timeout)
+            liveness = asyncio.create_task(
+                run_ops.maintain_runs(
+                    heartbeat_seconds=settings.run_heartbeat_seconds,
+                    stale_after_seconds=orphan_timeout,
+                )
+            )
             logger.info("skeino runtime initialised (graphs=%s)", list(compiled))
             try:
                 yield
             finally:
                 logger.info("skeino runtime shutting down")
+                liveness.cancel()
+                with suppress(asyncio.CancelledError):
+                    await liveness
                 # Cancel any in-flight background runs so their tasks unwind
                 # (persist ``interrupted``, release locks) before resources close.
                 await run_ops.shutdown()

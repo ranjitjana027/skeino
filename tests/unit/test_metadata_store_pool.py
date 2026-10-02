@@ -238,7 +238,7 @@ async def test_indexes_are_built_concurrently_outside_a_transaction(
         "CREATE INDEX CONCURRENTLY cannot run inside a transaction"
     )
     created = [q for q in direct.queries if q.startswith("CREATE INDEX")]
-    assert len(created) == 2
+    assert len(created) == len(ms._INDEXES)
     assert all("CONCURRENTLY" in q for q in created), created
     assert direct.closed == 1, "the index connection was not closed"
 
@@ -261,10 +261,12 @@ async def test_invalid_leftover_index_is_dropped_and_rebuilt(
 
     queries = _FakeDirectConnection.instances[0].queries
     dropped = [q for q in queries if q.startswith("DROP INDEX")]
-    assert len(dropped) == 2, f"invalid indexes were not dropped: {queries}"
+    assert len(dropped) == len(ms._INDEXES), (
+        f"invalid indexes were not dropped: {queries}"
+    )
     assert all("CONCURRENTLY" in q for q in dropped), dropped
     # Every drop must be followed by a rebuild, else the repair loses the index.
-    assert len([q for q in queries if q.startswith("CREATE INDEX")]) == 2
+    assert len([q for q in queries if q.startswith("CREATE INDEX")]) == len(ms._INDEXES)
 
 
 async def test_index_maintenance_holds_an_advisory_lock(

@@ -13,13 +13,14 @@ matching the checkpointer builder, so graph state and metadata share the
 operator's chosen database — falling back to ``skeino`` for pathless URIs.
 """
 
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
 
-from skeino.persistence.base import RunRow, ThreadRow
+from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES, RunRow, ThreadRow
 from skeino.persistence.uri import mongo_db_from_uri
 from skeino.schemas import (
     JsonValue,
@@ -69,6 +70,8 @@ class MongoMetadataStore:
         self._runs = db["app_runs"]
         await self._threads.create_index([("status", 1), ("updated_at", -1)])
         await self._runs.create_index([("thread_id", 1), ("created_at", -1)])
+        # Orphan sweep: in-flight runs by heartbeat age.
+        await self._runs.create_index([("status", 1), ("updated_at", 1)])
 
     async def aclose(self) -> None:
         """Close the motor client (called on app shutdown)."""
@@ -242,6 +245,50 @@ class MongoMetadataStore:
             {"_id": run_id},
             {"$set": {"status": status_value, "updated_at": _utcnow(), "error": error}},
         )
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
+        if not run_ids:
+            return
+        await self._runs.update_many(
+            {
+                "_id": {"$in": list(run_ids)},
+                "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
+            },
+            {"$set": {"updated_at": _utcnow()}},
+        )
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark in-flight runs not heartbeated within the window ``error``.
+
+        Each candidate is claimed with ``find_one_and_update`` on the same
+        stale filter, so a heartbeat (or another sweeper) that lands between
+        the scan and the claim wins.
+        """
+        from pymongo import ReturnDocument  # optional dependency: skeino[mongodb]
+
+        now = _utcnow()
+        stale = {
+            "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
+            "updated_at": {"$lt": now - timedelta(seconds=stale_after_seconds)},
+            "_id": {"$nin": list(exclude_run_ids)},
+        }
+        failed: list[RunRow] = []
+        async for doc in self._runs.find(stale, {"_id": 1}):
+            claimed = await self._runs.find_one_and_update(
+                {**stale, "_id": doc["_id"]},
+                {"$set": {"status": "error", "error": error, "updated_at": now}},
+                return_document=ReturnDocument.AFTER,
+            )
+            if claimed is not None:
+                failed.append(self._run_row(claimed))
+        return failed
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
         """Return a run row scoped to ``thread_id``."""

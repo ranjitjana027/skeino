@@ -14,7 +14,7 @@ closed by :meth:`MetadataStore.aclose` — see that method and
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Collection, Sequence
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
@@ -81,6 +81,14 @@ _INDEXES: Final[tuple[tuple[str, str, str], ...]] = (
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_runs_thread_created "
         "ON app_runs (thread_id, created_at DESC)",
         "DROP INDEX CONCURRENTLY IF EXISTS idx_app_runs_thread_created",
+    ),
+    (
+        # The orphan sweep scans in-flight runs by heartbeat age; partial, so
+        # it stays the size of the in-flight set, not of the run history.
+        "idx_app_runs_inflight_updated",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_runs_inflight_updated "
+        "ON app_runs (updated_at) WHERE status IN ('pending', 'running')",
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_app_runs_inflight_updated",
     ),
     (
         # Thread search sorts by updated_at DESC by default (DEFAULT_SORT_BY);
@@ -631,6 +639,56 @@ class MetadataStore:
                     (thread_id, run_id),
                 )
             await conn.commit()
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Bump ``updated_at`` on the given in-flight runs (heartbeat).
+
+        ``NOW()`` is the database clock, so heartbeats from different hosts are
+        comparable regardless of their own clock skew.
+        """
+        if not run_ids:
+            return
+        async with self._connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE app_runs SET updated_at = NOW()
+                    WHERE run_id = ANY(%s::uuid[])
+                      AND status IN ('pending', 'running')
+                    """,
+                    (list(run_ids),),
+                )
+            await conn.commit()
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark in-flight runs not heartbeated within the window ``error``.
+
+        One conditional ``UPDATE ... RETURNING``: atomic, so concurrent
+        sweepers on several workers never both claim a run.
+        """
+        async with self._connection() as conn:
+            async with conn.cursor() as cursor:
+                await cursor.execute(
+                    """
+                    UPDATE app_runs
+                    SET status = 'error', error = %s, updated_at = NOW()
+                    WHERE status IN ('pending', 'running')
+                      AND updated_at < NOW() - make_interval(secs => %s)
+                      AND NOT (run_id = ANY(%s::uuid[]))
+                    RETURNING run_id, thread_id, assistant_id, created_at, updated_at,
+                              status, metadata, kwargs, multitask_strategy, error
+                    """,
+                    (error, stale_after_seconds, list(exclude_run_ids)),
+                )
+                rows: list[RunRow] = list(await cursor.fetchall())
+            await conn.commit()
+        return rows
 
     def _build_ttl_payload(
         self, ttl: ThreadTtlConfig | None

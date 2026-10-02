@@ -62,6 +62,11 @@ _TERMINAL_STATUSES: Final[frozenset[str]] = frozenset(
     {"success", "error", "interrupted", "timeout"}
 )
 _INTERRUPT_CHANNEL: Final[str] = "__interrupt__"
+_ORPHANED_RUN_ERROR: Final[str] = (
+    "Run orphaned: the server process executing it stopped before it finished "
+    "(e.g. a crash, OOM kill, or restart), so it will never complete. "
+    "Start a new run to retry."
+)
 
 
 def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
@@ -541,6 +546,86 @@ class RunOps:
                 detail=f"Run {run_id} not found for thread {thread_id}.",
             )
         return self._run_row_to_model(row)
+
+    # ------------------------------------------------------------------
+    # Orphaned runs
+    #
+    # A run's task lives in the process that started it. If that process dies
+    # without a graceful shutdown (crash, OOM kill, ``docker kill``), its
+    # ``pending``/``running`` rows stay that way forever: pollers wait on a run
+    # that will never finish, and ``enqueue`` runs may queue behind it. Every
+    # process therefore heartbeats the runs it owns (bumping ``updated_at``),
+    # and fails in-flight rows whose heartbeat has stopped. That is LangGraph
+    # Platform's outcome too — it re-queues such runs and, once retries are
+    # exhausted, fails them ``error``; skeino keeps no run input to retry with,
+    # so it fails them directly.
+    # ------------------------------------------------------------------
+
+    async def heartbeat_runs(self) -> None:
+        """Refresh the liveness of every run this process is executing."""
+        run_ids = [run_id for _, run_id in self._registry.all_active()]
+        if run_ids:
+            await self._metadata_store.touch_runs(run_ids)
+
+    async def fail_orphaned_runs(self, *, stale_after_seconds: float) -> list[str]:
+        """Fail in-flight runs whose owner stopped heartbeating; return their ids.
+
+        This process's own active runs are never touched, whatever their row
+        says. A thread left with nothing in flight is moved off ``busy`` to
+        ``error``, as when one of its runs fails normally.
+        """
+        local = {run_id for _, run_id in self._registry.all_active()}
+        rows = await self._metadata_store.fail_stale_runs(
+            stale_after_seconds=stale_after_seconds,
+            exclude_run_ids=local,
+            error=_ORPHANED_RUN_ERROR,
+        )
+        for row in rows:
+            self._log_warning(
+                "Failed orphaned run %s on thread %s (status was in flight with "
+                "no heartbeat for over %.0fs)",
+                row["run_id"],
+                row["thread_id"],
+                stale_after_seconds,
+            )
+        for thread_id in {str(row["thread_id"]) for row in rows}:
+            if not await self._has_in_flight_runs(thread_id):
+                await self._metadata_store.update_thread(
+                    thread_id, status_value=_THREAD_ERROR
+                )
+        return [str(row["run_id"]) for row in rows]
+
+    async def liveness_pass(self, *, stale_after_seconds: float | None) -> None:
+        """One heartbeat + orphan sweep; failures are logged, never raised.
+
+        A metadata-store blip must neither crash startup nor stop liveness
+        tracking for good: the next pass simply tries again.
+        """
+        try:
+            await self.heartbeat_runs()
+            if stale_after_seconds is not None:
+                await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
+        except Exception as exc:
+            self._log_error("Run heartbeat / orphan sweep failed: %s", exc, exc=exc)
+
+    async def maintain_runs(
+        self, *, heartbeat_seconds: float, stale_after_seconds: float | None
+    ) -> None:
+        """Run :meth:`liveness_pass` every ``heartbeat_seconds``, forever."""
+        while True:
+            await asyncio.sleep(heartbeat_seconds)
+            await self.liveness_pass(stale_after_seconds=stale_after_seconds)
+
+    async def _has_in_flight_runs(self, thread_id: str) -> bool:
+        if self._registry.active_runs(thread_id):
+            return True
+        for status_value in ("pending", "running"):
+            rows = await self._metadata_store.list_run_rows(
+                thread_id, limit=1, offset=0, status_value=status_value
+            )
+            if rows:
+                return True
+        return False
 
     async def shutdown(self) -> None:
         """Cancel all in-flight background runs (runtime shutdown).

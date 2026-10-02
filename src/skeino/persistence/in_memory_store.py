@@ -5,12 +5,13 @@ without touching Postgres. Useful for tests, ``langgraph dev``-style local
 runs, and any deployment where durability is not required.
 """
 
+from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
 
-from skeino.persistence.base import RunRow, ThreadRow
+from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES, RunRow, ThreadRow
 from skeino.schemas import (
     JsonValue,
     MultitaskStrategy,
@@ -194,3 +195,35 @@ class InMemoryMetadataStore:
         row = self._runs.get(run_id)
         if row is not None and str(row["thread_id"]) == thread_id:
             del self._runs[run_id]
+
+    async def touch_runs(self, run_ids: Sequence[str]) -> None:
+        """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
+        now = _utcnow()
+        for run_id in run_ids:
+            row = self._runs.get(run_id)
+            if row is not None and row["status"] in IN_FLIGHT_RUN_STATUSES:
+                row["updated_at"] = now
+
+    async def fail_stale_runs(
+        self,
+        *,
+        stale_after_seconds: float,
+        exclude_run_ids: Collection[str],
+        error: str,
+    ) -> list[RunRow]:
+        """Mark in-flight runs not heartbeated within the window ``error``."""
+        now = _utcnow()
+        cutoff = now - timedelta(seconds=stale_after_seconds)
+        excluded = set(exclude_run_ids)
+        failed: list[RunRow] = []
+        for run_id, row in self._runs.items():
+            if (
+                row["status"] in IN_FLIGHT_RUN_STATUSES
+                and row["updated_at"] < cutoff
+                and run_id not in excluded
+            ):
+                row["status"] = "error"
+                row["error"] = error
+                row["updated_at"] = now
+                failed.append(dict(row))  # type: ignore[arg-type]
+        return failed

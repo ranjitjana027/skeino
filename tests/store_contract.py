@@ -33,6 +33,9 @@ SORT_KEYS = ("thread_id", "status", "created_at", "updated_at", "state_updated_a
 
 # Short pause so successive writes get distinct timestamps on every backend.
 TICK = 0.005
+# Heartbeat window for the orphan-sweep tests: well above TICK and Mongo's
+# millisecond timestamp precision, short enough to keep the suite fast.
+STALE = 0.25
 
 
 def _tid() -> str:
@@ -472,6 +475,72 @@ class StoreContract:
         )
         run = await self._run(store, tid, run_id=rid)
         assert (run["status"], run["error"]) == ("pending", None)
+
+    # --- run liveness (heartbeat + orphan sweep) -------------------------------
+
+    async def test_fail_stale_runs_claims_only_unheartbeated_in_flight_runs(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        ids = {
+            name: str((await self._run(store, tid))["run_id"])
+            for name in ("pending", "running", "fresh", "excluded", "done")
+        }
+        await store.update_run_status(ids["running"], "running")
+        await store.update_run_status(ids["done"], "success")
+        await asyncio.sleep(STALE + TICK)
+        await store.touch_runs([ids["fresh"]])  # heartbeat keeps it alive
+
+        failed = await store.fail_stale_runs(
+            stale_after_seconds=STALE,
+            exclude_run_ids=[ids["excluded"]],
+            error="orphaned",
+        )
+        assert sorted(_ids(failed, "run_id")) == sorted(
+            [ids["pending"], ids["running"]]
+        )
+        assert all((r["status"], r["error"]) == ("error", "orphaned") for r in failed)
+        for name in ("pending", "running"):
+            row = await self._get_run(store, tid, ids[name])
+            assert (row["status"], row["error"]) == ("error", "orphaned")
+        for name, expected in (
+            ("fresh", "pending"),
+            ("excluded", "pending"),
+            ("done", "success"),
+        ):
+            assert (await self._get_run(store, tid, ids[name]))["status"] == expected
+
+        # Claimed once: a second sweep (another worker) reports nothing.
+        again = await store.fail_stale_runs(
+            stale_after_seconds=STALE, exclude_run_ids=[], error="orphaned"
+        )
+        assert _ids(again, "run_id") == [ids["excluded"]]
+
+    async def test_touch_runs_leaves_terminal_and_unknown_runs_alone(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        rid = str((await self._run(store, tid))["run_id"])
+        await store.update_run_status(rid, "success")
+        before = await self._get_run(store, tid, rid)
+        await asyncio.sleep(TICK)
+        await store.touch_runs([rid, _tid()])
+        await store.touch_runs([])
+        assert await self._get_run(store, tid, rid) == before
+
+    async def test_touch_runs_bumps_in_flight_updated_at(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        run = await self._run(store, tid)
+        await asyncio.sleep(TICK)
+        await store.touch_runs([str(run["run_id"])])
+        touched = await self._get_run(store, tid, str(run["run_id"]))
+        assert touched["updated_at"] > run["updated_at"]
+        assert touched["status"] == "pending"
 
     async def test_run_lookups_are_scoped_to_their_thread(
         self, store: MetadataStoreProtocol
