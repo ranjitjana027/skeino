@@ -1,6 +1,7 @@
 """Thread CRUD, state, and history operations."""
 
 import asyncio
+import logging
 from datetime import datetime
 from typing import Any, Final
 from uuid import UUID, uuid4
@@ -33,6 +34,8 @@ from skeino.serialization import (
 # Sized to sit under the default checkpointer pool (10 connections) so a search
 # burst cannot starve concurrent runs of a connection.
 _SEARCH_ENRICH_CONCURRENCY: Final[int] = 8
+
+logger = logging.getLogger(__name__)
 
 
 def _to_isoformat(value: datetime | None) -> str | None:
@@ -76,7 +79,6 @@ class ThreadOps:
         *,
         graph: Any,
         metadata_store: MetadataStoreProtocol,
-        logger: Any | None = None,
         search_enrich_concurrency: int = _SEARCH_ENRICH_CONCURRENCY,
     ) -> None:
         """Capture the graph and metadata store backing this ops layer.
@@ -96,7 +98,6 @@ class ThreadOps:
             )
         self._graph = graph
         self._metadata_store = metadata_store
-        self._logger = logger
         # Shared by every search on this instance (``create_app`` builds one per
         # app), so the bound is on checkpoint reads *in aggregate*. A per-call
         # semaphore would let N concurrent searches run N x limit reads and
@@ -368,11 +369,10 @@ class ThreadOps:
         except AttributeError:
             # Fail closed: drop all values rather than leak internal fields when
             # the declared output schema cannot be introspected.
-            if self._logger is not None:
-                self._logger.warning(
-                    "Could not resolve output schema fields; returning an empty "
-                    "allow-set to avoid leaking internal fields to clients"
-                )
+            logger.warning(
+                "Could not resolve output schema fields; returning an empty "
+                "allow-set to avoid leaking internal fields to clients"
+            )
             return frozenset()
 
     async def build_model_from_row(self, row: ThreadRow) -> ThreadModel:
@@ -406,14 +406,13 @@ class ThreadOps:
             # with a traceback rather than masking it as status="error". Caught
             # broadly on purpose — this runs once per row in search(), so one
             # unreadable checkpoint must not 500 the entire listing.
-            if self._logger is not None:
-                self._logger.error(
-                    "Failed to load checkpoint for thread %s; returning stored "
-                    "status %r with empty values",
-                    thread_id,
-                    thread_status,
-                    exc_info=exc,
-                )
+            logger.error(
+                "Failed to load checkpoint for thread %s; returning stored "
+                "status %r with empty values",
+                thread_id,
+                thread_status,
+                exc_info=exc,
+            )
         ttl_payload = row.get("ttl")
         ttl_info = (
             ThreadTtlInfo(

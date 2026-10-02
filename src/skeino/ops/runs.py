@@ -10,6 +10,7 @@ outlive its client (``on_disconnect="continue"``) and be re-attached to.
 """
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncGenerator, AsyncIterator, Final
@@ -79,6 +80,8 @@ _ORPHANED_RUN_ERROR: Final[str] = (
 )
 
 _DEFAULT_STREAM_RETENTION_SECS: Final[float] = 600.0
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_last_event_id(value: str | None) -> int | None:
@@ -151,15 +154,6 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _session_name_of(kwargs: Any) -> str | None:
-    """Read the LangSmith session a stored run was traced into, if any."""
-    if isinstance(kwargs, dict):
-        value = kwargs.get("langsmith_session_name")
-        if isinstance(value, str) and value:
-            return value
-    return None
-
-
 class RunOps:
     """Create, stream, await, cancel, and inspect runs against a single graph."""
 
@@ -174,7 +168,6 @@ class RunOps:
         lock_manager: ThreadLockManager,
         registry: BackgroundRunRegistry,
         streams: RunStreamRegistry | None = None,
-        logger: Any | None = None,
     ) -> None:
         """Capture every collaborator a run needs."""
         self._graph = graph
@@ -187,7 +180,6 @@ class RunOps:
         self._streams = streams or RunStreamRegistry(
             retention_seconds=_DEFAULT_STREAM_RETENTION_SECS
         )
-        self._logger = logger
         # Threads whose orphaned runs were claimed but whose release failed;
         # retried every liveness pass, since a later sweep never re-claims them.
         self._unreleased_threads: set[str] = set()
@@ -496,7 +488,7 @@ class RunOps:
                 raise
             # Superseded by interrupt/rollback while queued: the request itself
             # is fine, so answer it instead of leaking the cancel.
-            self._log_warning(
+            logger.warning(
                 "Queued streaming run %s on thread %s was superseded before it started",
                 run_id,
                 thread_id,
@@ -603,10 +595,9 @@ class RunOps:
         stream_modes: list[str],
         stream: RunEventStream,
     ) -> int:
-        """Execute a streaming run, publishing its events; return total tokens.
+        """Execute a streaming run in its own task, publishing its events.
 
-        The body of what used to be the in-request SSE generator. It now runs
-        in its own task, so a disconnecting client no longer unwinds it.
+        Returns total tokens. A disconnecting client does not unwind it.
         """
         run_id = str(run.run_id)
         thread_id = str(run.thread_id)
@@ -666,12 +657,12 @@ class RunOps:
                             and is_retriable_stream_error(exc)
                         ):
                             backoff = STREAM_RETRY_BACKOFF_SECS * (2**attempt)
-                            self._log_warning(
+                            logger.warning(
                                 "Stream attempt %s failed (retrying in %.1fs): %s",
                                 attempt + 1,
                                 backoff,
                                 exc,
-                                exc=exc,
+                                exc_info=exc,
                             )
                             await asyncio.sleep(backoff)
                         else:
@@ -700,17 +691,17 @@ class RunOps:
             )
             return total_tokens
         except asyncio.CancelledError:
-            self._log_warning(
+            logger.warning(
                 "Streaming run %s cancelled for thread %s", run_id, thread_id
             )
             raise
         except Exception as exc:
-            self._log_error(
+            logger.error(
                 "Streaming run %s failed for thread %s: %s",
                 run_id,
                 thread_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             # Persist the failure best-effort; a store outage must not stop
             # subscribers from receiving the 'error' event.
@@ -752,7 +743,7 @@ class RunOps:
             if cancelled and task is not None:
                 task.cancel()
             completed = True
-            self._log_warning(
+            logger.warning(
                 "Subscriber to run %s overflowed and was detached; %s",
                 run_id,
                 "cancelling the run" if cancelled else "the run continues",
@@ -809,11 +800,11 @@ class RunOps:
                 except Exception as exc:
                     # The run's finalizer failed (the registry logged it); the
                     # state read below was never attempted.
-                    self._log_error(
+                    logger.error(
                         "Joined run %s did not finish cleanly: %s",
                         run_id,
                         exc,
-                        exc=exc,
+                        exc_info=exc,
                     )
                     yield sse_event(
                         "error",
@@ -838,11 +829,11 @@ class RunOps:
             raise
         except Exception as exc:
             # Headers are already sent: report on the stream, never end clean.
-            self._log_error(
+            logger.error(
                 "Failed to read final state for joined run %s: %s",
                 run_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             yield sse_event(
                 "error",
@@ -874,19 +865,10 @@ class RunOps:
         yield sse_event("end", {"run_id": run_id, "status": run_status}, None)
 
     # ------------------------------------------------------------------
-    # Stateless runs
+    # Stateless runs (top-level /runs, /runs/wait, /runs/stream, /runs/batch)
     #
-    # The Platform exposes top-level /runs, /runs/wait, /runs/stream and
-    # /runs/batch for one-shot invocations where no checkpoint history is
-    # wanted. skeino had only the thread-scoped forms, so every caller that
-    # wanted a one-shot run had to open a thread, run against it, and delete it
-    # — the same three steps, repeated in each client, in whatever language it
-    # happened to be written in.
-    #
-    # These do that once, here. The thread is an implementation detail: it
-    # exists for the duration of the run because the checkpointer needs
-    # somewhere to write, and it is deleted on the way out, successful run or
-    # not. Nothing about it reaches the caller.
+    # Each runs on an ephemeral thread the checkpointer can write to, deleted
+    # on the way out whatever the outcome. The caller never sees it.
     # ------------------------------------------------------------------
 
     async def create_stateless_run(self, request: RunCreateRequest) -> RunModel:
@@ -927,7 +909,7 @@ class RunOps:
         except HTTPException:
             raise
         except Exception as exc:
-            self._log_error("Stateless run failed: %s", exc, exc=exc)
+            logger.error("Stateless run failed: %s", exc, exc_info=exc)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=str(exc),
@@ -961,10 +943,8 @@ class RunOps:
     async def run_stateless_batch(self, requests: list[RunCreateRequest]) -> list[Any]:
         """Run each payload on its own ephemeral thread; return outputs in order.
 
-        Sequential, not concurrent. Each run holds a graph and a model for the
-        length of its execution, so a batch of them fanned out in parallel is a
-        load multiplier a caller cannot see coming. A caller who wants
-        concurrency can issue concurrent requests and choose its own width.
+        Sequential on purpose: a parallel fan-out is a hidden load multiplier.
+        Callers wanting concurrency can issue concurrent requests.
         """
         return [await self.wait_stateless_run(request) for request in requests]
 
@@ -986,16 +966,14 @@ class RunOps:
     async def _discard_thread(self, thread_id: str) -> None:
         """Delete an ephemeral thread and its checkpoints, best-effort.
 
-        A thread that outlives its run is litter, not a fault: the caller
-        already has its answer, and the run itself succeeded or failed on its
-        own terms. Failing the request over the cleanup would convert a
-        successful run into an error the caller cannot act on.
+        A leftover thread is litter, not a fault: failing the request over it
+        would turn a finished run into an error the caller cannot act on.
         """
         try:
             await self._thread_ops.delete(thread_id)
         except Exception as exc:  # noqa: BLE001 - cleanup must not mask the run
-            self._log_warning(
-                "Could not delete ephemeral thread %s: %s", thread_id, exc, exc=exc
+            logger.warning(
+                "Could not delete ephemeral thread %s: %s", thread_id, exc, exc_info=exc
             )
 
     async def list_runs(
@@ -1006,12 +984,7 @@ class RunOps:
         offset: int,
         status_value: RunStatus | None,
     ) -> list[RunModel]:
-        """List run metadata rows for a thread.
-
-        ``status_value`` is validated against :data:`RunStatus` at the API edge
-        (FastAPI parses the query param into the Literal), so no membership
-        check is needed here.
-        """
+        """List run metadata rows for a thread."""
         await self._thread_ops.ensure_exists(thread_id)
         rows = await self._metadata_store.list_run_rows(
             thread_id,
@@ -1037,13 +1010,10 @@ class RunOps:
     #
     # A run's task lives in the process that started it. If that process dies
     # without a graceful shutdown (crash, OOM kill, ``docker kill``), its
-    # ``pending``/``running`` rows stay that way forever: pollers wait on a run
-    # that will never finish, and its thread stays ``busy``. Every
-    # process therefore heartbeats the runs it owns (bumping ``updated_at``),
-    # and fails in-flight rows whose heartbeat has stopped. That is LangGraph
-    # Platform's outcome too — it re-queues such runs and, once retries are
-    # exhausted, fails them ``error``; skeino keeps no run input to retry with,
-    # so it fails them directly.
+    # ``pending``/``running`` rows stay that way forever and its threads stay
+    # ``busy``. Every process heartbeats the runs it owns (bumping
+    # ``updated_at``) and fails in-flight rows whose heartbeat has stopped —
+    # LangGraph Platform's end state too, minus its retries.
     # ------------------------------------------------------------------
 
     async def heartbeat_runs(self) -> None:
@@ -1071,7 +1041,7 @@ class RunOps:
             error=_ORPHANED_RUN_ERROR,
         )
         for row in rows:
-            self._log_warning(
+            logger.warning(
                 "Failed orphaned run %s on thread %s (status was in flight with "
                 "no heartbeat for over %.0fs)",
                 row["run_id"],
@@ -1084,11 +1054,11 @@ class RunOps:
                 await self._release_orphaned_thread(thread_id)
             except Exception as exc:
                 # Kept in ``_unreleased_threads``: the next pass retries it.
-                self._log_error(
+                logger.error(
                     "Failed to release thread %s after failing its orphaned runs: %s",
                     thread_id,
                     exc,
-                    exc=exc,
+                    exc_info=exc,
                 )
             else:
                 self._unreleased_threads.discard(thread_id)
@@ -1153,14 +1123,14 @@ class RunOps:
                 )
             except Exception as exc:
                 # Still ``busy``, so the next pass finds it again.
-                self._log_error(
+                logger.error(
                     "Failed to release stuck busy thread %s: %s",
                     thread_id,
                     exc,
-                    exc=exc,
+                    exc_info=exc,
                 )
                 continue
-            self._log_warning(
+            logger.warning(
                 "Released thread %s: busy for over %.0fs with no run in flight",
                 thread_id,
                 stale_after_seconds,
@@ -1212,7 +1182,7 @@ class RunOps:
         try:
             await self.heartbeat_runs()
         except Exception as exc:
-            self._log_error("Run heartbeat failed: %s", exc, exc=exc)
+            logger.error("Run heartbeat failed: %s", exc, exc_info=exc)
 
     async def _sweep_pass(self, *, stale_after_seconds: float | None) -> None:
         try:
@@ -1220,7 +1190,7 @@ class RunOps:
             if stale_after_seconds is not None:
                 await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
         except Exception as exc:
-            self._log_error("Run orphan sweep failed: %s", exc, exc=exc)
+            logger.error("Run orphan sweep failed: %s", exc, exc_info=exc)
 
     async def _has_in_flight_runs(self, thread_id: str) -> bool:
         if self._registry.active_runs(thread_id):
@@ -1330,9 +1300,7 @@ class RunOps:
             # held to release; persist ``interrupted`` so the run row does not
             # stay stuck at ``pending``. The run never started, so the thread
             # (another run's, if any) is not its to touch.
-            self._log_warning(
-                "Queued run %s cancelled for thread %s", run_id, thread_id
-            )
+            logger.warning("Queued run %s cancelled for thread %s", run_id, thread_id)
             await self._interrupt_row_only(run_id)
             raise
         try:
@@ -1362,7 +1330,7 @@ class RunOps:
                 total_tokens = await self._total_run_tokens(thread_id)
             return total_tokens
         except asyncio.CancelledError:
-            self._log_warning(
+            logger.warning(
                 "Background run %s cancelled for thread %s", run_id, thread_id
             )
             superseded = await self._mark_run_interrupted(run_id, thread_id)
@@ -1372,8 +1340,8 @@ class RunOps:
                 await self._settle_thread_after_success(thread_id)
             raise
         except Exception as exc:
-            self._log_error(
-                "Run %s failed for thread %s: %s", run_id, thread_id, exc, exc=exc
+            logger.error(
+                "Run %s failed for thread %s: %s", run_id, thread_id, exc, exc_info=exc
             )
             await self._mark_run_failed(run_id, thread_id, str(exc))
             return 0
@@ -1411,8 +1379,11 @@ class RunOps:
         except Exception as exc:
             # Fail closed: a fallback read could return a later run's state,
             # and a null output would look like a run that produced nothing.
-            self._log_error(
-                "Failed to read the final state of run %s: %s", run_id, exc, exc=exc
+            logger.error(
+                "Failed to read the final state of run %s: %s",
+                run_id,
+                exc,
+                exc_info=exc,
             )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1449,23 +1420,23 @@ class RunOps:
                     # The latest thread state may belong to a later run.
                     raise
                 # Run-scoped read is best-effort; fall back to the latest state.
-                self._log_warning(
+                logger.warning(
                     "Run-scoped state read failed for run %s; using latest "
                     "thread state: %s",
                     run_id,
                     exc,
-                    exc=exc,
+                    exc_info=exc,
                 )
         try:
             snapshot = await self._graph.aget_state(config)
         except Exception as exc:
             if raise_on_error:
                 raise
-            self._log_error(
+            logger.error(
                 "Failed to read final state for thread %s: %s",
                 thread_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             return None
         return self._output_with_interrupts(snapshot)
@@ -1473,14 +1444,10 @@ class RunOps:
     def _output_with_interrupts(self, snapshot: Any) -> JsonValue:
         """Serialize a snapshot's values, carrying its pending interrupts along.
 
-        A run that ends on ``interrupt()`` finishes without error, so its state
-        values alone are indistinguishable from a finished run's: the tool call
-        awaiting a decision sits in ``messages`` with no result after it, and
-        nothing in the output says a human is being waited on. Interrupts are
-        not part of ``values`` — they live on the snapshot (and, on older
-        LangGraph, per task) — so merge them onto the reserved
-        ``__interrupt__`` channel, which is where the streaming path, LangGraph
-        Platform's ``runs.wait``, and the SDK's ``useStream`` all expect them.
+        Interrupts live on the snapshot, not in ``values``, so a parked run would
+        look finished. They are merged onto the reserved ``__interrupt__``
+        channel, where streaming, Platform's ``runs.wait`` and ``useStream``
+        expect them.
         """
         output = serialize_value(getattr(snapshot, "values", None))
         interrupts = _pending_interrupts(snapshot)
@@ -1490,7 +1457,7 @@ class RunOps:
             # Non-mapping graph state has no channel to carry them on. Log
             # loudly rather than drop the pause silently: the client is about
             # to read a parked run as a completed one.
-            self._log_warning(
+            logger.warning(
                 "Paused run output is %s, not a mapping; cannot report %s",
                 type(output).__name__,
                 _INTERRUPT_CHANNEL,
@@ -1534,13 +1501,8 @@ class RunOps:
     async def _settled_thread_status(self, thread_id: str) -> ThreadStatus:
         """Return the status a thread settles into once its run finishes cleanly.
 
-        A run that ends on ``interrupt()`` finishes without error but leaves the
-        graph parked mid-execution waiting for a human decision. LangGraph
-        Platform reports that thread as ``interrupted``, and clients lean on it
-        — it is how a thread list shows what is waiting on the customer, and how
-        a UI decides to offer a resume rather than a fresh turn. Reported
-        ``idle``, such a thread is indistinguishable from one that has nothing
-        pending.
+        ``interrupted`` when the graph is parked on ``interrupt()`` (as on
+        LangGraph Platform; clients use it to offer a resume), else ``idle``.
 
         A read failure raises rather than guessing ``idle``, which would lose a
         pending interrupt for good: every caller leaves the thread ``busy`` and
@@ -1549,9 +1511,7 @@ class RunOps:
         snapshot = await self._graph.aget_state(
             {"configurable": {"thread_id": thread_id}}
         )
-        if snapshot is None:
-            return _THREAD_IDLE
-        if _pending_interrupts(snapshot):
+        if snapshot is not None and _pending_interrupts(snapshot):
             return _THREAD_INTERRUPTED
         return _THREAD_IDLE
 
@@ -1572,12 +1532,12 @@ class RunOps:
             # A read failure (as opposed to "no checkpointer / no state") means
             # usage is unknown, not zero — log at error level so the silent 0
             # reported to the quota gateway is at least observable.
-            self._log_error(
+            logger.error(
                 "Failed to read state for token usage on thread %s; "
                 "reporting 0 tokens: %s",
                 thread_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             return 0
         values = getattr(snapshot, "values", None)
@@ -1600,7 +1560,7 @@ class RunOps:
             metadata=serialize_mapping(row["metadata"]),
             kwargs=serialize_mapping(row["kwargs"]),
             multitask_strategy=row["multitask_strategy"],
-            langsmith_session_name=_session_name_of(row["kwargs"]),
+            langsmith_session_name=row["kwargs"].get("langsmith_session_name") or None,
         )
 
     def _resolve_run_input(self, request: RunCreateRequest) -> Any:
@@ -1662,10 +1622,10 @@ class RunOps:
         if task.cancelled():
             return
         if (exc := task.exception()) is not None:
-            self._log_error(
+            logger.error(
                 "Streaming run admission failed after its client left: %s",
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             return
         run, events, producer = task.result()
@@ -1698,11 +1658,11 @@ class RunOps:
                 mark_state_updated=True,
             )
         except Exception as exc:
-            self._log_error(
+            logger.error(
                 "Failed to settle thread %s after its run succeeded; will retry: %s",
                 thread_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
         else:
             self._unsettled_threads.discard(thread_id)
@@ -1724,11 +1684,11 @@ class RunOps:
                 if await self._has_in_flight_runs(thread_id):
                     continue
             except Exception as exc:
-                self._log_error(
+                logger.error(
                     "Failed to check thread %s for a settle retry: %s",
                     thread_id,
                     exc,
-                    exc=exc,
+                    exc_info=exc,
                 )
                 continue
             await self._settle_thread_after_success(thread_id)
@@ -1771,14 +1731,14 @@ class RunOps:
             return None
         row = await self._metadata_store.fetch_run_row(thread_id, run_id)
         if row is None:
-            self._log_warning(
+            logger.warning(
                 "Run %s finished as %s, but its row was deleted; "
                 "leaving its thread alone",
                 run_id,
                 status_value,
             )
             return _deleted_outcome(run_id)
-        self._log_warning(
+        logger.warning(
             "Run %s finished as %s, but its row was already finalized as %s; "
             "keeping the persisted status",
             run_id,
@@ -1810,8 +1770,11 @@ class RunOps:
                 )
             return superseded
         except Exception as exc:
-            self._log_error(
-                "Failed to persist error state for run %s: %s", run_id, exc, exc=exc
+            logger.error(
+                "Failed to persist error state for run %s: %s",
+                run_id,
+                exc,
+                exc_info=exc,
             )
             return None
 
@@ -1836,11 +1799,11 @@ class RunOps:
                 )
             return superseded
         except Exception as exc:
-            self._log_error(
+            logger.error(
                 "Failed to persist interrupted state for run %s: %s",
                 run_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
             return None
 
@@ -1857,21 +1820,9 @@ class RunOps:
                 run_id, _RUN_INTERRUPTED, error="Run cancelled before it started."
             )
         except Exception as exc:
-            self._log_error(
+            logger.error(
                 "Failed to persist interrupted state for unstarted run %s: %s",
                 run_id,
                 exc,
-                exc=exc,
+                exc_info=exc,
             )
-
-    def _log_warning(
-        self, msg: str, *args: Any, exc: BaseException | None = None
-    ) -> None:
-        if self._logger is not None:
-            self._logger.warning(msg, *args, exc_info=exc)
-
-    def _log_error(
-        self, msg: str, *args: Any, exc: BaseException | None = None
-    ) -> None:
-        if self._logger is not None:
-            self._logger.error(msg, *args, exc_info=exc)
