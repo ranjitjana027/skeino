@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 from fastapi import FastAPI
 
@@ -199,3 +200,70 @@ def test_orphan_timeout_must_outlast_two_heartbeats(
 
 def test_orphan_sweep_can_be_disabled() -> None:
     assert SkeinoSettings(orphaned_run_timeout_seconds=None)
+
+
+# --- streaming runs (registry-tracked producer tasks, #134) -----------------
+
+
+async def test_sweep_spares_another_workers_live_streaming_run(tmp_path: Path) -> None:
+    # A streaming run executes in a registry-tracked producer task, so its
+    # owner heartbeats it like a background run: B's sweeps must not fail it.
+    db = tmp_path / "skeino.db"
+    graph_a = FakeGraph()
+    graph_a.stream_gate = asyncio.Event()
+    async with (
+        _running(_app(db, graph_a)) as worker_a,
+        _running(_app(db, FakeGraph())) as worker_b,
+    ):
+        thread_id = str(uuid4())
+        run, events = await worker_a.create_streaming_run(
+            thread_id,
+            RunCreateRequest(
+                assistant_id="agent",
+                input={"messages": []},
+                if_not_exists="create",
+                stream_mode=["updates", "values"],
+                stream_resumable=True,
+            ),
+        )
+        run_id = str(run.run_id)
+        drained = asyncio.create_task(_drain(events))
+        await asyncio.wait_for(graph_a.stream_started.wait(), 5)
+
+        await asyncio.sleep(TIMEOUT * 3)  # several sweep windows on both workers
+        assert (await _status(worker_b, thread_id, run_id))[0] == "running"
+
+        graph_a.stream_gate.set()
+        body = await asyncio.wait_for(drained, 5)
+        assert "event: end" in body
+        assert (await _status(worker_a, thread_id, run_id))[0] == "success"
+
+
+async def test_joining_a_swept_run_reports_the_orphaned_error(tmp_path: Path) -> None:
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id, run_id = await _crashed_run(ops, age_seconds=3600)
+
+    app = _app(db, FakeGraph())
+    async with _running(app) as ops:  # startup pass fails the orphan
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            joined = await client.get(
+                f"/threads/{thread_id}/runs/{run_id}/stream",
+                headers={"Last-Event-ID": "-1"},
+            )
+            assert joined.status_code == 200
+            assert joined.text.startswith("event: error\n")
+            assert "orphaned" in joined.text
+
+            waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/join")
+            assert waited.status_code == 500
+            assert "orphaned" in waited.json()["detail"]
+
+
+async def _drain(events: Any) -> str:
+    return "".join([chunk async for chunk in events])
