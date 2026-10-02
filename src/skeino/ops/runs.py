@@ -203,6 +203,10 @@ class RunOps:
         """
         run = await self.get_run(thread_id, run_id)  # 404 if unknown
         task = self._registry.get(run_id)
+        if task is None:
+            # The read above yields: the run may have finished, and its task
+            # been forgotten, in between. Use a fresh persisted status.
+            run = await self.get_run(thread_id, run_id)
         if task is not None:
             await self._registry.wait(run_id)
         elif run.status not in _TERMINAL_STATUSES:
@@ -1052,24 +1056,22 @@ class RunOps:
         cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
         page_size, offset = 100, 0
         busy: list[str] = []
-        # Collected first: releasing a thread moves it out of the filtered
-        # result, which would shift later pages.
+        # Oldest first (indexed on every store), so the scan stops at the first
+        # thread busy for less than the timeout. Collected before releasing:
+        # a released thread leaves the filtered result and would shift pages.
         while True:
             page = await self._metadata_store.search_thread_rows(
                 ThreadSearchRequest(
                     status=_THREAD_BUSY,
                     limit=page_size,
                     offset=offset,
-                    sort_by="thread_id",
+                    sort_by="updated_at",
                     sort_order="asc",
                 )
             )
-            busy.extend(
-                str(thread["thread_id"])
-                for thread in page
-                if _as_utc(thread["updated_at"]) < cutoff
-            )
-            if len(page) < page_size:
+            stale = [t for t in page if _as_utc(t["updated_at"]) < cutoff]
+            busy.extend(str(thread["thread_id"]) for thread in stale)
+            if len(stale) < page_size:
                 break
             offset += page_size
         for thread_id in busy:

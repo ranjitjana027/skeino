@@ -98,6 +98,14 @@ _INDEXES: Final[tuple[tuple[str, str, str], ...]] = (
         "ON app_threads (updated_at DESC)",
         "DROP INDEX CONCURRENTLY IF EXISTS idx_app_threads_updated_at",
     ),
+    (
+        # The orphan sweep looks for threads left ``busy``, oldest first, on
+        # every heartbeat; not partial, as the status arrives as a parameter.
+        "idx_app_threads_status_updated",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_threads_status_updated "
+        "ON app_threads (status, updated_at)",
+        "DROP INDEX CONCURRENTLY IF EXISTS idx_app_threads_status_updated",
+    ),
 )
 
 # A concurrent build that fails leaves the index behind marked invalid, and

@@ -75,6 +75,18 @@ _CREATE_RUNS_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_app_runs_thread_created
 ON app_runs (thread_id, created_at DESC)
 """
+# The orphan sweep scans in-flight runs on every heartbeat; partial, so it stays
+# the size of the in-flight set, not of the run history. Its predicate is the
+# sweep query's own, which is what lets SQLite use it.
+_CREATE_INFLIGHT_RUNS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_app_runs_inflight_updated
+ON app_runs (updated_at) WHERE status IN ('pending', 'running')
+"""
+# The sweep also looks for threads left ``busy`` (status filter, oldest first).
+_CREATE_THREADS_STATUS_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_app_threads_status_updated
+ON app_threads (status, updated_at)
+"""
 
 _THREAD_COLUMNS = (
     "thread_id, created_at, updated_at, state_updated_at, metadata, config, status, ttl"
@@ -128,6 +140,8 @@ class SqliteMetadataStore:
         await self._conn.execute(_CREATE_THREADS_SQL)
         await self._conn.execute(_CREATE_RUNS_SQL)
         await self._conn.execute(_CREATE_RUNS_INDEX_SQL)
+        await self._conn.execute(_CREATE_INFLIGHT_RUNS_INDEX_SQL)
+        await self._conn.execute(_CREATE_THREADS_STATUS_INDEX_SQL)
         await self._conn.commit()
 
     async def aclose(self) -> None:

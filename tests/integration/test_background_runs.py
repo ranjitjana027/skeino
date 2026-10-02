@@ -7,6 +7,7 @@ parks ``ainvoke`` until released, making the in-flight window deterministic.
 """
 
 import asyncio
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -347,3 +348,40 @@ async def test_shutdown_cancels_in_flight_runs() -> None:
     # Lifespan exit cancelled the background task via run_ops.shutdown().
     final = await run_ops.get_run(_THREAD, str(run.run_id))
     assert final.status == "interrupted"
+
+
+async def test_join_refreshes_a_status_that_finished_while_it_was_read() -> None:
+    # The run finishes, and its task is forgotten, while join's first status
+    # read is in flight: a stale ``running`` snapshot must not become a 409.
+    app, graph = build_test_app()
+    async with app.router.lifespan_context(app):
+        ops = app.state.skeino.run_ops
+        graph.invoke_gate = asyncio.Event()
+        run = await ops.create_run(
+            _THREAD,
+            RunCreateRequest(
+                assistant_id="test_agent",
+                input={"messages": []},
+                if_not_exists="create",
+            ),
+        )
+        await graph.invoke_started.wait()
+        get_run = ops.get_run
+        calls = 0
+
+        async def finishes_during_read(thread_id: str, run_id: str) -> Any:
+            nonlocal calls
+            calls += 1
+            snapshot = await get_run(thread_id, run_id)
+            if calls == 1:
+                task = ops._registry.get(run_id)
+                graph.invoke_gate.set()
+                await asyncio.wait({task})
+                while ops._registry.get(run_id) is not None:
+                    await asyncio.sleep(0)
+            return snapshot
+
+        ops.get_run = finishes_during_read
+        output = await ops.join_run(str(run.thread_id), str(run.run_id))
+        assert calls == 2
+        assert isinstance(output, dict) and output.get("messages")

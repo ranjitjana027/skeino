@@ -426,3 +426,40 @@ async def test_stuck_thread_release_spares_a_thread_with_a_run_in_flight(
         )
         await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
         assert (await store.fetch_thread_row(thread_id))["status"] == "busy"
+
+
+async def test_sqlite_sweep_queries_use_an_index(tmp_path: Path) -> None:
+    # The sweep runs every heartbeat while holding the store lock: its scans
+    # must stay the size of the in-flight set, not of the whole history.
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        await _crashed_run(ops, age_seconds=3600)
+        store = ops._metadata_store
+        execute = store._conn.execute
+        selects: list[tuple[str, Any]] = []
+
+        def record(sql: str, parameters: Any = None) -> Any:
+            if sql.lstrip().startswith("SELECT"):
+                selects.append((sql, parameters))
+            return execute(sql, parameters)
+
+        store._conn.execute = record
+        await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        store._conn.execute = execute
+
+        plans = {}
+        for sql, parameters in selects:
+            if "FROM app_runs WHERE status IN" in sql or "FROM app_threads" in sql:
+                cursor = await execute(f"EXPLAIN QUERY PLAN {sql}", parameters or ())
+                plans[sql] = " | ".join(str(row[-1]) for row in await cursor.fetchall())
+        assert any("idx_app_runs_inflight_updated" in p for p in plans.values()), plans
+        assert any("idx_app_threads_status_updated" in p for p in plans.values()), plans
+        # Walking a partial index (``SCAN … USING INDEX``) reads only the
+        # in-flight rows; a bare ``SCAN app_…`` reads the whole table.
+        assert not any(
+            step.startswith("SCAN app_") and "USING" not in step
+            for plan in plans.values()
+            for step in plan.split(" | ")
+        ), plans
