@@ -362,3 +362,67 @@ async def test_joining_a_swept_run_reports_the_orphaned_error(tmp_path: Path) ->
 
 async def _drain(events: Any) -> str:
     return "".join([chunk async for chunk in events])
+
+
+async def _stuck_thread(
+    run_ops: Any, *, run_status: str, thread_age_seconds: float
+) -> str:
+    """A ``busy`` thread whose only run is already final: a process died after
+    saving the run's outcome but before moving the thread off ``busy``."""
+    thread_id, run_id = await _crashed_run(run_ops, age_seconds=3600)
+    store = run_ops._metadata_store
+    await store.update_run_status(run_id, run_status)
+    old = (datetime.now(UTC) - timedelta(seconds=thread_age_seconds)).isoformat()
+    async with store._lock:
+        await store._conn.execute(
+            "UPDATE app_threads SET updated_at = ? WHERE thread_id = ?",
+            (old, thread_id),
+        )
+        await store._conn.commit()
+    return thread_id
+
+
+@pytest.mark.parametrize(
+    ("run_status", "released_to"),
+    [("error", "error"), ("success", "idle"), ("interrupted", "idle")],
+)
+async def test_restart_releases_a_thread_left_busy_after_its_run_finished(
+    tmp_path: Path, run_status: str, released_to: str
+) -> None:
+    # The sweeper (or the run's own process) died between saving the run's
+    # outcome and releasing its thread. No row is left to re-claim and the
+    # in-process retry record died with it: only the store says what happened.
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        stuck = await _stuck_thread(ops, run_status=run_status, thread_age_seconds=60)
+        fresh = await _stuck_thread(ops, run_status=run_status, thread_age_seconds=0)
+
+    async with _running(_app(db, FakeGraph())) as ops:
+        store = ops._metadata_store
+        assert (await store.fetch_thread_row(stuck))["status"] == released_to
+        # Not busy for longer than the timeout yet: it may still be settling.
+        assert (await store.fetch_thread_row(fresh))["status"] == "busy"
+
+
+async def test_stuck_thread_release_spares_a_thread_with_a_run_in_flight(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id = await _stuck_thread(ops, run_status="error", thread_age_seconds=60)
+        store = ops._metadata_store
+        # A second, live run on the thread (heartbeated, so never swept).
+        await store.create_run(
+            str(uuid4()),
+            thread_id,
+            "agent",
+            metadata={},
+            kwargs={},
+            multitask_strategy="enqueue",
+        )
+        await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        assert (await store.fetch_thread_row(thread_id))["status"] == "busy"

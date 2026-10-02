@@ -264,3 +264,27 @@ def test_expiry_tracks_close_order_and_ignores_repeated_close() -> None:
     assert registry.get("t", "first") is first
     clock.now += 5
     assert registry.get("t", "first") is None
+
+
+async def test_subscriber_queue_holds_only_events_its_modes_accept() -> None:
+    # Events a subscriber would filter out must not fill its bounded queue:
+    # a values-only join stays attached through any volume of other modes.
+    stream = RunEventStream("t", "r", resumable=False)
+    values_only = stream.subscribe(after=None, stream_modes=["values"])
+    for _ in range(300):
+        stream.publish("custom", {})
+    stream.publish("values", {})
+    stream.publish("end", {"status": "success"})
+    stream.close(now=0.0)
+    got = [event.event async for event in values_only]
+    assert got == ["values", "end"]
+
+
+async def test_replay_skips_events_the_subscriber_modes_reject() -> None:
+    stream = RunEventStream("t", "r", resumable=True)
+    stream.publish("metadata", {})
+    stream.publish("updates", {})
+    stream.publish("values", {})
+    stream.close(now=0.0)
+    replayed = stream.subscribe(after=-1, stream_modes=["values"])
+    assert [event.event_id async for event in replayed] == [1, 3]

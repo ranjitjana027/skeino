@@ -94,9 +94,11 @@ class RunEventStream:
         self._evicted_through_id = 0
         self._max_history_events = max_history_events
         self._max_history_bytes = max_history_bytes
-        self._subscribers: set[
-            asyncio.Queue[StreamEvent | SubscriberOverflowError | None]
-        ] = set()
+        # Each live subscriber's queue, mapped to the stream modes it wants.
+        self._subscribers: dict[
+            asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
+            tuple[str, ...],
+        ] = {}
 
     @property
     def closed(self) -> bool:
@@ -131,7 +133,11 @@ class RunEventStream:
                 evicted = self._history.popleft()
                 self._history_bytes -= len(evicted.frame.encode("utf-8"))
                 self._evicted_through_id = evicted.event_id
-        for queue in tuple(self._subscribers):
+        for queue, stream_modes in tuple(self._subscribers.items()):
+            if not stream_mode_matches(event, stream_modes):
+                # Filtered at fan-out, so an event a subscriber never receives
+                # cannot fill its bounded queue and overflow it.
+                continue
             if queue.full():
                 self._detach(queue)
             else:
@@ -157,7 +163,7 @@ class RunEventStream:
         self, queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None]
     ) -> None:
         """Stop a lagging subscriber and discard its queued events."""
-        self._subscribers.discard(queue)
+        self._subscribers.pop(queue, None)
         while not queue.empty():
             queue.get_nowait()
         queue.put_nowait(
@@ -166,8 +172,14 @@ class RunEventStream:
             )
         )
 
-    def subscribe(self, *, after: int | None) -> AsyncGenerator[StreamEvent, None]:
+    def subscribe(
+        self, *, after: int | None, stream_modes: Sequence[str] = ()
+    ) -> AsyncGenerator[StreamEvent, None]:
         """Attach a subscriber; return its event iterator.
+
+        Only events matching ``stream_modes`` (see :func:`stream_mode_matches`;
+        empty means all) are replayed or queued for it, so its bounded queue
+        only ever holds events it will deliver.
 
         Registration is eager (it happens here, not on first iteration), so a
         subscriber taken before the producer starts misses nothing. Retained
@@ -183,17 +195,22 @@ class RunEventStream:
         history to fall back on and fails at the first overflow.
         """
         delivered = after if after is not None else self.last_event_id
-        replay, queue = self._attach(after)
-        return self._drain(replay, queue, delivered)
+        modes = tuple(stream_modes)
+        replay, queue = self._attach(after, modes)
+        return self._drain(replay, queue, delivered, modes)
 
     def _attach(
-        self, after: int | None
+        self, after: int | None, stream_modes: tuple[str, ...]
     ) -> tuple[
         list[StreamEvent],
         asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
     ]:
         replay = (
-            [e for e in self._history if e.event_id > after]
+            [
+                e
+                for e in self._history
+                if e.event_id > after and stream_mode_matches(e.event, stream_modes)
+            ]
             if after is not None
             else []
         )
@@ -203,7 +220,7 @@ class RunEventStream:
         if self.closed:
             queue.put_nowait(None)
         else:
-            self._subscribers.add(queue)
+            self._subscribers[queue] = stream_modes
         return replay, queue
 
     async def _drain(
@@ -211,6 +228,7 @@ class RunEventStream:
         replay: list[StreamEvent],
         queue: asyncio.Queue[StreamEvent | SubscriberOverflowError | None],
         delivered: int,
+        stream_modes: tuple[str, ...],
     ) -> AsyncGenerator[StreamEvent, None]:
         try:
             while True:
@@ -235,10 +253,10 @@ class RunEventStream:
                     raise overflow
                 # Everything after ``delivered`` is still retained: resume from
                 # history with a fresh live queue.
-                self._subscribers.discard(queue)
-                replay, queue = self._attach(delivered)
+                self._subscribers.pop(queue, None)
+                replay, queue = self._attach(delivered, stream_modes)
         finally:
-            self._subscribers.discard(queue)
+            self._subscribers.pop(queue, None)
 
 
 class RunStreamRegistry:

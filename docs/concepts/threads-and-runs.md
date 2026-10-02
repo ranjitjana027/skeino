@@ -143,7 +143,16 @@ the runs it owns: every `run_heartbeat_seconds` (default 30) it bumps their
 runs at startup and on every heartbeat tick, and it sets such a run to `error`
 with an "orphaned" message. If the run's thread has nothing else in flight, the
 thread moves from `busy` to `error`. If that thread update fails, the sweeping
-process retries it on every later tick until it succeeds.
+process retries it on every later tick until it succeeds. A run that was swept
+before it started (still queued, say) never executes: its owner sees the final
+row, reports that outcome on its stream, and leaves the thread alone.
+
+The retry record lives in the sweeping process. If that process dies too, or a
+run's process dies after saving `success` but before settling its thread, the
+sweep also releases any thread that has been `busy` for longer than
+`orphaned_run_timeout_seconds` with no run in flight. The thread settles as its
+latest run would have left it: as after a clean finish if that run succeeded,
+`idle` if it was interrupted, and `error` otherwise.
 
 The sweep is safe with several workers on one database. It never touches the
 sweeping process's own runs, and live runs elsewhere keep heartbeating. Each

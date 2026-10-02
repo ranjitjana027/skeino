@@ -1477,3 +1477,54 @@ async def test_admission_failure_after_the_client_left_is_logged() -> None:
         )
         assert not ops._registry.active_runs(_THREAD)
         assert not ops._lock_manager.get(_THREAD).locked()
+
+
+_SWEPT = "Run orphaned: swept by another worker."
+
+
+async def test_stream_finalized_before_it_starts_reports_it_and_runs_nothing() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+
+        async def swept_on_insert(*args: Any, **kwargs: Any) -> Any:
+            # Another worker sweeps the row before its producer claims it.
+            row = await create_run(*args, **kwargs)
+            await store.update_run_status(str(row["run_id"]), "error", error=_SWEPT)
+            return row
+
+        store.create_run = swept_on_insert
+        run, events = await ops.create_streaming_run(_THREAD, _request())
+        body = await _drain(events)
+        store.create_run = create_run
+
+        assert "event: error" in body and _SWEPT in body
+        assert "event: values" not in body
+        assert graph.tracing_seen == []  # the graph never ran
+        assert (await ops.get_run(_THREAD, str(run.run_id))).status == "error"
+        thread = await store.fetch_thread_row(_THREAD)
+        assert thread["status"] != "busy"  # the swept run did not take it back
+
+
+async def test_queued_background_run_finalized_while_waiting_runs_nothing() -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        graph.invoke_gate = asyncio.Event()
+        holder = await ops.create_run(_THREAD, _request())
+        await graph.invoke_started.wait()
+        queued = await ops.create_run(_THREAD, _request(multitask_strategy="enqueue"))
+        queued_id = str(queued.run_id)
+        # Swept while it waits for the thread lock.
+        await store.update_run_status(queued_id, "error", error=_SWEPT)
+        graph.invoke_gate.set()
+        await ops.join_run(_THREAD, str(holder.run_id))
+        task = ops._registry.get(queued_id)
+        if task is not None:
+            await asyncio.wait({task})
+
+        assert len(graph.tracing_seen) == 1  # only the holder ran
+        swept = await store.fetch_run_row(_THREAD, queued_id)
+        assert swept["status"] == "error" and swept["error"] == _SWEPT
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"

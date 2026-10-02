@@ -11,6 +11,7 @@ outlive its client (``on_disconnect="continue"``) and be re-attached to.
 
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncGenerator, AsyncIterator, Final
 from uuid import UUID, uuid4
 
@@ -29,6 +30,7 @@ from skeino.schemas import (
     RunCreateRequest,
     RunModel,
     RunStatus,
+    ThreadSearchRequest,
     ThreadStatus,
 )
 from skeino.serialization import (
@@ -123,6 +125,11 @@ def _terminal_event_for_row(run_id: str, row: RunRow) -> tuple[str, dict[str, An
             "run_id": run_id,
         }
     return "end", {"run_id": run_id, "status": str(row["status"])}
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Read a store timestamp as aware UTC (some drivers return naive UTC)."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 def _session_name_of(kwargs: Any) -> str | None:
@@ -474,7 +481,6 @@ class RunOps:
             events,
             task,
             run_id=run_id,
-            stream_modes=(),
             cancel_on_disconnect=request.on_disconnect == "cancel",
         )
 
@@ -532,10 +538,9 @@ class RunOps:
                     ),
                 )
             return self._relay(
-                stream.subscribe(after=after),
+                stream.subscribe(after=after, stream_modes=stream_modes),
                 task,
                 run_id=run_id,
-                stream_modes=stream_modes,
                 cancel_on_disconnect=cancel_on_disconnect,
             )
         if task is None:
@@ -574,10 +579,15 @@ class RunOps:
         thread_id = str(run.thread_id)
         emitted_data = False
         try:
+            finalized = await self._claim_run(thread_id, run_id)
+            if finalized is not None:
+                # Finalized elsewhere before it started (e.g. swept as
+                # orphaned): report that outcome and run nothing.
+                stream.publish(*_terminal_event_for_row(run_id, finalized))
+                return 0
             await self._metadata_store.update_thread(
                 thread_id, status_value=_THREAD_BUSY
             )
-            await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
             stream.publish(
                 "metadata",
                 {
@@ -683,10 +693,11 @@ class RunOps:
         task: asyncio.Task[Any] | None,
         *,
         run_id: str,
-        stream_modes: Sequence[str],
         cancel_on_disconnect: bool,
     ) -> AsyncIterator[str]:
-        """Forward one subscriber's events as SSE frames, filtered by mode.
+        """Forward one subscriber's events as SSE frames.
+
+        Mode filtering is the subscription's (``RunEventStream.subscribe``).
 
         If the client goes away before the stream ends and
         ``cancel_on_disconnect`` is set, the run is cancelled; otherwise it
@@ -695,8 +706,7 @@ class RunOps:
         completed = False
         try:
             async for event in events:
-                if stream_mode_matches(event.event, stream_modes):
-                    yield event.frame
+                yield event.frame
             completed = True
         except SubscriberOverflowError as exc:
             cancelled = (
@@ -1024,7 +1034,76 @@ class RunOps:
                 )
             else:
                 self._unreleased_threads.discard(thread_id)
+        await self._release_stuck_threads(stale_after_seconds=stale_after_seconds)
         return [str(row["run_id"]) for row in rows]
+
+    async def _release_stuck_threads(self, *, stale_after_seconds: float) -> None:
+        """Settle ``busy`` threads that nothing is running on any more.
+
+        The durable backstop for the in-process retry sets: a process that dies
+        after a run's terminal status is saved but before its thread is moved
+        off ``busy`` (a sweeper releasing an orphan's thread, or a run settling
+        after ``success``) leaves no record anywhere else. A thread qualifies
+        once it has been ``busy`` for longer than the orphan timeout with no
+        run in flight. It settles as its latest run would have left it: as
+        after a clean finish on ``success``, ``idle`` on ``interrupted``, and
+        ``error`` otherwise.
+        """
+        cutoff = datetime.now(UTC) - timedelta(seconds=stale_after_seconds)
+        page_size, offset = 100, 0
+        busy: list[str] = []
+        # Collected first: releasing a thread moves it out of the filtered
+        # result, which would shift later pages.
+        while True:
+            page = await self._metadata_store.search_thread_rows(
+                ThreadSearchRequest(
+                    status=_THREAD_BUSY,
+                    limit=page_size,
+                    offset=offset,
+                    sort_by="thread_id",
+                    sort_order="asc",
+                )
+            )
+            busy.extend(
+                str(thread["thread_id"])
+                for thread in page
+                if _as_utc(thread["updated_at"]) < cutoff
+            )
+            if len(page) < page_size:
+                break
+            offset += page_size
+        for thread_id in busy:
+            try:
+                if await self._has_in_flight_runs(thread_id):
+                    continue
+                latest = await self._metadata_store.list_run_rows(
+                    thread_id, limit=1, offset=0, status_value=None
+                )
+                outcome = str(latest[0]["status"]) if latest else None
+                settled: ThreadStatus
+                if outcome == _RUN_SUCCESS:
+                    settled = await self._settled_thread_status(thread_id)
+                elif outcome == _RUN_INTERRUPTED:
+                    settled = _THREAD_IDLE
+                else:
+                    settled = _THREAD_ERROR
+                await self._metadata_store.update_thread(
+                    thread_id, status_value=settled
+                )
+            except Exception as exc:
+                # Still ``busy``, so the next pass finds it again.
+                self._log_error(
+                    "Failed to release stuck busy thread %s: %s",
+                    thread_id,
+                    exc,
+                    exc=exc,
+                )
+                continue
+            self._log_warning(
+                "Released thread %s: busy for over %.0fs with no run in flight",
+                thread_id,
+                stale_after_seconds,
+            )
 
     async def _release_orphaned_thread(self, thread_id: str) -> None:
         thread = await self._metadata_store.fetch_thread_row(thread_id)
@@ -1169,10 +1248,12 @@ class RunOps:
             await self._mark_run_interrupted(run_id, thread_id)
             raise
         try:
+            if await self._claim_run(thread_id, run_id) is not None:
+                # Finalized elsewhere while queued; keep its outcome, run nothing.
+                return 0
             await self._metadata_store.update_thread(
                 thread_id, status_value=_THREAD_BUSY
             )
-            await self._metadata_store.update_run_status(run_id, _RUN_RUNNING)
             usage_handler, _ = await self._execute_graph_run(
                 thread_id, request, run_id=run_id
             )
@@ -1546,6 +1627,20 @@ class RunOps:
                 )
                 continue
             await self._settle_thread_after_success(thread_id)
+
+    async def _claim_run(self, thread_id: str, run_id: str) -> RunRow | None:
+        """Move an admitted run to ``running``; return its row if already final.
+
+        Claimed before the thread is marked ``busy`` or the graph runs, so a
+        run another worker finalized meanwhile (e.g. swept as orphaned) neither
+        executes nor takes its thread back.
+        """
+        if await self._metadata_store.update_run_status(run_id, _RUN_RUNNING):
+            return None
+        row = await self._metadata_store.fetch_run_row(thread_id, run_id)
+        if row is None:
+            raise RuntimeError(f"Run {run_id} disappeared before it started.")
+        return row
 
     async def _finish_run_status(
         self,

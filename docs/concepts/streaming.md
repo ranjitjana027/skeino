@@ -63,8 +63,10 @@ worker's orphan sweep ends with that `error`.
 ## Disconnects
 
 The run executes in a server-side task, not in the request: the SSE response is
-one subscriber to the run's events. A subscriber whose 256-event delivery queue
-overflows receives an `error` event with code `subscriber_overflow` before its
+one subscriber to the run's events. A subscriber's 256-event delivery queue
+holds only the events its `stream_mode` filter accepts, so a join that asks for
+`values` is not overflowed by `updates` or `custom` traffic it would never
+receive. A subscriber whose queue overflows receives an `error` event with code `subscriber_overflow` before its
 response closes. This event has no id: resumable clients can reconnect using
 their last successfully received event id, subject to the retained history
 window. Non-resumable clients cannot recover discarded output. Overflow is
