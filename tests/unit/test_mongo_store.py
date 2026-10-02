@@ -88,3 +88,91 @@ async def test_release_busy_thread_loses_to_a_run_started_after_its_check(
         assert row is not None and row["status"] == "busy"
     finally:
         await store.aclose()
+
+
+async def test_run_creation_failing_after_its_insert_leaves_no_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The version bump follows the insert: if it fails, the inserted run has
+    # no owner and must not linger ``pending`` until the orphan timeout.
+    import motor.motor_asyncio
+
+    monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
+    store = MongoMetadataStore("mongodb://mock", db_name=f"r{uuid4().hex}")
+    await store.setup()
+    try:
+        tid, run_id = str(uuid4()), str(uuid4())
+        await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+
+        async def broken(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("connection reset")
+
+        monkeypatch.setattr(store._threads, "update_one", broken)
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await store.create_run(
+                run_id,
+                tid,
+                "agent",
+                metadata={},
+                kwargs={},
+                multitask_strategy="enqueue",
+            )
+        assert await store.fetch_run_row(tid, run_id) is None
+    finally:
+        await store.aclose()
+
+
+async def test_release_busy_thread_sees_a_run_whose_insert_straddles_its_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Why ``create_run`` bumps the version after its insert, not before: a
+    # bump-first run could bump before the release reads the version, then
+    # insert between the release's in-flight check and its write, and the
+    # compare-and-set would release a thread with that run in flight.
+    import asyncio
+
+    import motor.motor_asyncio
+
+    monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
+    store = MongoMetadataStore("mongodb://mock", db_name=f"r{uuid4().hex}")
+    await store.setup()
+    try:
+        tid = str(uuid4())
+        await store.create_thread(
+            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        await store.update_thread(tid, status_value="busy")
+        insert, find_run = store._runs.insert_one, store._runs.find_one
+        go = asyncio.Event()
+
+        async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            await go.wait()  # held until the release has checked
+            return await insert(*args, **kwargs)
+
+        monkeypatch.setattr(store._runs, "insert_one", slow_insert)
+        creating = asyncio.create_task(
+            store.create_run(
+                str(uuid4()),
+                tid,
+                "agent",
+                metadata={},
+                kwargs={},
+                multitask_strategy="enqueue",
+            )
+        )
+        await asyncio.sleep(0)  # the run's creation is under way
+
+        async def racing(*args: Any, **kwargs: Any) -> Any:
+            found = await find_run(*args, **kwargs)  # not inserted yet
+            go.set()
+            await creating  # inserted (and bumped) before the release writes
+            return found
+
+        monkeypatch.setattr(store._runs, "find_one", racing)
+        assert await store.release_busy_thread(tid, "error") is False
+        row = await store.fetch_thread_row(tid)
+        assert row is not None and row["status"] == "busy"
+    finally:
+        await store.aclose()

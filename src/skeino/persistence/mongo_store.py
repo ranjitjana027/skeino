@@ -287,9 +287,26 @@ class MongoMetadataStore:
             "error": None,
         }
         await self._runs.insert_one(doc)
-        # After the insert, so ``release_busy_thread`` either sees this run in
-        # flight or loses its compare-and-set to this bump.
-        await self._threads.update_one({"_id": thread_id}, {"$inc": {"version": 1}})
+        try:
+            # After the insert, not before: ``release_busy_thread`` reads the
+            # version before its in-flight check, so a bump that preceded the
+            # insert could land before that read and let a run inserted after
+            # the check go unnoticed. After it, the release either sees this
+            # run in flight or loses its compare-and-set to this bump.
+            await self._threads.update_one({"_id": thread_id}, {"$inc": {"version": 1}})
+        except BaseException:
+            # A run whose creation failed has no owner: undo the insert rather
+            # than leave a ``pending`` row looking in flight until the orphan
+            # timeout.
+            try:
+                await self._runs.delete_one({"_id": run_id})
+            except Exception as cleanup_exc:
+                logger.error(
+                    "Failed to remove run %s after its creation failed",
+                    run_id,
+                    exc_info=cleanup_exc,
+                )
+            raise
         return self._run_row(doc)
 
     async def update_run_status(
