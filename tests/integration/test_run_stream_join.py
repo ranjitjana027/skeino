@@ -1137,15 +1137,15 @@ async def test_superseded_stream_whose_insert_committed_is_not_stranded() -> Non
 
 
 async def test_cancel_after_success_committed_reports_success() -> None:
-    async with running_app() as (app, _graph, _client):
+    async with running_app() as (app, _graph, client):
         ops = app.state.skeino.run_ops
         store = ops._metadata_store
         update_thread = store.update_thread
         settling, never = asyncio.Event(), asyncio.Event()
 
         async def stall_settle(thread_id: str, **kwargs: Any) -> Any:
-            if kwargs.get("mark_state_updated"):
-                settling.set()
+            if kwargs.get("mark_state_updated") and not settling.is_set():
+                settling.set()  # only the first settle stalls
                 await never.wait()
             return await update_thread(thread_id, **kwargs)
 
@@ -1162,6 +1162,10 @@ async def test_cancel_after_success_committed_reports_success() -> None:
         assert frames[-1][1] == "end"
         assert frames[-1][2]["status"] == "success"
         assert (await ops.get_run(_THREAD, run_id)).status == "success"
+        # The cancelled settle is redone, so the thread doesn't stay busy.
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "idle"
+        assert ops._unsettled_threads == set()
 
 
 async def test_failure_after_success_committed_reports_success() -> None:
@@ -1182,9 +1186,15 @@ async def test_failure_after_success_committed_reports_success() -> None:
         assert frames[-1][1] == "end"
         assert frames[-1][2]["status"] == "success"
         assert (await ops.get_run(_THREAD, str(run.run_id))).status == "success"
-        # The failed step does not rewrite the thread as ``error`` either.
+        # The failed settle doesn't rewrite the thread as ``error``; it stays
+        # busy only until the next liveness pass retries the settle.
         thread = (await client.get(f"/threads/{_THREAD}")).json()
-        assert thread["status"] != "error"
+        assert thread["status"] == "busy"
+        assert ops._unsettled_threads == {_THREAD}
+        await ops.liveness_pass(stale_after_seconds=None)
+        thread = (await client.get(f"/threads/{_THREAD}")).json()
+        assert thread["status"] == "idle"
+        assert ops._unsettled_threads == set()
 
 
 async def test_wait_fails_closed_when_run_scoped_history_fails() -> None:
@@ -1235,3 +1245,235 @@ async def test_background_run_failing_after_a_sweep_leaves_the_thread_alone() ->
         assert (row["status"], row["error"]) == ("error", "orphaned elsewhere")
         thread = (await client.get(f"/threads/{_THREAD}")).json()
         assert thread["status"] == "busy"
+
+
+# --- admission: hand-off to the producer, disconnects while queued -------------
+
+
+async def test_queued_stream_stays_tracked_through_the_producer_hand_off() -> None:
+    # The instant admission completes, before the request resumes, the run
+    # must still read as active, or reject/interrupt/rollback would miss it.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        create_run = store.create_run
+        seen: list[set[str]] = []
+        graph.stream_gate = asyncio.Event()
+        holder, held = await ops.create_streaming_run(_THREAD, _request())
+        holder_body = asyncio.create_task(_drain(held))
+        await graph.stream_started.wait()
+
+        async def insert_then_check(*args: Any, **kwargs: Any) -> Any:
+            row = await create_run(*args, **kwargs)
+            # Runs after admission finishes but before its done callbacks.
+            asyncio.get_running_loop().call_soon(
+                lambda: seen.append(ops._registry.active_runs(_THREAD))
+            )
+            return row
+
+        store.create_run = insert_then_check
+        queued = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(multitask_strategy="enqueue"))
+        )
+        await asyncio.sleep(0.05)
+        graph.stream_gate.set()
+        run, events = await asyncio.wait_for(queued, 5)
+        store.create_run = create_run
+        await _drain(events)
+        await holder_body
+        assert seen == [{str(run.run_id)}]
+
+
+@pytest.mark.parametrize(
+    ("on_disconnect", "expected"), [("continue", "success"), ("cancel", "interrupted")]
+)
+async def test_client_leaving_a_queued_stream_honors_on_disconnect(
+    on_disconnect: str, expected: str
+) -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        graph.stream_gate = asyncio.Event()
+        _holder, held = await ops.create_streaming_run(_THREAD, _request())
+        holder_body = asyncio.create_task(_drain(held))
+        await graph.stream_started.wait()
+        create_run = store.create_run
+        created: list[str] = []
+
+        async def record(*args: Any, **kwargs: Any) -> Any:
+            row = await create_run(*args, **kwargs)
+            created.append(str(row["run_id"]))
+            return row
+
+        store.create_run = record
+        queued = asyncio.create_task(
+            ops.create_streaming_run(
+                _THREAD,
+                _request(multitask_strategy="enqueue", on_disconnect=on_disconnect),
+            )
+        )
+        await asyncio.sleep(0.05)
+        queued.cancel()  # the client leaves while the run waits for the lock
+        with pytest.raises(asyncio.CancelledError):
+            await queued
+        graph.stream_gate.set()
+        await holder_body
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if not ops._registry.active_runs(_THREAD):
+                break
+        store.create_run = create_run
+        if expected == "success":
+            assert len(created) == 1
+            assert (await ops.get_run(_THREAD, created[0])).status == "success"
+        else:
+            assert created == []  # cancelled before admission inserted a row
+        assert not ops._lock_manager.get(_THREAD).locked()
+
+
+@pytest.mark.parametrize(
+    ("on_disconnect", "expected_runs"), [("continue", 1), ("cancel", 0)]
+)
+async def test_stateless_stream_left_during_admission_discards_its_thread_once(
+    on_disconnect: str, expected_runs: int
+) -> None:
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        entered, release = asyncio.Event(), asyncio.Event()
+        create_run = store.create_run
+        created: list[tuple[str, str]] = []
+
+        async def stalled(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            await release.wait()
+            row = await create_run(*args, **kwargs)
+            created.append((str(row["thread_id"]), str(row["run_id"])))
+            return row
+
+        discarded: list[str] = []
+        discard = ops._discard_thread
+
+        async def count(thread_id: str) -> None:
+            discarded.append(thread_id)
+            await discard(thread_id)
+
+        store.create_run = stalled
+        ops._discard_thread = count
+        leaving = asyncio.create_task(
+            ops.create_stateless_streaming_run(_request(on_disconnect=on_disconnect))
+        )
+        await entered.wait()
+        leaving.cancel()  # the client leaves while admission inserts the row
+        with pytest.raises(asyncio.CancelledError):
+            await leaving
+        release.set()
+        for _ in range(200):
+            await asyncio.sleep(0.005)
+            if discarded and not ops._registry.active_runs(discarded[0]):
+                break
+        await asyncio.sleep(0.02)  # a second discard would land here
+
+        assert len(discarded) == 1  # cleanup ran exactly once
+        assert discarded[0] not in graph.state_by_thread
+        assert len(created) == expected_runs
+        if created:
+            thread_id, run_id = created[0]
+            assert thread_id == discarded[0]
+            assert ops._streams._streams.get(run_id) is None or (
+                ops._streams._streams[run_id].closed_at is not None
+            )
+
+
+async def test_stateless_stream_failing_before_admission_discards_its_thread_once() -> (
+    None
+):
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        discarded: list[str] = []
+        discard = ops._discard_thread
+
+        async def count(thread_id: str) -> None:
+            discarded.append(thread_id)
+            await discard(thread_id)
+
+        ops._discard_thread = count
+        ops._thread_ops.ensure_thread_for_run = AsyncMock(
+            side_effect=HTTPException(status_code=503, detail="store down")
+        )
+        with pytest.raises(HTTPException):
+            await ops.create_stateless_streaming_run(_request())
+        assert len(discarded) == 1
+
+
+async def test_stateless_stream_cancelled_before_admission_starts_discards_once() -> (
+    None
+):
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        discarded: list[str] = []
+        discard = ops._discard_thread
+
+        async def count(thread_id: str) -> None:
+            discarded.append(thread_id)
+            await discard(thread_id)
+
+        spawn = ops._registry.spawn
+
+        def spawn_then_leave(*args: Any, **kwargs: Any) -> Any:
+            task = spawn(*args, **kwargs)
+            # The client leaves before the admission task's first step, so the
+            # cancel lands on a coroutine that never ran.
+            current = asyncio.current_task()
+            assert current is not None
+            current.cancel()
+            return task
+
+        ops._discard_thread = count
+        ops._registry.spawn = spawn_then_leave
+        with pytest.raises(asyncio.CancelledError):
+            await ops.create_stateless_streaming_run(_request(on_disconnect="cancel"))
+        ops._registry.spawn = spawn
+        assert len(discarded) == 1
+        assert discarded[0] not in graph.state_by_thread
+        assert not ops._registry.active_runs(discarded[0])
+
+
+async def test_admission_failure_after_the_client_left_is_logged() -> None:
+    async with running_app() as (app, _graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def failing(*args: Any, **kwargs: Any) -> Any:
+            entered.set()
+            await release.wait()
+            raise RuntimeError("insert failed")
+
+        logged: list[str] = []
+        log_error = ops._log_error
+
+        def record(msg: str, *args: Any, exc: BaseException | None = None) -> None:
+            logged.append(msg % args)
+            log_error(msg, *args, exc=exc)
+
+        store.create_run = failing
+        ops._log_error = record
+        leaving = asyncio.create_task(
+            ops.create_streaming_run(_THREAD, _request(on_disconnect="continue"))
+        )
+        await entered.wait()
+        leaving.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leaving
+        release.set()
+        for _ in range(100):
+            await asyncio.sleep(0.005)
+            if logged:
+                break
+        assert any(
+            "admission failed after its client left" in line and "insert failed" in line
+            for line in logged
+        )
+        assert not ops._registry.active_runs(_THREAD)
+        assert not ops._lock_manager.get(_THREAD).locked()

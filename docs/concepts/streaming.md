@@ -76,8 +76,11 @@ What a client disconnect does is the run
 request's `on_disconnect`:
 
 - **`"continue"`** (default, as on LangGraph Platform) — the run keeps going;
-  the client can come back and [join](#joining-a-run-stream) it.
-- **`"cancel"`** — the run is cancelled and marked `interrupted`.
+  the client can come back and [join](#joining-a-run-stream) it. This holds
+  even if the client leaves while the run is still queued behind another run
+  on the thread: it starts when the thread frees up.
+- **`"cancel"`** — the run is cancelled and marked `interrupted` (or, if the
+  client leaves before its row was created, never starts).
 
 ## Joining a run stream
 

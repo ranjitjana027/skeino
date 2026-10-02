@@ -99,7 +99,16 @@ class BackgroundRunRegistry:
         self._tasks[run_id] = task
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
         if finalize is None:
-            task.add_done_callback(lambda _t: self._forget(thread_id, run_id))
+            # A task may hand its run to a successor it spawns under the same
+            # id (a streaming run's admission starts its producer): only forget
+            # the run if this task is still the one tracked for it.
+            task.add_done_callback(
+                lambda done: (
+                    self._forget(thread_id, run_id)
+                    if self._tasks.get(run_id) is done
+                    else None
+                )
+            )
         else:
             completion = asyncio.get_running_loop().create_future()
             self._completion[run_id] = completion
@@ -142,8 +151,9 @@ class BackgroundRunRegistry:
         """Mark a run active without a tracked task.
 
         Used to reserve a streaming run's slot under the admission lock, before
-        its cancellable admission task is spawned. Such a run counts toward admission (so ``reject`` sees it) but has no
-        cancellable task — :meth:`cancel` returns ``False`` for it.
+        its cancellable admission task is spawned. Such a run counts toward
+        admission (so ``reject`` sees it) but has no cancellable task —
+        :meth:`cancel` returns ``False`` for it.
         """
         self._active_by_thread.setdefault(thread_id, set()).add(run_id)
 

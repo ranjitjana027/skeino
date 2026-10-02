@@ -165,6 +165,9 @@ class RunOps:
         # Threads whose orphaned runs were claimed but whose release failed;
         # retried every liveness pass, since a later sweep never re-claims them.
         self._unreleased_threads: set[str] = set()
+        # Threads whose run succeeded but whose settle write failed (or was
+        # cancelled); retried every liveness pass so they don't stay ``busy``.
+        self._unsettled_threads: set[str] = set()
 
     async def create_run(self, thread_id: str, request: RunCreateRequest) -> RunModel:
         """Start a background run and return its (pending) metadata immediately."""
@@ -284,9 +287,29 @@ class RunOps:
 
         ``request.on_disconnect`` decides what a client disconnect does:
         ``"cancel"`` cancels the run, ``"continue"`` (the default, as on
-        LangGraph Platform) leaves it running for a later join. ``after_run`` is
-        awaited once the run has finished, success or not (stateless cleanup).
+        LangGraph Platform) leaves it running for a later join — even while it
+        is still queued. ``after_run`` is awaited exactly once, after the run
+        has finished or once it can no longer start (stateless cleanup).
         """
+        handed_off = asyncio.Event()
+        try:
+            return await self._create_streaming_run(
+                thread_id, request, after_run=after_run, handed_off=handed_off
+            )
+        except BaseException:
+            if not handed_off.is_set() and after_run is not None:
+                # Failed before admission took ownership of the cleanup.
+                await after_run()
+            raise
+
+    async def _create_streaming_run(
+        self,
+        thread_id: str,
+        request: RunCreateRequest,
+        *,
+        after_run: Callable[[], Awaitable[None]] | None,
+        handed_off: asyncio.Event,
+    ) -> tuple[RunModel, AsyncIterator[str]]:
         await self._thread_ops.ensure_thread_for_run(thread_id, request.if_not_exists)
         self._assistant_ops.ensure_supported(request.assistant_id)
         self._validate_run_request(request)
@@ -305,10 +328,76 @@ class RunOps:
             await self._resolve_multitask(thread_id, request.multitask_strategy)
             self._registry.register_external(thread_id, run_id)
 
-        async def admit() -> RunRow:
-            await lock.acquire()
+        def start_producer(
+            run_row: RunRow,
+        ) -> tuple[RunModel, AsyncGenerator[StreamEvent, None], asyncio.Task[Any]]:
+            """Hand the admitted run to its producer task; never awaits.
+
+            Runs inside the admission task, so the registry tracks the producer
+            the moment admission ends: there is no window in which the run has
+            neither task and a ``reject``/``interrupt``/``rollback`` misses it.
+            """
+            run = self._run_row_to_model(run_row)
+            stream = self._streams.open(
+                thread_id, run_id, resumable=request.stream_resumable
+            )
+            # Subscribed before the producer exists, so it sees ``id: 1``.
+            events = stream.subscribe(after=None)
+            released = False
+
+            def finish() -> None:
+                # Release resources in the tracked finalizer, including when
+                # cancellation prevented the producer from ever starting.
+                nonlocal released
+                if not released:
+                    released = True
+                    lock.release()
+                self._streams.close(stream)
+
+            async def finalize_run() -> None:
+                """Complete cleanup within the registry's awaited lifecycle."""
+                try:
+                    if task.cancelled():
+                        superseded = await self._mark_run_interrupted(run_id, thread_id)
+                        if superseded is None:
+                            stream.publish(
+                                "end", {"run_id": run_id, "status": _RUN_INTERRUPTED}
+                            )
+                        else:
+                            if str(superseded["status"]) == _RUN_SUCCESS:
+                                # Cancelled after ``success`` was saved but
+                                # before the thread was settled.
+                                await self._settle_thread_after_success(thread_id)
+                            stream.publish(*_terminal_event_for_row(run_id, superseded))
+                    if after_run is not None:
+                        await after_run()
+                finally:
+                    finish()
+
+            task = self._registry.spawn(
+                thread_id,
+                run_id,
+                self._publish_run(run, request, stream_modes, stream),
+                finalize=lambda: finalize_run(),
+            )
+            return run, events, task
+
+        admission_started = False
+
+        async def admit() -> tuple[
+            RunModel, AsyncGenerator[StreamEvent, None], asyncio.Task[Any]
+        ]:
+            nonlocal admission_started
+            admission_started = True
             try:
-                return await self._metadata_store.create_run(
+                await lock.acquire()
+            except BaseException:
+                # Cancelled while queued: nothing inserted, nothing held.
+                if after_run is not None:
+                    await after_run()  # no producer will run it
+                raise
+            try:
+                run_row = await self._metadata_store.create_run(
                     run_id=run_id,
                     thread_id=thread_id,
                     assistant_id=request.assistant_id,
@@ -316,104 +405,70 @@ class RunOps:
                     kwargs=self._build_run_kwargs(request),
                     multitask_strategy=request.multitask_strategy,
                 )
+            except BaseException as exc:
+                lock.release()
+                if isinstance(exc, asyncio.CancelledError):
+                    # The insert may have committed before the cancel landed.
+                    # The run never started, so the thread is not its to touch.
+                    await self._interrupt_row_only(run_id)
+                if after_run is not None:
+                    await after_run()  # no producer will run it
+                raise
+            try:
+                return start_producer(run_row)
             except BaseException:
                 lock.release()
-                raise
-
-        # Lock wait and row insert run as one tracked, cancellable task, so an
-        # ``interrupt``/``rollback`` can supersede this run at any point before
-        # its producer task exists (there is no await between the two).
-        admit_task = self._registry.spawn(thread_id, run_id, admit())
-        try:
-            run_row = await admit_task
-        except asyncio.CancelledError:
-            self._registry.unregister_external(thread_id, run_id)
-            current = asyncio.current_task()
-            request_cancelled = current is not None and current.cancelling() > 0
-            if (
-                admit_task.done()
-                and not admit_task.cancelled()
-                and admit_task.exception() is None
-            ):
-                # Admitted, then this request was cancelled before resuming.
-                lock.release()
-                await self._mark_run_interrupted(run_id, thread_id)
-            elif request_cancelled:
-                # The client may have left mid-insert: don't strand the row.
-                await self._interrupt_if_created(run_id, thread_id)
-            elif admit_task.cancelled():
-                # Superseded, perhaps after the insert committed. Terminalize
-                # the row only: the superseding run owns the thread status.
-                await self._interrupt_row_only(run_id)
-            if admit_task.cancelled() and not request_cancelled:
-                # Superseded by interrupt/rollback while queued: the request
-                # itself is fine, so answer it instead of leaking the cancel.
-                self._log_warning(
-                    "Queued streaming run %s on thread %s was superseded "
-                    "before it started",
-                    run_id,
-                    thread_id,
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Run {run_id} was superseded by a newer run "
-                    "(multitask_strategy) before it started.",
-                ) from None
-            raise
-        except BaseException:
-            self._registry.unregister_external(thread_id, run_id)
-            raise
-        # From here to spawning the producer nothing awaits, so admission never
-        # sees this run without a cancellable task.
-        try:
-            run = self._run_row_to_model(run_row)
-        except BaseException:
-            lock.release()
-            raise
-
-        stream = self._streams.open(
-            thread_id, run_id, resumable=request.stream_resumable
-        )
-        events = stream.subscribe(after=None)
-        released = False
-
-        def finish() -> None:
-            # Release resources in the tracked finalizer, including when
-            # cancellation prevented the producer from ever starting.
-            nonlocal released
-            if not released:
-                released = True
-                lock.release()
-            self._streams.close(stream)
-
-        task = self._registry.spawn(
-            thread_id,
-            run_id,
-            self._publish_run(
-                run,
-                request,
-                stream_modes,
-                stream,
-            ),
-            finalize=lambda: finalize_run(),
-        )
-
-        async def finalize_run() -> None:
-            """Complete cleanup within the registry's awaited lifecycle."""
-            try:
-                if task.cancelled():
-                    superseded = await self._mark_run_interrupted(run_id, thread_id)
-                    if superseded is not None:
-                        # e.g. cancelled after ``success`` committed.
-                        stream.publish(*_terminal_event_for_row(run_id, superseded))
-                    else:
-                        stream.publish(
-                            "end", {"run_id": run_id, "status": _RUN_INTERRUPTED}
-                        )
                 if after_run is not None:
                     await after_run()
-            finally:
-                finish()
+                raise
+
+        # Lock wait, row insert and producer start run as one tracked task, so
+        # an ``interrupt``/``rollback`` can supersede this run at any point and
+        # the run stays tracked through the hand-off to its producer. With
+        # ``on_disconnect="continue"`` it is shielded from this request: a
+        # client leaving while the run is queued doesn't stop the run.
+        admit_task = self._registry.spawn(thread_id, run_id, admit())
+        handed_off.set()  # from here admission, then the producer, owns after_run
+        try:
+            run, events, task = await (
+                admit_task
+                if request.on_disconnect == "cancel"
+                else asyncio.shield(admit_task)
+            )
+        except asyncio.CancelledError:
+            if admit_task.cancelled() and not admission_started:
+                # Cancelled before its first step, so ``admit`` never ran and
+                # cannot run the cleanup it owns.
+                if after_run is not None:
+                    await after_run()
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                # The client left. ``cancel`` propagated into admission (which
+                # terminalizes its own row); ``continue`` lets it carry on.
+                if (
+                    request.on_disconnect == "cancel"
+                    and admit_task.done()
+                    and not admit_task.cancelled()
+                    and admit_task.exception() is None
+                ):
+                    # Admitted just before the client left: stop the producer.
+                    admit_task.result()[2].cancel()
+                elif not admit_task.done():
+                    # ``continue``: nobody is left to receive an admission error.
+                    admit_task.add_done_callback(self._log_abandoned_admission)
+                raise
+            # Superseded by interrupt/rollback while queued: the request itself
+            # is fine, so answer it instead of leaking the cancel.
+            self._log_warning(
+                "Queued streaming run %s on thread %s was superseded before it started",
+                run_id,
+                thread_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Run {run_id} was superseded by a newer run "
+                "(multitask_strategy) before it started.",
+            ) from None
 
         return run, self._relay(
             events,
@@ -585,11 +640,7 @@ class RunOps:
                 # success, and leave the thread to whoever finalized it.
                 stream.publish(*_terminal_event_for_row(run_id, superseded))
                 return 0
-            await self._metadata_store.update_thread(
-                thread_id,
-                status_value=await self._settled_thread_status(thread_id),
-                mark_state_updated=True,
-            )
+            await self._settle_thread_after_success(thread_id)
             total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
             if total_tokens == 0:
                 # Fallback for providers the callback handler can't see.
@@ -837,14 +888,9 @@ class RunOps:
         async def discard() -> None:
             await self._discard_thread(thread_id)
 
-        try:
-            return await self.create_streaming_run(
-                thread_id, payload, after_run=discard
-            )
-        except BaseException:
-            # The run never started, so its cleanup hook will never fire.
-            await self._discard_thread(thread_id)
-            raise
+        # ``create_streaming_run`` runs ``discard`` exactly once, including
+        # when the run never starts.
+        return await self.create_streaming_run(thread_id, payload, after_run=discard)
 
     async def run_stateless_batch(self, requests: list[RunCreateRequest]) -> list[Any]:
         """Run each payload on its own ephemeral thread; return outputs in order.
@@ -997,6 +1043,7 @@ class RunOps:
         """
         try:
             await self.heartbeat_runs()
+            await self._retry_unsettled_threads()
             if stale_after_seconds is not None:
                 await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
         except Exception as exc:
@@ -1135,11 +1182,7 @@ class RunOps:
             ):
                 # Another worker already finalized the row; keep its outcome.
                 return 0
-            await self._metadata_store.update_thread(
-                thread_id,
-                status_value=await self._settled_thread_status(thread_id),
-                mark_state_updated=True,
-            )
+            await self._settle_thread_after_success(thread_id)
             total_tokens = total_tokens_from_usage(usage_handler.usage_metadata)
             if total_tokens == 0:
                 # Fallback for providers the callback handler can't see. Read
@@ -1152,7 +1195,11 @@ class RunOps:
             self._log_warning(
                 "Background run %s cancelled for thread %s", run_id, thread_id
             )
-            await self._mark_run_interrupted(run_id, thread_id)
+            superseded = await self._mark_run_interrupted(run_id, thread_id)
+            if superseded is not None and str(superseded["status"]) == _RUN_SUCCESS:
+                # Cancelled after ``success`` was saved but before the thread
+                # was settled.
+                await self._settle_thread_after_success(thread_id)
             raise
         except Exception as exc:
             self._log_error(
@@ -1441,6 +1488,65 @@ class RunOps:
             "langsmith_session_name": resolve_session_name(request.langsmith_tracer),
         }
 
+    def _log_abandoned_admission(self, task: asyncio.Task[Any]) -> None:
+        """Log an admission failure whose client already left."""
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            self._log_error(
+                "Streaming run admission failed after its client left: %s",
+                exc,
+                exc=exc,
+            )
+
+    async def _settle_thread_after_success(self, thread_id: str) -> None:
+        """Settle a succeeded run's thread; never raises.
+
+        The run's ``success`` is already saved, so a failure here must not turn
+        it into an error. A failed (or cancelled) settle is queued for the
+        liveness pass to retry instead of leaving the thread ``busy``.
+        """
+        self._unsettled_threads.add(thread_id)
+        try:
+            await self._metadata_store.update_thread(
+                thread_id,
+                status_value=await self._settled_thread_status(thread_id),
+                mark_state_updated=True,
+            )
+        except Exception as exc:
+            self._log_error(
+                "Failed to settle thread %s after its run succeeded; will retry: %s",
+                thread_id,
+                exc,
+                exc=exc,
+            )
+        else:
+            self._unsettled_threads.discard(thread_id)
+
+    async def _retry_unsettled_threads(self) -> None:
+        """Retry thread settles that failed after a run's ``success`` was saved.
+
+        A thread that is no longer ``busy``, or that a newer run now owns, is
+        dropped: whoever changed it settles it.
+        """
+        for thread_id in sorted(self._unsettled_threads):
+            try:
+                thread = await self._metadata_store.fetch_thread_row(thread_id)
+                if (
+                    thread is None
+                    or str(thread["status"]) != _THREAD_BUSY
+                    or await self._has_in_flight_runs(thread_id)
+                ):
+                    self._unsettled_threads.discard(thread_id)
+                    continue
+            except Exception as exc:
+                self._log_error(
+                    "Failed to check thread %s for a settle retry: %s",
+                    thread_id,
+                    exc,
+                    exc=exc,
+                )
+                continue
+            await self._settle_thread_after_success(thread_id)
+
     async def _finish_run_status(
         self,
         thread_id: str,
@@ -1497,21 +1603,6 @@ class RunOps:
                 "Failed to persist error state for run %s: %s", run_id, exc, exc=exc
             )
             return None
-
-    async def _interrupt_if_created(self, run_id: str, thread_id: str) -> None:
-        """Mark a possibly-inserted run ``interrupted``; best-effort, never raises."""
-        try:
-            row = await self._metadata_store.fetch_run_row(thread_id, run_id)
-        except Exception as exc:
-            self._log_error(
-                "Failed to check run %s after its request was cancelled: %s",
-                run_id,
-                exc,
-                exc=exc,
-            )
-            return
-        if row is not None:
-            await self._mark_run_interrupted(run_id, thread_id)
 
     async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> RunRow | None:
         """Persist cancellation/disconnect state; best-effort, never raises.

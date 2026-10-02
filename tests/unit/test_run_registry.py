@@ -193,3 +193,22 @@ async def test_cancelling_shutdown_does_not_cancel_shared_finalization() -> None
     release.set()
     await asyncio.wait_for(waiter, 1)  # completes normally, not cancelled
     assert reg.active_runs("t") == set()
+
+
+async def test_task_handing_its_run_to_a_successor_keeps_the_run_tracked() -> None:
+    registry = BackgroundRunRegistry()
+    gate = asyncio.Event()
+    successor: list[asyncio.Task[None]] = []
+
+    async def handoff() -> None:
+        successor.append(registry.spawn("t", "r", gate.wait()))
+
+    first = registry.spawn("t", "r", handoff())
+    await first
+    await asyncio.sleep(0)  # let the first task's done callback run
+    assert registry.get("r") is successor[0]
+    assert registry.active_runs("t") == {"r"}
+    gate.set()
+    await successor[0]
+    await asyncio.sleep(0)
+    assert registry.active_runs("t") == set()
