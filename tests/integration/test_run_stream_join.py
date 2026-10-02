@@ -1528,3 +1528,39 @@ async def test_queued_background_run_finalized_while_waiting_runs_nothing() -> N
         swept = await store.fetch_run_row(_THREAD, queued_id)
         assert swept["status"] == "error" and swept["error"] == _SWEPT
         assert (await store.fetch_thread_row(_THREAD))["status"] == "idle"
+
+
+@pytest.mark.parametrize("streaming", [True, False], ids=["stream", "background"])
+async def test_run_whose_row_was_deleted_mid_flight_does_not_report_success(
+    streaming: bool,
+) -> None:
+    # Another worker sweeps the run to ``error`` and the terminal row is then
+    # deleted; the original owner finishes late. It must neither report
+    # ``success`` for a run that no longer exists nor settle the thread.
+    async with running_app() as (app, graph, _client):
+        ops = app.state.skeino.run_ops
+        store = ops._metadata_store
+        gate = asyncio.Event()
+        if streaming:
+            graph.stream_gate = gate
+            run, events = await ops.create_streaming_run(_THREAD, _request())
+            body = asyncio.create_task(_drain(events))
+            await graph.stream_started.wait()
+        else:
+            graph.invoke_gate = gate
+            run = await ops.create_run(_THREAD, _request())
+            await graph.invoke_started.wait()
+        run_id = str(run.run_id)
+        await store.update_run_status(run_id, "error", error=_SWEPT)
+        await store.delete_run(_THREAD, run_id)
+        await store.update_thread(_THREAD, status_value="error")  # sweeper's
+        task = ops._registry.get(run_id)
+        assert task is not None
+        gate.set()
+        await asyncio.wait({task})
+
+        if streaming:
+            text = await body
+            assert "was deleted before it finished" in text
+            assert '"status":"success"' not in text
+        assert (await store.fetch_thread_row(_THREAD))["status"] == "error"

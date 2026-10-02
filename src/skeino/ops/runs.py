@@ -10,7 +10,7 @@ outlive its client (``on_disconnect="continue"``) and be re-attached to.
 """
 
 import asyncio
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, AsyncGenerator, AsyncIterator, Final
 from uuid import UUID, uuid4
@@ -117,7 +117,20 @@ def _pending_interrupts(snapshot: Any) -> tuple[Any, ...]:
     return tuple(from_tasks)
 
 
-def _terminal_event_for_row(run_id: str, row: RunRow) -> tuple[str, dict[str, Any]]:
+# The persisted terminal state a run's own final write lost to: the row that
+# another writer finalized first, or ``_deleted_outcome`` for a row now gone.
+_Outcome = Mapping[str, Any]
+
+
+def _deleted_outcome(run_id: str) -> _Outcome:
+    """Return the outcome of a run whose row was deleted before it finished."""
+    return {
+        "status": _RUN_ERROR,
+        "error": f"Run {run_id} was deleted before it finished.",
+    }
+
+
+def _terminal_event_for_row(run_id: str, row: _Outcome) -> tuple[str, dict[str, Any]]:
     """Return the terminal stream event matching a finalized run row."""
     if str(row["status"]) == _RUN_ERROR:
         return "error", {
@@ -1630,7 +1643,7 @@ class RunOps:
                 continue
             await self._settle_thread_after_success(thread_id)
 
-    async def _claim_run(self, thread_id: str, run_id: str) -> RunRow | None:
+    async def _claim_run(self, thread_id: str, run_id: str) -> _Outcome | None:
         """Move an admitted run to ``running``; return its row if already final.
 
         Claimed before the thread is marked ``busy`` or the graph runs, so a
@@ -1640,9 +1653,7 @@ class RunOps:
         if await self._metadata_store.update_run_status(run_id, _RUN_RUNNING):
             return None
         row = await self._metadata_store.fetch_run_row(thread_id, run_id)
-        if row is None:
-            raise RuntimeError(f"Run {run_id} disappeared before it started.")
-        return row
+        return _deleted_outcome(run_id) if row is None else row
 
     async def _finish_run_status(
         self,
@@ -1651,13 +1662,15 @@ class RunOps:
         status_value: RunStatus,
         *,
         error: str | None = None,
-    ) -> RunRow | None:
-        """Persist a terminal status; return the row if another writer won.
+    ) -> _Outcome | None:
+        """Persist a terminal status; return the winning outcome if it lost.
 
         ``update_run_status`` only moves in-flight rows and a terminal status is
         final, so a write that updated nothing lost to another writer (an orphan
-        sweep on another worker) that finalized the row first. ``None`` means
-        this write took effect, or the row is gone (rollback / DELETE).
+        sweep on another worker) that finalized the row first. A row that is
+        gone (its thread deleted, or the swept row deleted) lost too: its late
+        owner must neither report an outcome of its own nor touch the thread.
+        ``None`` means this write took effect.
         """
         if await self._metadata_store.update_run_status(
             run_id, status_value, error=error
@@ -1665,7 +1678,13 @@ class RunOps:
             return None
         row = await self._metadata_store.fetch_run_row(thread_id, run_id)
         if row is None:
-            return None
+            self._log_warning(
+                "Run %s finished as %s, but its row was deleted; "
+                "leaving its thread alone",
+                run_id,
+                status_value,
+            )
+            return _deleted_outcome(run_id)
         self._log_warning(
             "Run %s finished as %s, but its row was already finalized as %s; "
             "keeping the persisted status",
@@ -1677,7 +1696,7 @@ class RunOps:
 
     async def _mark_run_failed(
         self, run_id: str, thread_id: str, error: str
-    ) -> RunRow | None:
+    ) -> _Outcome | None:
         """Persist error state for a failed run; best-effort, never raises.
 
         The store outage that fails these writes is often the same one that
@@ -1701,7 +1720,9 @@ class RunOps:
             )
             return None
 
-    async def _mark_run_interrupted(self, run_id: str, thread_id: str) -> RunRow | None:
+    async def _mark_run_interrupted(
+        self, run_id: str, thread_id: str
+    ) -> _Outcome | None:
         """Persist cancellation/disconnect state; best-effort, never raises.
 
         Returns the persisted row when the run was already finalized otherwise
