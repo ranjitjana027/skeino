@@ -166,7 +166,57 @@ class MongoMetadataStore:
             updates["state_updated_at"] = _utcnow()
         if len(updates) == 1:
             return
-        await self._threads.update_one({"_id": thread_id}, {"$set": updates})
+        change: dict[str, Any] = {"$set": updates}
+        if status_value is not None:
+            # Lets ``release_busy_thread`` detect a status written meanwhile.
+            change["$inc"] = {"status_version": 1}
+        await self._threads.update_one({"_id": thread_id}, change)
+
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Set a busy thread's status if no run is in flight on it.
+
+        Threads and runs are separate collections, so the check cannot be one
+        atomic write without a multi-document transaction (which needs a
+        replica set). Instead the write is a compare-and-set on the thread's
+        ``status_version``, which every status write bumps. A run marks its
+        thread ``busy`` only after its row exists, so a run created after the
+        in-flight check either bumps the version first (and this write loses)
+        or sets ``busy`` after it (and wins).
+        """
+        doc = await self._threads.find_one(
+            {"_id": thread_id, "status": "busy"}, {"status_version": 1}
+        )
+        if doc is None:
+            return False
+        in_flight = await self._runs.find_one(
+            {
+                "thread_id": thread_id,
+                "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
+            },
+            {"_id": 1},
+        )
+        if in_flight is not None:
+            return False
+        now = _utcnow()
+        updates: dict[str, Any] = {"status": status_value, "updated_at": now}
+        if mark_state_updated:
+            updates["state_updated_at"] = now
+        result = await self._threads.update_one(
+            {
+                "_id": thread_id,
+                "status": "busy",
+                # ``None`` also matches a thread written before the counter.
+                "status_version": doc.get("status_version"),
+            },
+            {"$set": updates, "$inc": {"status_version": 1}},
+        )
+        return bool(result.matched_count)
 
     async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows (filtered by ids/status, sorted, paginated)."""

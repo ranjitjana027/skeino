@@ -64,3 +64,40 @@ def test_rows_actually_in_postgres_and_delete_cascades(
             )
             == 0
         )
+
+
+async def test_release_busy_thread_waits_for_a_run_being_inserted(
+    postgres_backend: Backend,
+) -> None:
+    # #140: a run another worker is inserting (not yet committed) when the
+    # release runs must still keep the thread busy. A single UPDATE ... WHERE
+    # NOT EXISTS reads one snapshot and would miss it; the release locks the
+    # thread row, so it waits for that insert and then sees the run.
+    import asyncio
+    from uuid import uuid4
+
+    from skeino.persistence import MetadataStore
+
+    store = MetadataStore(postgres_backend.uri)
+    await store.setup()
+    try:
+        thread_id = str(uuid4())
+        await store.create_thread(
+            thread_id, metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+        await store.update_thread(thread_id, status_value="busy")
+        async with await psycopg.AsyncConnection.connect(postgres_backend.uri) as other:
+            await other.execute(
+                "INSERT INTO app_runs (run_id, thread_id, assistant_id, status, "
+                "multitask_strategy) VALUES (%s, %s, 'agent', 'pending', 'enqueue')",
+                (str(uuid4()), thread_id),
+            )
+            release = asyncio.create_task(store.release_busy_thread(thread_id, "error"))
+            await asyncio.sleep(0.3)
+            assert not release.done()  # blocked on the uncommitted insert
+            await other.commit()
+            assert await asyncio.wait_for(release, timeout=5) is False
+        row = await store.fetch_thread_row(thread_id)
+        assert row is not None and row["status"] == "busy"
+    finally:
+        await store.aclose()

@@ -22,7 +22,6 @@ from skeino.concurrency import BackgroundRunRegistry, ThreadLockManager
 from skeino.ops.assistants import AssistantOps
 from skeino.ops.threads import ThreadOps
 from skeino.persistence import MetadataStoreProtocol, RunRow
-from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES
 from skeino.schemas import (
     CancelAction,
     JsonValue,
@@ -1132,7 +1131,7 @@ class RunOps:
             offset += page_size
         for thread_id in busy:
             try:
-                if await self._has_in_flight_runs(thread_id):
+                if self._registry.active_runs(thread_id):
                     continue
                 latest = await self._metadata_store.list_run_rows(
                     thread_id, limit=1, offset=0, status_value=None
@@ -1145,12 +1144,15 @@ class RunOps:
                     settled = _THREAD_IDLE
                 else:
                     settled = _THREAD_ERROR
-                await self._metadata_store.update_thread(
+                # Conditional, so a run another worker started on the thread
+                # since the scan keeps it ``busy``.
+                if not await self._metadata_store.release_busy_thread(
                     thread_id,
-                    status_value=settled,
+                    settled,
                     # As the run's own settle would have: it changed the state.
                     mark_state_updated=outcome == _RUN_SUCCESS,
-                )
+                ):
+                    continue
             except Exception as exc:
                 # Still ``busy``, so the next pass finds it again.
                 self._log_error(
@@ -1167,13 +1169,14 @@ class RunOps:
             )
 
     async def _release_orphaned_thread(self, thread_id: str) -> None:
-        thread = await self._metadata_store.fetch_thread_row(thread_id)
-        if thread is None or str(thread["status"]) != _THREAD_BUSY:
-            return
-        if not await self._has_in_flight_runs(thread_id):
-            await self._metadata_store.update_thread(
-                thread_id, status_value=_THREAD_ERROR
-            )
+        """Move a thread whose runs were swept from ``busy`` to ``error``.
+
+        Only while nothing is in flight on it, checked atomically with the
+        write (``release_busy_thread``): a run another worker starts on the
+        thread meanwhile keeps it ``busy``.
+        """
+        if not self._registry.active_runs(thread_id):
+            await self._metadata_store.release_busy_thread(thread_id, _THREAD_ERROR)
 
     async def liveness_pass(self, *, stale_after_seconds: float | None) -> None:
         """One heartbeat, then one sweep; failures are logged, never raised.
@@ -1221,17 +1224,6 @@ class RunOps:
                 await self.fail_orphaned_runs(stale_after_seconds=stale_after_seconds)
         except Exception as exc:
             self._log_error("Run orphan sweep failed: %s", exc, exc=exc)
-
-    async def _has_in_flight_runs(self, thread_id: str) -> bool:
-        if self._registry.active_runs(thread_id):
-            return True
-        for status_value in sorted(IN_FLIGHT_RUN_STATUSES):
-            rows = await self._metadata_store.list_run_rows(
-                thread_id, limit=1, offset=0, status_value=status_value
-            )
-            if rows:
-                return True
-        return False
 
     async def shutdown(self) -> None:
         """Cancel every run task this process tracks (runtime shutdown).
@@ -1713,7 +1705,8 @@ class RunOps:
         A thread that is gone or no longer ``busy`` is dropped: whoever changed
         it settled it. One with a run in flight is skipped for now, not dropped:
         that run may be the settle still in progress, or one whose own settle
-        could fail too.
+        could fail too. The settle is conditional (``release_busy_thread``), so
+        a run another worker starts on the thread meanwhile keeps it ``busy``.
         """
         for thread_id in sorted(self._unsettled_threads):
             try:
@@ -1721,17 +1714,24 @@ class RunOps:
                 if thread is None or str(thread["status"]) != _THREAD_BUSY:
                     self._unsettled_threads.discard(thread_id)
                     continue
-                if await self._has_in_flight_runs(thread_id):
+                if self._registry.active_runs(thread_id):
+                    continue
+                settled = await self._settled_thread_status(thread_id)
+                if not await self._metadata_store.release_busy_thread(
+                    thread_id, settled, mark_state_updated=True
+                ):
+                    # A run is in flight on it (kept for the next pass), or it
+                    # changed since the check (dropped on the next pass, as above).
                     continue
             except Exception as exc:
                 self._log_error(
-                    "Failed to check thread %s for a settle retry: %s",
+                    "Failed to retry the settle of thread %s; will retry: %s",
                     thread_id,
                     exc,
                     exc=exc,
                 )
                 continue
-            await self._settle_thread_after_success(thread_id)
+            self._unsettled_threads.discard(thread_id)
 
     async def _claim_run(self, thread_id: str, run_id: str) -> _Outcome | None:
         """Move an admitted run to ``running``.

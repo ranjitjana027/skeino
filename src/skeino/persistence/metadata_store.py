@@ -475,6 +475,56 @@ class MetadataStore:
                 await cursor.execute(query, values)
             await conn.commit()
 
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Set a busy thread's status if no run is in flight on it.
+
+        A single ``UPDATE ... WHERE NOT EXISTS`` is not enough under READ
+        COMMITTED: its subquery reads one snapshot, so a run committed while
+        the statement waits on the thread row would go unseen. The thread row
+        is locked first instead; an insert into ``app_runs`` (whose foreign key
+        takes a share lock on that row) then waits for this transaction, and
+        the in-flight check runs as a new statement that sees every run
+        committed before the lock was granted.
+        """
+        async with self._connection() as conn:
+            try:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        "SELECT 1 FROM app_threads WHERE thread_id = %s "
+                        "AND status = 'busy' FOR UPDATE",
+                        (thread_id,),
+                    )
+                    if await cursor.fetchone() is None:
+                        await conn.rollback()
+                        return False
+                    await cursor.execute(
+                        """
+                        UPDATE app_threads
+                        SET status = %s, updated_at = NOW(),
+                            state_updated_at = CASE WHEN %s THEN NOW()
+                                                    ELSE state_updated_at END
+                        WHERE thread_id = %s
+                          AND NOT EXISTS (
+                              SELECT 1 FROM app_runs
+                              WHERE app_runs.thread_id = %s
+                                AND app_runs.status IN ('pending', 'running')
+                          )
+                        """,
+                        (status_value, mark_state_updated, thread_id, thread_id),
+                    )
+                    released = bool(cursor.rowcount)
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return released
+
     async def delete_thread(self, thread_id: str) -> None:
         """Delete a thread row and its run rows."""
         async with self._connection() as conn:

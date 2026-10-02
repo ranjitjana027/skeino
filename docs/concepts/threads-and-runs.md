@@ -164,6 +164,10 @@ guessing `idle` and losing a pending interrupt.
 The sweep is safe with several workers on one database. It never touches the
 sweeping process's own runs, and live runs elsewhere keep heartbeating. Each
 row is also claimed with a conditional update, so only one sweeper reports it.
+Moving a thread off `busy` (after a sweep, a stuck-thread release, or a settle
+retry) is conditional too: the store writes it only if, at that moment, no run
+is in flight on the thread, so a run another worker starts meanwhile keeps the
+thread `busy`.
 On Postgres the comparison uses the database clock, so worker clock skew does
 not matter. LangGraph Platform re-queues an orphaned run and fails it once its
 retries are exhausted. skeino keeps no run input to retry with, so it fails the
