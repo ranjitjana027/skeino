@@ -154,6 +154,15 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
+def _session_name_of(kwargs: Any) -> str | None:
+    """Read the LangSmith session a stored run was traced into, if any."""
+    if isinstance(kwargs, dict):
+        value = kwargs.get("langsmith_session_name")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 class RunOps:
     """Create, stream, await, cancel, and inspect runs against a single graph."""
 
@@ -1560,7 +1569,7 @@ class RunOps:
             metadata=serialize_mapping(row["metadata"]),
             kwargs=serialize_mapping(row["kwargs"]),
             multitask_strategy=row["multitask_strategy"],
-            langsmith_session_name=row["kwargs"].get("langsmith_session_name") or None,
+            langsmith_session_name=_session_name_of(row["kwargs"]),
         )
 
     def _resolve_run_input(self, request: RunCreateRequest) -> Any:
