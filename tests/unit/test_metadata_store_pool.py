@@ -166,6 +166,7 @@ async def test_operations_share_one_pool(pooled_store: ms.MetadataStore) -> None
     await pooled_store.fetch_thread_row(tid)
     await pooled_store.search_thread_rows(ThreadSearchRequest(limit=10, offset=0))
     await pooled_store.delete_thread(tid)
+    await pooled_store.delete_run(tid, str(uuid4()))
 
     assert len(_FakePool.instances) == 1, (
         f"{len(_FakePool.instances)} pools built — each operation is still "
@@ -173,7 +174,7 @@ async def test_operations_share_one_pool(pooled_store: ms.MetadataStore) -> None
     )
     pool = _FakePool.instances[0]
     assert pool.opened == 1
-    assert pool.checkouts == 5, "every operation should borrow from the pool"
+    assert pool.checkouts == 6, "every operation should borrow from the pool"
 
 
 async def test_pool_is_configured_for_a_transaction_mode_pooler(
