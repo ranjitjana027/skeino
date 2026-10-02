@@ -218,7 +218,11 @@ async def test_one_failing_thread_release_does_not_strand_the_others(
             return await fetch(thread_id)
 
         store.fetch_thread_row = flaky
-        failed = await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        # Runs are stale (an hour old); the threads just went busy. A window
+        # wider than any CI stall keeps the stuck-thread backstop from
+        # releasing the broken thread, so only the in-process retry can.
+        stale = 60
+        failed = await ops.fail_orphaned_runs(stale_after_seconds=stale)
         store.fetch_thread_row = fetch
         assert sorted(failed) == sorted([broken_run, other_run])
         assert (await fetch(other_thread))["status"] == "error"
@@ -227,7 +231,7 @@ async def test_one_failing_thread_release_does_not_strand_the_others(
 
         # The claimed run is never returned again, so the next pass must
         # retry the release itself rather than wait for a sweep that never comes.
-        again = await ops.fail_orphaned_runs(stale_after_seconds=TIMEOUT)
+        again = await ops.fail_orphaned_runs(stale_after_seconds=stale)
         assert again == []
         assert (await fetch(broken_thread))["status"] == "error"
         assert ops._unreleased_threads == set()
@@ -408,7 +412,9 @@ async def test_restart_releases_a_thread_left_busy_after_its_run_finished(
         stuck = await _stuck_thread(ops, run_status=run_status, thread_age_seconds=60)
         fresh = await _stuck_thread(ops, run_status=run_status, thread_age_seconds=0)
 
-    async with _running(_app(db, FakeGraph())) as ops:
+    # A 30s window: the stuck thread (60s) is past it, the fresh one is not,
+    # however slow the restart.
+    async with _running(_app(db, FakeGraph(), orphaned_run_timeout_seconds=30)) as ops:
         store = ops._metadata_store
         released = await store.fetch_thread_row(stuck)
         assert released["status"] == released_to
