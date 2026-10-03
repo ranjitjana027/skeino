@@ -50,10 +50,11 @@ async def test_release_busy_thread_loses_to_a_run_started_after_its_check(
     monkeypatch: pytest.MonkeyPatch, marks_busy: bool
 ) -> None:
     # #140: threads and runs are separate collections, so the in-flight check
-    # and the write are two operations. A run another worker starts between
-    # them bumps the thread's version (on insert, and again when it marks the
-    # thread ``busy``): the compare-and-set must then fail. Without the busy
-    # write too: a queued run waiting for the thread is still in flight.
+    # and the write are two operations. A run another worker creates between
+    # them bumps the thread's version: its creation reserves the thread before
+    # the insert and clears the reservation after, each bumping it (and so
+    # does marking the thread ``busy``). The compare-and-set must then fail,
+    # with or without the busy write: a queued run is still in flight.
     import motor.motor_asyncio
 
     monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
