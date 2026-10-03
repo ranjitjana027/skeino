@@ -1,9 +1,4 @@
-"""Pydantic schemas for the skeino HTTP API.
-
-Public re-exports keep the existing flat import surface used by
-``server_models.py`` consumers. Internal modules organise schemas by
-resource so each file stays focused.
-"""
+"""Pydantic schemas for the skeino HTTP API, re-exported flat; one module per resource."""
 
 from skeino.schemas.assistants import (
     AssistantModel,
