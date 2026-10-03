@@ -132,8 +132,10 @@ async def test_release_busy_thread_backs_off_while_a_run_is_being_created(
         insert, find_run = store._runs.insert_one, store._runs.find_one
         update = store._threads.update_one
         go, inserted, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        entered = asyncio.Event()
 
         async def held_insert(*args: Any, **kwargs: Any) -> Any:
+            entered.set()  # reserved, about to insert
             await go.wait()
             result = await insert(*args, **kwargs)
             inserted.set()
@@ -156,11 +158,10 @@ async def test_release_busy_thread_backs_off_while_a_run_is_being_created(
         monkeypatch.setattr(store._threads, "update_one", held_finish)
         monkeypatch.setattr(store._runs, "find_one", racing)
         creating = asyncio.create_task(_create_run(store, tid))
-        await asyncio.sleep(0.01)  # the creation is under way, awaiting its insert
+        await asyncio.wait_for(entered.wait(), timeout=5)
         releasing = asyncio.create_task(store.release_busy_thread(tid, "error"))
-        await asyncio.sleep(0.01)
-        go.set()  # let the insert proceed even if the release backed off early
         assert await asyncio.wait_for(releasing, timeout=5) is False
+        go.set()  # a release that backed off early never let the insert through
         finish.set()
         await creating
         row = await store.fetch_thread_row(tid)
@@ -209,14 +210,16 @@ async def test_slow_run_creation_renews_its_reservation(
         monkeypatch.setattr(
             mongo_store, "_CREATION_RESERVATION_RENEWAL", timedelta(seconds=0.03)
         )
-        insert, go = store._runs.insert_one, asyncio.Event()
+        insert, go, entered = store._runs.insert_one, asyncio.Event(), asyncio.Event()
 
         async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            entered.set()  # reserved, about to insert
             await go.wait()
             return await insert(*args, **kwargs)
 
         monkeypatch.setattr(store._runs, "insert_one", slow_insert)
         creating = asyncio.create_task(_create_run(store, tid))
+        await asyncio.wait_for(entered.wait(), timeout=5)
         await asyncio.sleep(0.4)  # well past the reservation's lifetime
         assert await store.release_busy_thread(tid, "idle") is False
         go.set()
@@ -274,16 +277,17 @@ async def test_slow_run_creation_undoes_its_run_once_its_reservation_expired(
     try:
         tid = await _busy_thread(store)
         monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_TTL", timedelta(0))
-        insert, go = store._runs.insert_one, asyncio.Event()
+        insert, go, entered = store._runs.insert_one, asyncio.Event(), asyncio.Event()
 
         async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            entered.set()  # reserved, about to insert
             await go.wait()
             return await insert(*args, **kwargs)
 
         monkeypatch.setattr(store._runs, "insert_one", slow_insert)
         run_id = str(uuid4())
         creating = asyncio.create_task(_create_run(store, tid, run_id))
-        await asyncio.sleep(0.01)  # reserved, stuck in its insert
+        await asyncio.wait_for(entered.wait(), timeout=5)
         assert await store.release_busy_thread(tid, "idle") is True
         go.set()
         with pytest.raises(RuntimeError, match="outlived its creation reservation"):
@@ -308,9 +312,10 @@ async def test_release_busy_thread_loses_to_a_slow_creation_finishing_first(
         tid = await _busy_thread(store)
         monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_TTL", timedelta(0))
         insert, find_run = store._runs.insert_one, store._runs.find_one
-        go, created = asyncio.Event(), asyncio.Event()
+        go, created, entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
         async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            entered.set()  # reserved, about to insert
             await go.wait()
             return await insert(*args, **kwargs)
 
@@ -324,7 +329,7 @@ async def test_release_busy_thread_loses_to_a_slow_creation_finishing_first(
         monkeypatch.setattr(store._runs, "find_one", racing)
         run_id = str(uuid4())
         creating = asyncio.create_task(_create_run(store, tid, run_id))
-        await asyncio.sleep(0.01)  # reserved, stuck in its insert
+        await asyncio.wait_for(entered.wait(), timeout=5)
         releasing = asyncio.create_task(store.release_busy_thread(tid, "idle"))
         await asyncio.wait_for(creating, timeout=5)
         created.set()
