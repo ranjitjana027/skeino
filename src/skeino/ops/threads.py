@@ -7,6 +7,7 @@ from typing import Any, Final
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException, status
+from pydantic import RootModel
 
 from skeino.persistence import MetadataStoreProtocol, ThreadRow
 from skeino.schemas import (
@@ -364,6 +365,8 @@ class ThreadOps:
         schema = getattr(self._graph, "output_schema", None)
         if schema is None:
             return None
+        if isinstance(schema, type) and issubclass(schema, RootModel):
+            return None  # Functional API: the output is the whole return value
         try:
             return frozenset(schema.model_fields.keys())
         except AttributeError:

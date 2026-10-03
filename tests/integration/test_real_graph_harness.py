@@ -84,13 +84,9 @@ def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
         assert INTERNAL_VALUE not in str(output)
 
 
-_EP_XFAIL = pytest.mark.xfail(
-    strict=True, reason="#154: @entrypoint output filtered down to {}"
-)
 _EP_ANSWER = {"answer": "echo: hi"}
 
 
-@_EP_XFAIL
 def test_entrypoint_values_stream_carries_return_value() -> None:
     with real_client("entrypoint") as client:
         body = client.post(
@@ -105,7 +101,11 @@ def test_entrypoint_values_stream_carries_return_value() -> None:
         assert snapshots[-1] == _EP_ANSWER
 
 
-@_EP_XFAIL
+def test_entrypoint_wait_returns_return_value() -> None:
+    with real_client("entrypoint") as client:
+        assert _wait(client, _new_thread(client), input={"q": "hi"}) == _EP_ANSWER
+
+
 def test_entrypoint_thread_reads_carry_return_value() -> None:
     with real_client("entrypoint") as client:
         thread_id = _new_thread(client)
