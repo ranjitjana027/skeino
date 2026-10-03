@@ -190,6 +190,83 @@ async def test_release_busy_thread_ignores_an_expired_creation_reservation(
         await store.aclose()
 
 
+async def test_slow_run_creation_undoes_its_run_once_its_reservation_expired(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A live creator stuck in its insert past the reservation's expiry: a
+    # release meanwhile ignores the reservation and frees the thread, so the
+    # creator, finding its reservation gone, must not leave its run behind.
+    import asyncio
+    from datetime import timedelta
+
+    import skeino.persistence.mongo_store as mongo_store
+
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid = await _busy_thread(store)
+        monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_TTL", timedelta(0))
+        insert, go = store._runs.insert_one, asyncio.Event()
+
+        async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            await go.wait()
+            return await insert(*args, **kwargs)
+
+        monkeypatch.setattr(store._runs, "insert_one", slow_insert)
+        run_id = str(uuid4())
+        creating = asyncio.create_task(_create_run(store, tid, run_id))
+        await asyncio.sleep(0.01)  # reserved, stuck in its insert
+        assert await store.release_busy_thread(tid, "idle") is True
+        go.set()
+        with pytest.raises(RuntimeError, match="outlived its creation reservation"):
+            await asyncio.wait_for(creating, timeout=5)
+        assert await store._runs.find_one({"_id": run_id}) is None
+    finally:
+        await store.aclose()
+
+
+async def test_release_busy_thread_loses_to_a_slow_creation_finishing_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same expired reservation, but the creator inserts and finishes
+    # between the release's run check and its write: the release must fail.
+    import asyncio
+    from datetime import timedelta
+
+    import skeino.persistence.mongo_store as mongo_store
+
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid = await _busy_thread(store)
+        monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_TTL", timedelta(0))
+        insert, find_run = store._runs.insert_one, store._runs.find_one
+        go, created = asyncio.Event(), asyncio.Event()
+
+        async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            await go.wait()
+            return await insert(*args, **kwargs)
+
+        async def racing(*args: Any, **kwargs: Any) -> Any:
+            found = await find_run(*args, **kwargs)  # before the insert
+            go.set()
+            await created.wait()  # the write comes after the whole creation
+            return found
+
+        monkeypatch.setattr(store._runs, "insert_one", slow_insert)
+        monkeypatch.setattr(store._runs, "find_one", racing)
+        run_id = str(uuid4())
+        creating = asyncio.create_task(_create_run(store, tid, run_id))
+        await asyncio.sleep(0.01)  # reserved, stuck in its insert
+        releasing = asyncio.create_task(store.release_busy_thread(tid, "idle"))
+        await asyncio.wait_for(creating, timeout=5)
+        created.set()
+        assert await asyncio.wait_for(releasing, timeout=5) is False
+        row = await store.fetch_thread_row(tid)
+        assert row is not None and row["status"] == "busy"
+        assert await find_run({"_id": run_id}) is not None
+    finally:
+        await store.aclose()
+
+
 async def test_run_insert_failing_drops_its_reservation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

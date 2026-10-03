@@ -202,8 +202,12 @@ class MongoMetadataStore:
         reserved when the thread is read (and the release backs off), already
         inserted when runs are checked, or reserved after the read (and the
         compare-and-set fails). A reservation older than
-        ``_CREATION_RESERVATION_TTL`` belongs to a process that died
-        mid-creation; it is ignored, and cleared by a successful release.
+        ``_CREATION_RESERVATION_TTL`` is presumed abandoned by a process that
+        died mid-creation: it is ignored, and cleared by a successful release.
+        Its creator may only be slow, so it finishes by clearing its own
+        reservation, conditionally and bumping the version: if a release
+        cleared it first, the creator undoes its run and fails; if the creator
+        clears it first, that release's compare-and-set fails.
         """
         doc = await self._threads.find_one(
             {"_id": thread_id, "status": "busy"}, {"version": 1, "creating": 1}
@@ -317,9 +321,17 @@ class MongoMetadataStore:
             await self._drop_reservation(thread_id, reservation)
             raise
         try:
-            await self._threads.update_one(
-                {"_id": thread_id}, {"$unset": {reservation: ""}}
+            finished = await self._threads.update_one(
+                {"_id": thread_id, reservation: {"$exists": True}},
+                {"$unset": {reservation: ""}, "$inc": {"version": 1}},
             )
+            if not finished.matched_count:
+                # Outlived its reservation: a release (or delete) took the
+                # thread meanwhile, possibly not seeing this run.
+                raise RuntimeError(
+                    f"Run {run_id} outlived its creation reservation on "
+                    f"thread {thread_id}"
+                )
         except BaseException:
             # A run whose creation failed has no owner: undo the insert rather
             # than leave a ``pending`` row looking in flight until the orphan
