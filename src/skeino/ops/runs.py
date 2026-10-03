@@ -1354,6 +1354,7 @@ class RunOps:
     ) -> tuple[JsonValue, int]:
         """Return ``(output, tokens)`` for a finished run.
 
+        The output is filtered by the graph's output schema, as the stream is.
         Raises 404 if the run row is gone (it can be deleted by a concurrent
         ``cancel(action=rollback)`` or ``DELETE`` while a waiter/joiner is in
         flight) and 500 if the run itself errored.
@@ -1390,6 +1391,8 @@ class RunOps:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Could not read the final state of run {run_id}.",
             ) from exc
+        if isinstance(output, dict):
+            output = self._streamer.filter_values(output)
         return output, tokens
 
     async def _final_state_values(

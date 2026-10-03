@@ -76,12 +76,68 @@ def test_output_schema_hides_internal_key_on_values_stream(graph_name: str) -> N
         assert all("internal" not in snapshot for snapshot in snapshots)
 
 
-@pytest.mark.xfail(strict=True, reason="#120: runs/wait ignores output_schema")
 @pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
 def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
     with real_client(graph_name) as client:
         output = _wait(client, _new_thread(client), input=user_input())
         assert INTERNAL_VALUE not in str(output)
+
+
+@pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
+def test_output_schema_hides_internal_key_on_join(graph_name: str) -> None:
+    with real_client(graph_name) as client:
+        thread_id = _new_thread(client)
+        run = client.post(
+            f"/threads/{thread_id}/runs",
+            json={"assistant_id": ASSISTANT_ID, "input": user_input()},
+        ).json()
+        output = client.get(f"/threads/{thread_id}/runs/{run['run_id']}/join").json()
+        assert _last_content(output) == "echo: hi"
+        assert INTERNAL_VALUE not in str(output)
+
+
+@pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
+def test_state_endpoint_returns_full_state(graph_name: str) -> None:
+    # /state is the raw checkpoint (as on LangGraph server; Studio relies on
+    # it), so it deliberately keeps keys the output schema hides elsewhere.
+    with real_client(graph_name) as client:
+        thread_id = _new_thread(client)
+        _wait(client, thread_id, input=user_input())
+        values = client.get(f"/threads/{thread_id}/state").json()["values"]
+        assert values["internal"] == INTERNAL_VALUE
+
+
+_EP_ANSWER = {"answer": "echo: hi"}
+
+
+def test_entrypoint_values_stream_carries_return_value() -> None:
+    with real_client("entrypoint") as client:
+        body = client.post(
+            f"/threads/{_new_thread(client)}/runs/stream",
+            json={
+                "assistant_id": ASSISTANT_ID,
+                "input": {"q": "hi"},
+                "stream_mode": ["values"],
+            },
+        ).text
+        snapshots = [data for name, data in parse_sse(body) if name == "values"]
+        assert snapshots[-1] == _EP_ANSWER
+
+
+def test_entrypoint_wait_returns_return_value() -> None:
+    with real_client("entrypoint") as client:
+        assert _wait(client, _new_thread(client), input={"q": "hi"}) == _EP_ANSWER
+
+
+def test_entrypoint_thread_reads_carry_return_value() -> None:
+    with real_client("entrypoint") as client:
+        thread_id = _new_thread(client)
+        _wait(client, thread_id, input={"q": "hi"})
+        assert client.get(f"/threads/{thread_id}").json()["values"] == _EP_ANSWER
+        searched = client.post("/threads/search", json={"ids": [thread_id]}).json()
+        assert searched[0]["values"] == _EP_ANSWER
+        history = client.post(f"/threads/{thread_id}/history", json={"limit": 1})
+        assert history.json()[0]["values"] == _EP_ANSWER
 
 
 def test_writer_graph_streams_dict_custom_event() -> None:

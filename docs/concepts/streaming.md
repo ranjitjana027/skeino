@@ -191,8 +191,17 @@ The recognised modes are `values`, `messages`, `messages-tuple`, `tasks`,
 
 ### Output filtering
 
-If your graph declares an `output_schema`, skeino only emits the fields that
-schema declares, so internal state never leaks onto the wire.
+If your graph declares an `output_schema`, skeino only returns the fields that
+schema declares from `values` and `updates` stream events, run output
+(`runs/wait`, `runs/{id}/join`), and thread reads (`GET /threads/{id}`, thread
+search, history). Other stream modes (`messages`, `custom`, `tasks`, `debug`,
+...) are passed through unfiltered: they carry what the graph emits, not state
+keys.
+
+The state endpoints (`GET /threads/{id}/state` and its checkpoint variants)
+are the exception: as on LangGraph server, they return the raw checkpoint state,
+internal keys included, because tools such as LangGraph Studio inspect it. Don't
+expose them to clients that must not see internal state.
 
 ## Resilience
 
