@@ -84,6 +84,39 @@ def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
         assert INTERNAL_VALUE not in str(output)
 
 
+_EP_ANSWER = {"answer": "echo: hi"}
+
+
+def test_entrypoint_values_stream_carries_return_value() -> None:
+    with real_client("entrypoint") as client:
+        body = client.post(
+            f"/threads/{_new_thread(client)}/runs/stream",
+            json={
+                "assistant_id": ASSISTANT_ID,
+                "input": {"q": "hi"},
+                "stream_mode": ["values"],
+            },
+        ).text
+        snapshots = [data for name, data in parse_sse(body) if name == "values"]
+        assert snapshots[-1] == _EP_ANSWER
+
+
+def test_entrypoint_wait_returns_return_value() -> None:
+    with real_client("entrypoint") as client:
+        assert _wait(client, _new_thread(client), input={"q": "hi"}) == _EP_ANSWER
+
+
+def test_entrypoint_thread_reads_carry_return_value() -> None:
+    with real_client("entrypoint") as client:
+        thread_id = _new_thread(client)
+        _wait(client, thread_id, input={"q": "hi"})
+        assert client.get(f"/threads/{thread_id}").json()["values"] == _EP_ANSWER
+        searched = client.post("/threads/search", json={"ids": [thread_id]}).json()
+        assert searched[0]["values"] == _EP_ANSWER
+        history = client.post(f"/threads/{thread_id}/history", json={"limit": 1})
+        assert history.json()[0]["values"] == _EP_ANSWER
+
+
 def test_writer_graph_streams_dict_custom_event() -> None:
     with real_client("writer") as client:
         body = client.post(

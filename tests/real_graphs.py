@@ -25,6 +25,7 @@ from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, AnyMessage
 from langgraph.config import get_stream_writer
+from langgraph.func import entrypoint
 from langgraph.graph import START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.types import interrupt
@@ -192,6 +193,16 @@ def build_fake_llm(checkpointer: Any) -> Any:
     return graph.compile(checkpointer=checkpointer)
 
 
+def build_entrypoint(checkpointer: Any) -> Any:
+    """Functional-API graph: its output is the return value, not state keys."""
+
+    @entrypoint(checkpointer=checkpointer)
+    def answer(inputs: dict[str, Any]) -> dict[str, Any]:
+        return {"answer": f"echo: {inputs['q']}"}
+
+    return answer
+
+
 def make_gated(entered: asyncio.Event, gate: asyncio.Event) -> Callable[[Any], Any]:
     """Two steps with a pause between: a run observably mid-flight.
 
@@ -231,6 +242,7 @@ GRAPHS: dict[str, Callable[[Any], Any]] = {
     "fake_llm": build_fake_llm,
     "gated": build_gated,
     "failing": build_failing,
+    "entrypoint": build_entrypoint,
 }
 
 

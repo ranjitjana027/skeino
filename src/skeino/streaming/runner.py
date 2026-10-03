@@ -21,6 +21,8 @@ locals of the async generator.
 import logging
 from typing import Any, AsyncIterator
 
+from pydantic import RootModel
+
 from skeino.schemas import JsonValue, RunCreateRequest
 from skeino.serialization import (
     normalize_input_payload,
@@ -43,6 +45,10 @@ class Streamer:
         schema = getattr(self._graph, "output_schema", None)
         if schema is None:
             # No declared output schema → no filtering (everything passes).
+            return None
+        if isinstance(schema, type) and issubclass(schema, RootModel):
+            # Functional API (@entrypoint): the output is the whole return
+            # value, not state keys, so there is nothing to filter by.
             return None
         # Pydantic model schema: keys live in model_fields.
         model_fields = getattr(schema, "model_fields", None)
