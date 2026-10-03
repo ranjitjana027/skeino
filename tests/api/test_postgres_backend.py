@@ -1,5 +1,7 @@
 """Postgres-only assertions at the SQL level: rows really land in the tables."""
 
+import asyncio
+
 import psycopg
 
 from tests.api.conftest import (
@@ -93,7 +95,7 @@ async def test_release_busy_thread_waits_for_a_run_being_inserted(
                 (str(uuid4()), thread_id),
             )
             release = asyncio.create_task(store.release_busy_thread(thread_id, "error"))
-            await asyncio.sleep(0.3)
+            await _wait_for_lock_wait(postgres_backend.uri, release)
             assert not release.done()  # blocked on the uncommitted insert
             await other.commit()
             assert await asyncio.wait_for(release, timeout=5) is False
@@ -101,3 +103,25 @@ async def test_release_busy_thread_waits_for_a_run_being_inserted(
         assert row is not None and row["status"] == "busy"
     finally:
         await store.aclose()
+
+
+async def _wait_for_lock_wait(uri: str, release: asyncio.Task[bool]) -> None:
+    """Wait until the release is blocked on the thread-row lock, server side.
+
+    Elapsed time proves nothing: a release that has not reached its
+    ``SELECT ... FOR UPDATE`` yet looks just as blocked.
+    """
+    async with await psycopg.AsyncConnection.connect(uri, autocommit=True) as watch:
+        for _ in range(500):
+            cur = await watch.execute(
+                "SELECT COUNT(*) FROM pg_stat_activity "
+                "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+                "AND query LIKE '%FOR UPDATE%'"
+            )
+            row = await cur.fetchone()
+            if row is not None and row[0]:
+                return
+            if release.done():
+                break
+            await asyncio.sleep(0.01)
+    raise AssertionError("the release never waited on the thread-row lock")

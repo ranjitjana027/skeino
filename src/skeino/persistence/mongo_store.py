@@ -194,6 +194,13 @@ class MongoMetadataStore:
         reservation, conditionally and bumping the version: if a release
         cleared it first, the creator undoes its run and fails; if the creator
         clears it first, that release's compare-and-set fails.
+
+        One window is left without a transaction: a creator cut off from
+        renewing for a whole ``_CREATION_RESERVATION_TTL`` whose insert lands
+        between a release's run check and its write, and which then dies before
+        it can undo that run. Its thread is released with the dead creator's
+        ``pending`` run on it, which nothing executes and the orphan sweep
+        fails once it is stale, as for any creator that dies after its insert.
         """
         doc = await self._threads.find_one(
             {"_id": thread_id, "status": "busy"}, {"version": 1, "creating": 1}
