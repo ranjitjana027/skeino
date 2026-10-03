@@ -29,7 +29,6 @@ from skeino.schemas import ThreadSearchRequest
 from tests.store_contract import (
     IN_MEMORY_SNAPSHOT_GAPS,
     MONGO_TIMESTAMP_GAPS,
-    SORT_KEYS,
     StoreContract,
 )
 
@@ -138,14 +137,6 @@ class TestInMemoryStoreContract(StoreContract):
     KNOWN_GAPS: ClassVar[dict[str, str]] = {
         **IN_MEMORY_SNAPSHOT_GAPS,
         "test_empty_update_changes_nothing": "#136: empty update bumps updated_at",
-        **{
-            f"test_search_sorts_by_every_key[{key}-{order}]": (
-                "#112: in-memory ignores sort_by"
-            )
-            for key in SORT_KEYS
-            if key != "updated_at"
-            for order in ("asc", "desc")
-        },
     }
 
     @pytest.fixture

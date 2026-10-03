@@ -11,6 +11,7 @@ from datetime import timedelta
 from skeino.persistence._common import (
     new_run_row,
     new_thread_row,
+    resolve_sort_by,
     thread_exists_error,
     ttl_payload,
     utcnow,
@@ -122,7 +123,12 @@ class InMemoryMetadataStore:
             rows = [r for r in rows if str(r["thread_id"]) in allowed]
         if request.status is not None:
             rows = [r for r in rows if r["status"] == request.status]
-        rows.sort(key=lambda r: r["updated_at"], reverse=(request.sort_order != "asc"))
+        sort_by = resolve_sort_by(request)
+        # None (e.g. a never-written state_updated_at) sorts first, as in SQLite/Mongo.
+        rows.sort(
+            key=lambda r: (r[sort_by] is not None, r[sort_by]),  # type: ignore[literal-required]
+            reverse=(request.sort_order != "asc"),
+        )
         return rows[request.offset : request.offset + request.limit]
 
     async def delete_thread(self, thread_id: str) -> None:
