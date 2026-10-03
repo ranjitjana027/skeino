@@ -13,9 +13,10 @@ matching the checkpointer builder, so graph state and metadata share the
 operator's chosen database — falling back to ``skeino`` for pathless URIs.
 """
 
+import asyncio
 import logging
 from collections.abc import Collection, Sequence
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +45,19 @@ from skeino.schemas import (
 _DEFAULT_DB_NAME = "skeino"
 
 logger = logging.getLogger(__name__)
+
+
+# How long a run creation's reservation on its thread holds off
+# ``release_busy_thread`` unless renewed. A live creator renews it while its
+# insert is under way, so it only lapses for a process that died
+# mid-creation, whose reservation would otherwise block the release forever.
+_CREATION_RESERVATION_TTL = timedelta(minutes=1)
+_CREATION_RESERVATION_RENEWAL = timedelta(seconds=20)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """BSON datetimes come back naive (UTC); make them comparable."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class MongoMetadataStore:
@@ -149,7 +163,80 @@ class MongoMetadataStore:
             updates["state_updated_at"] = utcnow()
         if len(updates) == 1:
             return
-        await self._threads.update_one({"_id": thread_id}, {"$set": updates})
+        change: dict[str, Any] = {"$set": updates}
+        if status_value is not None:
+            # Lets ``release_busy_thread`` detect a status written meanwhile.
+            change["$inc"] = {"version": 1}
+        await self._threads.update_one({"_id": thread_id}, change)
+
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Set a busy thread's status if no run is in flight on it.
+
+        Threads and runs are separate collections, so the check cannot be one
+        atomic write without a multi-document transaction (which needs a
+        replica set). Instead the write is a compare-and-set on the thread's
+        ``version``, which every status write bumps. :meth:`create_run`
+        reserves the thread (bumping the version) before inserting its run and
+        clears the reservation after. So a run being created is either
+        reserved when the thread is read (and the release backs off), already
+        inserted when runs are checked, or reserved after the read (and the
+        compare-and-set fails). A live creator renews its reservation while
+        its insert is under way, so one older than ``_CREATION_RESERVATION_TTL``
+        is presumed abandoned by a process that died mid-creation: it is
+        ignored, and cleared by a successful release. In case its creator was
+        only cut off from renewing, it finishes by clearing its own
+        reservation, conditionally and bumping the version: if a release
+        cleared it first, the creator undoes its run and fails; if the creator
+        clears it first, that release's compare-and-set fails.
+
+        One window is left without a transaction: a creator cut off from
+        renewing for a whole ``_CREATION_RESERVATION_TTL`` whose insert lands
+        between a release's run check and its write, and which then dies before
+        it can undo that run. Its thread is released with the dead creator's
+        ``pending`` run on it, which nothing executes and the orphan sweep
+        fails once it is stale, as for any creator that dies after its insert.
+        """
+        doc = await self._threads.find_one(
+            {"_id": thread_id, "status": "busy"}, {"version": 1, "creating": 1}
+        )
+        if doc is None:
+            return False
+        creating: dict[str, datetime] = doc.get("creating") or {}
+        expired = utcnow() - _CREATION_RESERVATION_TTL
+        if any(_as_utc(reserved) > expired for reserved in creating.values()):
+            return False
+        in_flight = await self._runs.find_one(
+            {
+                "thread_id": thread_id,
+                "status": {"$in": sorted(IN_FLIGHT_RUN_STATUSES)},
+            },
+            {"_id": 1},
+        )
+        if in_flight is not None:
+            return False
+        now = utcnow()
+        updates: dict[str, Any] = {"status": status_value, "updated_at": now}
+        if mark_state_updated:
+            updates["state_updated_at"] = now
+        change: dict[str, Any] = {"$set": updates, "$inc": {"version": 1}}
+        if creating:  # every one of them expired
+            change["$unset"] = {f"creating.{run_id}": "" for run_id in creating}
+        result = await self._threads.update_one(
+            {
+                "_id": thread_id,
+                "status": "busy",
+                # ``None`` also matches a thread written before the counter.
+                "version": doc.get("version"),
+            },
+            change,
+        )
+        return bool(result.matched_count)
 
     async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows (filtered by ids/status, sorted, paginated)."""
@@ -200,19 +287,95 @@ class MongoMetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> RunRow:
         """Insert a run document and return its row."""
+        now = utcnow()
         row = new_run_row(
             run_id,
             thread_id,
-            utcnow(),
+            now,
             assistant_id=assistant_id,
             metadata=metadata,
             kwargs=kwargs,
             multitask_strategy=multitask_strategy,
         )
-        await self._runs.insert_one(
-            {**row, "_id": run_id, "run_id": run_id, "thread_id": thread_id}
+        doc = {**row, "_id": run_id, "run_id": run_id, "thread_id": thread_id}
+        reservation = f"creating.{run_id}"
+        # Reserve the thread for the insert (see ``release_busy_thread``).
+        await self._threads.update_one(
+            {"_id": thread_id}, {"$set": {reservation: now}, "$inc": {"version": 1}}
         )
+        renewal = asyncio.create_task(self._renew_reservation(thread_id, reservation))
+        try:
+            await self._runs.insert_one(doc)
+        except BaseException:
+            renewal.cancel()
+            await self._drop_reservation(thread_id, reservation)
+            raise
+        renewal.cancel()
+        try:
+            finished = await self._threads.update_one(
+                {"_id": thread_id, reservation: {"$exists": True}},
+                {"$unset": {reservation: ""}, "$inc": {"version": 1}},
+            )
+            if not finished.matched_count:
+                # Outlived its reservation: a release (or delete) took the
+                # thread meanwhile, possibly not seeing this run.
+                raise RuntimeError(
+                    f"Run {run_id} outlived its creation reservation on "
+                    f"thread {thread_id}"
+                )
+        except BaseException:
+            # A run whose creation failed has no owner: undo the insert rather
+            # than leave a ``pending`` row looking in flight until the orphan
+            # timeout. The reservation expires on its own.
+            try:
+                await self._runs.delete_one({"_id": run_id})
+            except Exception as cleanup_exc:
+                logger.error(
+                    "Failed to remove run %s after its creation failed",
+                    run_id,
+                    exc_info=cleanup_exc,
+                )
+            raise
         return row
+
+    async def _renew_reservation(self, thread_id: str, reservation: str) -> None:
+        """Keep a run creation's reservation fresh while its insert is slow.
+
+        Bumps the version, so a release that read the thread before the
+        renewal fails its compare-and-set. Stops once the reservation is gone:
+        a release took it, and the creation will undo its run.
+        """
+        while True:
+            await asyncio.sleep(_CREATION_RESERVATION_RENEWAL.total_seconds())
+            try:
+                renewed = await self._threads.update_one(
+                    {"_id": thread_id, reservation: {"$exists": True}},
+                    {"$set": {reservation: utcnow()}, "$inc": {"version": 1}},
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to renew run-creation reservation %s on thread %s",
+                    reservation,
+                    thread_id,
+                    exc_info=exc,
+                )
+                continue
+            if not renewed.matched_count:
+                return
+
+    async def _drop_reservation(self, thread_id: str, reservation: str) -> None:
+        """Best-effort: an undropped reservation expires on its own."""
+        try:
+            await self._threads.update_one(
+                {"_id": thread_id}, {"$unset": {reservation: ""}}
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to drop run-creation reservation %s on thread %s",
+                reservation,
+                thread_id,
+                exc_info=exc,
+            )
 
     async def update_run_status(
         self,

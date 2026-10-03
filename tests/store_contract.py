@@ -537,6 +537,59 @@ class StoreContract:
         )
         assert _ids(again, "run_id") == [ids["excluded"]]
 
+    async def test_release_busy_thread_only_when_nothing_is_in_flight(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        await store.update_thread(tid, status_value="busy")
+        run_id = str((await self._run(store, tid))["run_id"])
+
+        # A pending (and then a running) run keeps the thread busy.
+        assert await store.release_busy_thread(tid, "error") is False
+        await store.update_run_status(run_id, "running")
+        assert await store.release_busy_thread(tid, "error") is False
+        assert (await store.fetch_thread_row(tid))["status"] == "busy"
+
+        await store.update_run_status(run_id, "success")
+        assert await store.release_busy_thread(tid, "idle") is True
+        row = await store.fetch_thread_row(tid)
+        assert row["status"] == "idle"
+        assert row["state_updated_at"] is None
+
+        # Only a busy thread is released: a settled one keeps its status.
+        assert await store.release_busy_thread(tid, "error") is False
+        assert (await store.fetch_thread_row(tid))["status"] == "idle"
+
+    async def test_release_busy_thread_can_stamp_the_state_update(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid = _tid()
+        await self._thread(store, tid)
+        await store.update_thread(tid, status_value="busy")
+        assert await store.release_busy_thread(
+            tid, "interrupted", mark_state_updated=True
+        )
+        row = await store.fetch_thread_row(tid)
+        assert row["status"] == "interrupted"
+        assert row["state_updated_at"] is not None
+
+    async def test_release_busy_thread_ignores_other_threads_runs(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        tid, other = _tid(), _tid()
+        for thread_id in (tid, other):
+            await self._thread(store, thread_id)
+            await store.update_thread(thread_id, status_value="busy")
+        await self._run(store, other)  # in flight, but on another thread
+        assert await store.release_busy_thread(tid, "error") is True
+        assert await store.release_busy_thread(other, "error") is False
+
+    async def test_release_missing_thread_is_a_no_op(
+        self, store: MetadataStoreProtocol
+    ) -> None:
+        assert await store.release_busy_thread(_tid(), "error") is False
+
     async def test_touch_runs_leaves_terminal_and_unknown_runs_alone(
         self, store: MetadataStoreProtocol
     ) -> None:

@@ -97,6 +97,31 @@ class MetadataStoreProtocol(Protocol):
         """Update mutable metadata for a thread."""
         ...
 
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Move a ``busy`` thread with no run in flight to ``status_value``.
+
+        Atomic with respect to run creation and other thread-status writes:
+        the status is set only if, at the moment of the write, the thread is
+        still ``busy`` and no ``pending``/``running`` run exists for it. A run
+        created, or a status written, by another worker while the caller was
+        deciding to release the thread therefore wins. Returns whether the
+        thread was updated.
+
+        A backend without multi-document atomicity may leave a narrower
+        window, provided any run it misses belongs to a creator that died
+        before its creation returned: such a run never executes, and the
+        orphan sweep fails it once stale. ``MongoMetadataStore`` does this
+        (see its ``release_busy_thread``); the other built-in stores are fully
+        atomic.
+        """
+        ...
+
     async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows before graph-state enrichment."""
         ...
