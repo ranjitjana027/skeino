@@ -76,12 +76,35 @@ def test_output_schema_hides_internal_key_on_values_stream(graph_name: str) -> N
         assert all("internal" not in snapshot for snapshot in snapshots)
 
 
-@pytest.mark.xfail(strict=True, reason="#120: runs/wait ignores output_schema")
 @pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
 def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
     with real_client(graph_name) as client:
         output = _wait(client, _new_thread(client), input=user_input())
         assert INTERNAL_VALUE not in str(output)
+
+
+@pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
+def test_output_schema_hides_internal_key_on_join(graph_name: str) -> None:
+    with real_client(graph_name) as client:
+        thread_id = _new_thread(client)
+        run = client.post(
+            f"/threads/{thread_id}/runs",
+            json={"assistant_id": ASSISTANT_ID, "input": user_input()},
+        ).json()
+        output = client.get(f"/threads/{thread_id}/runs/{run['run_id']}/join").json()
+        assert _last_content(output) == "echo: hi"
+        assert INTERNAL_VALUE not in str(output)
+
+
+@pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
+def test_state_endpoint_returns_full_state(graph_name: str) -> None:
+    # /state is the raw checkpoint (as on LangGraph server; Studio relies on
+    # it), so it deliberately keeps keys the output schema hides elsewhere.
+    with real_client(graph_name) as client:
+        thread_id = _new_thread(client)
+        _wait(client, thread_id, input=user_input())
+        values = client.get(f"/threads/{thread_id}/state").json()["values"]
+        assert values["internal"] == INTERNAL_VALUE
 
 
 _EP_ANSWER = {"answer": "echo: hi"}
