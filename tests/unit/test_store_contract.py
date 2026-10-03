@@ -140,7 +140,7 @@ class TestInMemoryStoreContract(StoreContract):
         "test_empty_update_changes_nothing": "#136: empty update bumps updated_at",
         **{
             f"test_search_sorts_by_every_key[{key}-{order}]": (
-                "#112: in-memory ignores sort_by"
+                "#151: in-memory ignores sort_by"
             )
             for key in SORT_KEYS
             if key != "updated_at"
