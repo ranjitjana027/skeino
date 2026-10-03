@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from skeino.persistence import metadata_store as ms
 from skeino.schemas import ThreadSearchRequest
@@ -166,6 +167,7 @@ async def test_operations_share_one_pool(pooled_store: ms.MetadataStore) -> None
     await pooled_store.fetch_thread_row(tid)
     await pooled_store.search_thread_rows(ThreadSearchRequest(limit=10, offset=0))
     await pooled_store.delete_thread(tid)
+    await pooled_store.delete_run(tid, str(uuid4()))
 
     assert len(_FakePool.instances) == 1, (
         f"{len(_FakePool.instances)} pools built — each operation is still "
@@ -173,7 +175,7 @@ async def test_operations_share_one_pool(pooled_store: ms.MetadataStore) -> None
     )
     pool = _FakePool.instances[0]
     assert pool.opened == 1
-    assert pool.checkouts == 5, "every operation should borrow from the pool"
+    assert pool.checkouts == 6, "every operation should borrow from the pool"
 
 
 async def test_pool_is_configured_for_a_transaction_mode_pooler(
@@ -396,3 +398,25 @@ async def test_unlock_failure_does_not_mask_the_real_error(
 
     # And the connection is still closed, so the lock is not leaked.
     assert _FakeDirectConnection.instances[0].closed == 1
+
+
+async def test_create_thread_fails_loudly_when_insert_returns_no_row(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    # A BEFORE INSERT trigger returning NULL suppresses the row, so RETURNING
+    # yields nothing. That must surface as a 500, not a None "ThreadRow".
+    with pytest.raises(HTTPException) as excinfo:
+        await pooled_store.create_thread(
+            str(uuid4()), metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+    assert excinfo.value.status_code == 500
+
+
+async def test_create_run_fails_loudly_when_insert_returns_no_row(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        await pooled_store.create_run(
+            str(uuid4()), str(uuid4()), "asst", {}, {}, "reject"
+        )
+    assert excinfo.value.status_code == 500

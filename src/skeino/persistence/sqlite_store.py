@@ -22,12 +22,20 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Collection, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from fastapi import HTTPException, status
-
+from skeino.persistence._common import (
+    missing_extra,
+    new_run_row,
+    new_thread_row,
+    resolve_sort_by,
+    thread_exists_error,
+    thread_reread_error,
+    ttl_payload,
+    utcnow,
+)
 from skeino.persistence.base import RunRow, ThreadRow
 from skeino.persistence.uri import normalize_sqlite_uri
 from skeino.schemas import (
@@ -39,11 +47,6 @@ from skeino.schemas import (
     ThreadStatus,
     ThreadTtlConfig,
 )
-
-_THREAD_SORT_FIELDS: frozenset[str] = frozenset(
-    {"thread_id", "status", "created_at", "updated_at", "state_updated_at"}
-)
-_DEFAULT_SORT_BY = "updated_at"
 
 _CREATE_THREADS_SQL = """
 CREATE TABLE IF NOT EXISTS app_threads (
@@ -102,10 +105,6 @@ _RUN_COLUMNS = (
 _BUSY_TIMEOUT_MS = 10_000
 
 
-def _utcnow() -> datetime:
-    return datetime.now(UTC)
-
-
 def _to_dt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value is not None else None
 
@@ -124,10 +123,7 @@ class SqliteMetadataStore:
         try:
             import aiosqlite  # optional dependency: skeino[sqlite]
         except ImportError as exc:  # pragma: no cover - optional dependency
-            raise RuntimeError(
-                "The 'sqlite' metadata store requires the skeino[sqlite] extra "
-                "(pip install 'skeino[sqlite]')."
-            ) from exc
+            raise missing_extra("metadata store", "sqlite") from exc
 
         self._conn = await aiosqlite.connect(self._path)
         # Busy timeout first: the WAL conversion below takes an exclusive lock
@@ -168,12 +164,15 @@ class SqliteMetadataStore:
     async def fetch_thread_row(self, thread_id: str) -> ThreadRow | None:
         """Return the stored row for ``thread_id`` (or None)."""
         async with self._lock:
-            cursor = await self._conn.execute(
-                "SELECT thread_id, created_at, updated_at, state_updated_at, "
-                "metadata, config, status, ttl FROM app_threads WHERE thread_id = ?",
-                (thread_id,),
-            )
-            row = await cursor.fetchone()
+            return await self._fetch_thread_locked(thread_id)
+
+    async def _fetch_thread_locked(self, thread_id: str) -> ThreadRow | None:
+        """Fetch a thread row assuming the lock is already held."""
+        cursor = await self._conn.execute(
+            f"SELECT {_THREAD_COLUMNS} FROM app_threads WHERE thread_id = ?",  # nosec B608 - static columns
+            (thread_id,),
+        )
+        row = await cursor.fetchone()
         return self._thread_row(row) if row is not None else None
 
     async def create_thread(
@@ -186,8 +185,10 @@ class SqliteMetadataStore:
         if_exists: ThreadIfExists,
     ) -> ThreadRow:
         """Insert a thread row and return it."""
-        now = _utcnow()
-        ttl_payload = self._ttl_payload(ttl, now)
+        now = utcnow()
+        row = new_thread_row(
+            thread_id, now, metadata=metadata, config=config, ttl=ttl_payload(ttl, now)
+        )
         async with self._lock:
             try:
                 await self._conn.execute(
@@ -201,7 +202,7 @@ class SqliteMetadataStore:
                         json.dumps(metadata),
                         json.dumps(config),
                         "idle",
-                        json.dumps(ttl_payload) if ttl_payload is not None else None,
+                        json.dumps(row["ttl"]) if row["ttl"] is not None else None,
                     ),
                 )
                 await self._conn.commit()
@@ -211,35 +212,9 @@ class SqliteMetadataStore:
                     existing = await self._fetch_thread_locked(thread_id)
                     if existing is not None:
                         return existing
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Thread {thread_id} insert conflicted but the row "
-                        "could not be re-read (concurrent delete?).",
-                    ) from exc
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"Thread {thread_id} already exists.",
-                ) from exc
-        return {
-            "thread_id": UUID(thread_id),
-            "created_at": now,
-            "updated_at": now,
-            "state_updated_at": None,
-            "metadata": dict(metadata),
-            "config": dict(config),
-            "status": "idle",
-            "ttl": ttl_payload,
-        }
-
-    async def _fetch_thread_locked(self, thread_id: str) -> ThreadRow | None:
-        """Fetch a thread row assuming the lock is already held."""
-        cursor = await self._conn.execute(
-            "SELECT thread_id, created_at, updated_at, state_updated_at, "
-            "metadata, config, status, ttl FROM app_threads WHERE thread_id = ?",
-            (thread_id,),
-        )
-        row = await cursor.fetchone()
-        return self._thread_row(row) if row is not None else None
+                    raise thread_reread_error(thread_id) from exc
+                raise thread_exists_error(thread_id) from exc
+        return row
 
     async def update_thread(
         self,
@@ -252,7 +227,7 @@ class SqliteMetadataStore:
     ) -> None:
         """Update mutable thread fields."""
         assignments = ["updated_at = ?"]
-        values: list[Any] = [_utcnow().isoformat()]
+        values: list[Any] = [utcnow().isoformat()]
         if status_value is not None:
             assignments.append("status = ?")
             values.append(status_value)
@@ -264,7 +239,7 @@ class SqliteMetadataStore:
             values.append(json.dumps(metadata))
         if mark_state_updated:
             assignments.append("state_updated_at = ?")
-            values.append(_utcnow().isoformat())
+            values.append(utcnow().isoformat())
         if len(assignments) == 1:
             return
         values.append(thread_id)
@@ -287,7 +262,7 @@ class SqliteMetadataStore:
         One statement: SQLite runs writers one at a time, so the in-flight
         check and the write cannot interleave with another process's insert.
         """
-        now = _utcnow().isoformat()
+        now = utcnow().isoformat()
         async with self._lock:
             cursor = await self._conn.execute(
                 "UPDATE app_threads SET status = ?, updated_at = ?, "
@@ -312,13 +287,11 @@ class SqliteMetadataStore:
             conditions.append("status = ?")
             values.append(request.status)
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sort_by = request.sort_by or _DEFAULT_SORT_BY
-        if sort_by not in _THREAD_SORT_FIELDS:
-            sort_by = _DEFAULT_SORT_BY
+        sort_by = resolve_sort_by(request)
         order = "ASC" if request.sort_order == "asc" else "DESC"
         values.extend([request.limit, request.offset])
         # `where` is composed of hardcoded "column = ?"/"IN (?)" fragments;
-        # sort_by is whitelisted against _THREAD_SORT_FIELDS and order is a
+        # sort_by is whitelisted by resolve_sort_by and order is a
         # literal ASC/DESC; every user value is bound via ? parameters.
         query = f"SELECT {_THREAD_COLUMNS} FROM app_threads {where} ORDER BY {sort_by} {order} LIMIT ? OFFSET ?"  # nosec B608
         async with self._lock:
@@ -364,7 +337,16 @@ class SqliteMetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> RunRow:
         """Insert a run row and return it."""
-        now = _utcnow()
+        row = new_run_row(
+            run_id,
+            thread_id,
+            utcnow(),
+            assistant_id=assistant_id,
+            metadata=metadata,
+            kwargs=kwargs,
+            multitask_strategy=multitask_strategy,
+        )
+        now = row["created_at"]
         async with self._lock:
             await self._conn.execute(
                 "INSERT INTO app_runs "
@@ -384,18 +366,7 @@ class SqliteMetadataStore:
                 ),
             )
             await self._conn.commit()
-        return {
-            "run_id": UUID(run_id),
-            "thread_id": UUID(thread_id),
-            "assistant_id": assistant_id,
-            "created_at": now,
-            "updated_at": now,
-            "status": "pending",
-            "metadata": dict(metadata),
-            "kwargs": dict(kwargs),
-            "multitask_strategy": multitask_strategy,
-            "error": None,
-        }
+        return row
 
     async def update_run_status(
         self,
@@ -412,7 +383,7 @@ class SqliteMetadataStore:
             cursor = await self._conn.execute(
                 "UPDATE app_runs SET status = ?, updated_at = ?, error = ? "
                 "WHERE run_id = ? AND status IN ('pending', 'running')",
-                (status_value, _utcnow().isoformat(), error, run_id),
+                (status_value, utcnow().isoformat(), error, run_id),
             )
             await self._conn.commit()
         return bool(cursor.rowcount > 0)
@@ -465,7 +436,7 @@ class SqliteMetadataStore:
         """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
         if not run_ids:
             return
-        now = _utcnow().isoformat()
+        now = utcnow().isoformat()
         async with self._lock:
             await self._conn.executemany(
                 "UPDATE app_runs SET updated_at = ? "
@@ -490,7 +461,7 @@ class SqliteMetadataStore:
         lands between the scan and the claim wins. A failure rolls back every
         claim, so no run is failed without being reported.
         """
-        now = _utcnow()
+        now = utcnow()
         cutoff = now - timedelta(seconds=stale_after_seconds)
         excluded = set(exclude_run_ids)
         failed: list[RunRow] = []
@@ -521,15 +492,3 @@ class SqliteMetadataStore:
                 await self._conn.rollback()
                 raise
         return failed
-
-    @staticmethod
-    def _ttl_payload(
-        ttl: ThreadTtlConfig | None, now: datetime
-    ) -> dict[str, JsonValue] | None:
-        if ttl is None or ttl.ttl is None:
-            return None
-        return {
-            "strategy": ttl.strategy,
-            "ttl_minutes": ttl.ttl,
-            "expires_at": (now + timedelta(minutes=ttl.ttl)).isoformat(),
-        }

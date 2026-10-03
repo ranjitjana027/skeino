@@ -6,11 +6,15 @@ runs, and any deployment where durability is not required.
 """
 
 from collections.abc import Collection, Sequence
-from datetime import UTC, datetime, timedelta
-from uuid import UUID
+from datetime import timedelta
 
-from fastapi import HTTPException, status
-
+from skeino.persistence._common import (
+    new_run_row,
+    new_thread_row,
+    thread_exists_error,
+    ttl_payload,
+    utcnow,
+)
 from skeino.persistence.base import IN_FLIGHT_RUN_STATUSES, RunRow, ThreadRow
 from skeino.schemas import (
     JsonValue,
@@ -21,11 +25,6 @@ from skeino.schemas import (
     ThreadStatus,
     ThreadTtlConfig,
 )
-
-
-def _utcnow() -> datetime:
-    """Return the current UTC timestamp."""
-    return datetime.now(UTC)
 
 
 class InMemoryMetadataStore:
@@ -57,28 +56,11 @@ class InMemoryMetadataStore:
         if thread_id in self._threads:
             if if_exists == "do_nothing":
                 return self._threads[thread_id]
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Thread {thread_id} already exists.",
-            )
-        now = _utcnow()
-        ttl_payload: dict[str, JsonValue] | None = None
-        if ttl is not None and ttl.ttl is not None:
-            ttl_payload = {
-                "strategy": ttl.strategy,
-                "ttl_minutes": ttl.ttl,
-                "expires_at": (now + timedelta(minutes=ttl.ttl)).isoformat(),
-            }
-        row: ThreadRow = {
-            "thread_id": UUID(thread_id),
-            "created_at": now,
-            "updated_at": now,
-            "state_updated_at": None,
-            "metadata": dict(metadata),
-            "config": dict(config),
-            "status": "idle",
-            "ttl": ttl_payload,
-        }
+            raise thread_exists_error(thread_id)
+        now = utcnow()
+        row = new_thread_row(
+            thread_id, now, metadata=metadata, config=config, ttl=ttl_payload(ttl, now)
+        )
         self._threads[thread_id] = row
         return row
 
@@ -95,7 +77,7 @@ class InMemoryMetadataStore:
         row = self._threads.get(thread_id)
         if row is None:
             return
-        row["updated_at"] = _utcnow()
+        row["updated_at"] = utcnow()
         if status_value is not None:
             row["status"] = status_value
         if config is not None:
@@ -103,7 +85,7 @@ class InMemoryMetadataStore:
         if metadata is not None:
             row["metadata"] = dict(metadata)
         if mark_state_updated:
-            row["state_updated_at"] = _utcnow()
+            row["state_updated_at"] = utcnow()
 
     async def release_busy_thread(
         self,
@@ -125,7 +107,7 @@ class InMemoryMetadataStore:
             for run in self._runs.values()
         ):
             return False
-        now = _utcnow()
+        now = utcnow()
         row["updated_at"] = now
         row["status"] = status_value
         if mark_state_updated:
@@ -162,19 +144,15 @@ class InMemoryMetadataStore:
         multitask_strategy: MultitaskStrategy,
     ) -> RunRow:
         """Insert a run row and return it."""
-        now = _utcnow()
-        row: RunRow = {
-            "run_id": UUID(run_id),
-            "thread_id": UUID(thread_id),
-            "assistant_id": assistant_id,
-            "created_at": now,
-            "updated_at": now,
-            "status": "pending",
-            "metadata": dict(metadata),
-            "kwargs": dict(kwargs),
-            "multitask_strategy": multitask_strategy,
-            "error": None,
-        }
+        row = new_run_row(
+            run_id,
+            thread_id,
+            utcnow(),
+            assistant_id=assistant_id,
+            metadata=metadata,
+            kwargs=kwargs,
+            multitask_strategy=multitask_strategy,
+        )
         self._runs[run_id] = row
         return row
 
@@ -193,10 +171,8 @@ class InMemoryMetadataStore:
         if row is None or row["status"] not in IN_FLIGHT_RUN_STATUSES:
             return False
         row["status"] = status_value
-        row["updated_at"] = _utcnow()
-        # Always assign (clearing with None) — same semantics as the SQL/Mongo
-        # stores, which unconditionally write the error column on update.
-        row["error"] = error
+        row["updated_at"] = utcnow()
+        row["error"] = error  # always written, as in the SQL/Mongo stores
         return True
 
     async def fetch_run_row(self, thread_id: str, run_id: str) -> RunRow | None:
@@ -229,7 +205,7 @@ class InMemoryMetadataStore:
 
     async def touch_runs(self, run_ids: Sequence[str]) -> None:
         """Bump ``updated_at`` on the given in-flight runs (heartbeat)."""
-        now = _utcnow()
+        now = utcnow()
         for run_id in run_ids:
             row = self._runs.get(run_id)
             if row is not None and row["status"] in IN_FLIGHT_RUN_STATUSES:
@@ -243,7 +219,7 @@ class InMemoryMetadataStore:
         error: str,
     ) -> list[RunRow]:
         """Mark in-flight runs not heartbeated within the window ``error``."""
-        now = _utcnow()
+        now = utcnow()
         cutoff = now - timedelta(seconds=stale_after_seconds)
         excluded = set(exclude_run_ids)
         failed: list[RunRow] = []

@@ -16,11 +16,18 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator, Collection, Sequence
 from contextlib import asynccontextmanager, suppress
-from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from fastapi import HTTPException, status
 
+from skeino.persistence._common import (
+    missing_extra,
+    resolve_sort_by,
+    thread_exists_error,
+    thread_reread_error,
+    ttl_payload,
+    utcnow,
+)
 from skeino.persistence.base import RunRow, ThreadRow
 from skeino.schemas import (
     JsonValue,
@@ -30,14 +37,6 @@ from skeino.schemas import (
     ThreadSearchRequest,
     ThreadStatus,
     ThreadTtlConfig,
-)
-
-THREAD_STATUS_IDLE: Final[ThreadStatus] = "idle"
-RUN_STATUS_PENDING: Final[RunStatus] = "pending"
-DEFAULT_SORT_BY: Final[str] = "updated_at"
-DEFAULT_SORT_ORDER: Final[str] = "desc"
-THREAD_SORT_FIELDS: Final[frozenset[str]] = frozenset(
-    {"thread_id", "status", "created_at", "updated_at", "state_updated_at"}
 )
 
 _CREATE_THREADS_TABLE_SQL: Final[str] = """
@@ -91,7 +90,7 @@ _INDEXES: Final[tuple[tuple[str, str, str], ...]] = (
         "DROP INDEX CONCURRENTLY IF EXISTS idx_app_runs_inflight_updated",
     ),
     (
-        # Thread search sorts by updated_at DESC by default (DEFAULT_SORT_BY);
+        # Thread search sorts by updated_at DESC by default;
         # without this the paginated listing sorts the whole table per page.
         "idx_app_threads_updated_at",
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_app_threads_updated_at "
@@ -133,30 +132,7 @@ _TRY_INDEX_LOCK_SQL: Final[str] = "SELECT pg_try_advisory_lock(%s)"
 _UNLOCK_INDEX_SQL: Final[str] = "SELECT pg_advisory_unlock(%s)"
 
 
-def _first_column(row: Any) -> Any:
-    """Return the single value of a one-column result row.
-
-    The index connection is opened without a row factory, so rows arrive as
-    tuples; this stays correct if one is ever configured.
-    """
-    if row is None:
-        return None
-    if isinstance(row, dict):
-        return next(iter(row.values()), None)
-    return row[0]
-
-
-def _utcnow() -> datetime:
-    """Return the current UTC timestamp."""
-    return datetime.now(UTC)
-
-
 logger = logging.getLogger(__name__)
-
-_POSTGRES_EXTRA_HINT: Final[str] = (
-    "The 'postgres' metadata store requires the skeino[postgres] extra "
-    "(pip install 'skeino[postgres]')."
-)
 
 
 def _pg() -> tuple[Any, Any]:
@@ -165,7 +141,7 @@ def _pg() -> tuple[Any, Any]:
         import psycopg
         from psycopg.rows import dict_row
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
+        raise missing_extra("metadata store", "postgres") from exc
     return psycopg, dict_row
 
 
@@ -174,7 +150,7 @@ def _pg_pool() -> Any:
     try:
         from psycopg_pool import AsyncConnectionPool
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
+        raise missing_extra("metadata store", "postgres") from exc
     return AsyncConnectionPool
 
 
@@ -185,7 +161,7 @@ def _to_jsonb(payload: dict[str, JsonValue] | None) -> Any:
     try:
         from psycopg.types.json import Jsonb
     except ImportError as exc:  # pragma: no cover - optional dependency
-        raise RuntimeError(_POSTGRES_EXTRA_HINT) from exc
+        raise missing_extra("metadata store", "postgres") from exc
     return Jsonb(payload)
 
 
@@ -206,14 +182,7 @@ class MetadataStore:
     async def _ensure_pool(self) -> Any:
         """Return the shared connection pool, opening it on first use.
 
-        Every operation used to open its own ``AsyncConnection``, which meant a
-        TCP connect, a TLS handshake and a SCRAM exchange per *query*. Against a
-        managed Postgres in another region that is several round trips of pure
-        latency before any row moves, and the cost multiplies with the number of
-        queries a request makes — ``GET``-style listings that read one row per
-        result paid it once per row.
-
-        ``check`` validates a pooled connection before checkout so one dropped
+        A pool avoids a TCP/TLS/SCRAM handshake per query. ``check`` validates a pooled connection before checkout so one dropped
         by an idle-timeout or a recycling pooler is replaced rather than handed
         out closed. ``prepare_threshold=None`` disables client-side prepared
         statements, which keeps the store correct behind a transaction-mode
@@ -317,8 +286,8 @@ class MetadataStore:
         try:
             async with conn.cursor() as cursor:
                 await cursor.execute(_TRY_INDEX_LOCK_SQL, (_INDEX_LOCK_KEY,))
-                acquired = _first_column(await cursor.fetchone())
-            if not acquired:
+                row = await cursor.fetchone()
+            if not (row and row[0]):
                 # Another process holds it and is running this same sequence.
                 # Waiting would stall this instance's startup for the length of
                 # its build, which is the cost this whole change exists to
@@ -387,7 +356,7 @@ class MetadataStore:
     ) -> ThreadRow:
         """Insert a thread row and return the stored record."""
         psycopg, _ = _pg()
-        ttl_payload = self._build_ttl_payload(ttl)
+        ttl_value = ttl_payload(ttl, utcnow())
         async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 try:
@@ -403,8 +372,8 @@ class MetadataStore:
                             thread_id,
                             _to_jsonb(metadata),
                             _to_jsonb(config),
-                            THREAD_STATUS_IDLE,
-                            _to_jsonb(ttl_payload),
+                            "idle",
+                            _to_jsonb(ttl_value),
                         ),
                     )
                 except psycopg.errors.UniqueViolation as exc:
@@ -416,16 +385,9 @@ class MetadataStore:
                         # deadlocks once the pool is saturated.
                         existing_row = await self._select_thread_row(conn, thread_id)
                         if existing_row is None:
-                            raise HTTPException(
-                                status_code=status.HTTP_409_CONFLICT,
-                                detail=f"Thread {thread_id} insert conflicted but "
-                                "the row could not be re-read (concurrent delete?).",
-                            ) from exc
+                            raise thread_reread_error(thread_id) from exc
                         return existing_row
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail=f"Thread {thread_id} already exists.",
-                    ) from exc
+                    raise thread_exists_error(thread_id) from exc
                 created_row: ThreadRow | None = await cursor.fetchone()
             await conn.commit()
         if created_row is None:
@@ -552,22 +514,18 @@ class MetadataStore:
             values.append(request.status)
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-        sort_by = request.sort_by or DEFAULT_SORT_BY
-        if sort_by not in THREAD_SORT_FIELDS:
-            sort_by = DEFAULT_SORT_BY
-        sort_order = request.sort_order or DEFAULT_SORT_ORDER
-        if sort_order not in {"asc", "desc"}:
-            sort_order = DEFAULT_SORT_ORDER
+        sort_by = resolve_sort_by(request)
+        order = "ASC" if request.sort_order == "asc" else "DESC"
 
         # nosec B608: `where_clause` is composed of hardcoded "column = %s"
-        # conditions, and `sort_by`/`sort_order` are whitelisted against
-        # THREAD_SORT_FIELDS and {"asc","desc"}; user values are bound via %s.
+        # conditions, `sort_by` is whitelisted by resolve_sort_by and `order`
+        # is a literal; user values are bound via %s.
         query = f"""
             SELECT thread_id, created_at, updated_at, state_updated_at,
                    metadata, config, status, ttl
             FROM app_threads
             {where_clause}
-            ORDER BY {sort_by} {sort_order.upper()}
+            ORDER BY {sort_by} {order}
             LIMIT %s
             OFFSET %s
         """  # nosec B608
@@ -603,7 +561,7 @@ class MetadataStore:
                         run_id,
                         thread_id,
                         assistant_id,
-                        RUN_STATUS_PENDING,
+                        "pending",
                         _to_jsonb(metadata),
                         _to_jsonb(kwargs),
                         multitask_strategy,
@@ -694,8 +652,7 @@ class MetadataStore:
 
     async def delete_run(self, thread_id: str, run_id: str) -> None:
         """Delete a single run row scoped to its thread."""
-        psycopg, _ = _pg()
-        async with await psycopg.AsyncConnection.connect(self._postgres_uri) as conn:
+        async with self._connection() as conn:
             async with conn.cursor() as cursor:
                 await cursor.execute(
                     "DELETE FROM app_runs WHERE thread_id = %s AND run_id = %s",
@@ -752,16 +709,3 @@ class MetadataStore:
                 rows: list[RunRow] = list(await cursor.fetchall())
             await conn.commit()
         return rows
-
-    def _build_ttl_payload(
-        self, ttl: ThreadTtlConfig | None
-    ) -> dict[str, JsonValue] | None:
-        """Return the stored TTL payload."""
-        if ttl is None or ttl.ttl is None:
-            return None
-        expires_at = _utcnow() + timedelta(minutes=ttl.ttl)
-        return {
-            "strategy": ttl.strategy,
-            "ttl_minutes": ttl.ttl,
-            "expires_at": expires_at.isoformat(),
-        }
