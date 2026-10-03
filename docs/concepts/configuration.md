@@ -45,6 +45,25 @@ app = create_app(
 | `checkpointer_options` | `dict[str, object]` | `{}` | Extra options passed to the checkpointer builder (e.g. `{"setup_schema": False}`). |
 | `allow_ephemeral_metadata` | `bool` | `False` | Permit a durable scheme with no native metadata store (e.g. `redis`/custom) to run with the in-memory metadata store. Off by default so the split-brain fails loudly at startup. |
 
+#### Run liveness
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `run_heartbeat_seconds` | `float` | `30.0` | How often each process refreshes `updated_at` on the runs it is executing, marking them alive. Must be `> 0`. |
+| `orphaned_run_timeout_seconds` | `float \| None` | `120.0` | A `pending`/`running` run whose `updated_at` is older than this has lost its process (crash, OOM kill, restart) and is marked `error`, freeing its thread. Swept at startup and every `run_heartbeat_seconds`. Must be `> 0` and **at least 3× `run_heartbeat_seconds`** (validated at construction), so one failed heartbeat pass is tolerated. `None` disables the sweep. Workers sharing a SQLite/MongoDB store need synchronised clocks. See [Threads & runs](threads-and-runs.md). |
+
+#### Resumable streams
+
+Retention for runs created with `stream_resumable: true`; see
+[Streaming](streaming.md#joining-a-run-stream).
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `resumable_stream_ttl_seconds` | `float` | `600.0` | How long a finished run keeps its buffered SSE events for replay via `GET /threads/{thread_id}/runs/{run_id}/stream`. `0` drops them as soon as the run ends (a join then gets the final state only). |
+| `resumable_stream_max_retained_runs` | `int` | `16` | Maximum finished resumable streams retained per worker; oldest are evicted first and a join then returns final state instead of replay. `0` disables finished-history retention. |
+| `resumable_stream_max_events` | `int` | `10000` | Maximum recent SSE events retained per resumable thread-scoped run. A join whose `Last-Event-ID` predates the retained window returns `409`. Must be `>= 1`. |
+| `resumable_stream_max_bytes` | `int` | `16777216` (16 MiB) | Maximum encoded SSE frame bytes retained per resumable thread-scoped run; older events are evicted past this budget (same `409` on a stale cursor). Must be `>= 1`. |
+
 #### Assistant identity
 
 | Field | Type | Default | Description |
