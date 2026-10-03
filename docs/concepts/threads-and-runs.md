@@ -167,7 +167,11 @@ row is also claimed with a conditional update, so only one sweeper reports it.
 Moving a thread off `busy` (after a sweep, a stuck-thread release, or a settle
 retry) is conditional too: the store writes it only if, at that moment, no run
 is in flight on the thread, so a run another worker starts meanwhile keeps the
-thread `busy`.
+thread `busy`. MongoDB, without multi-document transactions, keeps one narrow
+exception: a worker stalled for a whole minute mid-way through creating a run,
+whose insert lands just as the thread is released, and which then dies. Its run
+never executes, and the sweep fails it once it is stale, as for any worker that
+dies after creating a run.
 On Postgres the comparison uses the database clock, so worker clock skew does
 not matter. LangGraph Platform re-queues an orphaned run and fails it once its
 retries are exhausted. skeino keeps no run input to retry with, so it fails the

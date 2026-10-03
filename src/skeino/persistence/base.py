@@ -112,6 +112,13 @@ class MetadataStoreProtocol(Protocol):
         created, or a status written, by another worker while the caller was
         deciding to release the thread therefore wins. Returns whether the
         thread was updated.
+
+        A backend without multi-document atomicity may leave a narrower
+        window, provided any run it misses belongs to a creator that died
+        before its creation returned: such a run never executes, and the
+        orphan sweep fails it once stale. ``MongoMetadataStore`` does this
+        (see its ``release_busy_thread``); the other built-in stores are fully
+        atomic.
         """
         ...
 
