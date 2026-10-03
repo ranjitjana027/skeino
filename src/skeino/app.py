@@ -215,7 +215,6 @@ def create_app(
             thread_ops = ThreadOps(
                 graph=default_graph,
                 metadata_store=metadata_store,
-                logger=logger,
             )
             run_ops = RunOps(
                 graph=default_graph,
@@ -231,7 +230,6 @@ def create_app(
                     max_history_events=settings.resumable_stream_max_events,
                     max_history_bytes=settings.resumable_stream_max_bytes,
                 ),
-                logger=logger,
             )
 
             app_instance.state.skeino = SkeinoState(

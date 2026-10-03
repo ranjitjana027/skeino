@@ -10,6 +10,22 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 
 <!-- towncrier release notes start -->
 
+## [4.0.0] - 2026-10-03
+
+### Added
+
+- `GET /threads/{thread_id}/runs/{run_id}/stream` — join a run's event stream (SDK `runs.joinStream`, `useStream` `reconnectOnMount`). Runs created with `stream_resumable: true` buffer their SSE events, with the ids the original stream carried, for the run's lifetime plus `SkeinoSettings.resumable_stream_ttl_seconds` (default 600); a join replays the events after `Last-Event-ID` (`-1` = from the start) and then tails live events. Honours `stream_mode` and `cancel_on_disconnect`. Retained history is capped per run by `resumable_stream_max_events` (default 10,000) and `resumable_stream_max_bytes` (default 16 MiB), and per worker by `resumable_stream_max_retained_runs` (default 16 finished buffers, oldest evicted first); a `Last-Event-ID` that is not an event id or `-1` returns `422`, a join whose `Last-Event-ID` predates the retained window, or is ahead of the run's last event id, returns `409`, and a join to an evicted finished run gets final-state events instead of replay. Stateless `/runs/stream` never retains history, since its run cannot be joined. ([#131](https://github.com/ranjitjana027/skeino/issues/131))
+
+### Changed
+
+- **Breaking:** custom metadata stores must implement two new `MetadataStoreProtocol` methods, `touch_runs` and `fail_stale_runs`, and `update_run_status` now returns a `bool` (whether a row changed) and only updates `pending`/`running` rows. The four built-in stores already do; a custom store written against 3.x fails the protocol until it adds them. ([#orphaned-runs](https://github.com/ranjitjana027/skeino/issues/orphaned-runs))
+- **Breaking:** Streaming runs (`POST .../runs/stream`) now execute in a server-side task and honour `on_disconnect`: with the default `"continue"` a client disconnect no longer cancels the run, even while it is still queued (it keeps running and can be joined); pass `on_disconnect: "cancel"` for the old behaviour. As tasks, streaming runs can now be cancelled via `POST .../runs/{run_id}/cancel`, awaited via `GET .../runs/{run_id}/join`, and superseded by the `interrupt`/`rollback` multitask strategies (a streaming run superseded while still queued gets `409`). A cancelled streaming run ends with an `end` event whose `status` is `interrupted`. A join (`.../join` or `.../stream`) that lands while a streaming run is still being admitted waits for the run itself rather than reporting it not finished; a join whose run's cleanup fails ends with an `error` event saying so. A stream whose client leaves during admission releases its event subscription. A join's `stream_mode` filter is applied before events reach its delivery queue, so events it would not receive can no longer overflow it. ([#131](https://github.com/ranjitjana027/skeino/issues/131))
+
+### Fixed
+
+- Runs left `pending`/`running` by a process that died without a graceful shutdown (crash, OOM kill, hard restart) no longer stay in flight forever. Each process heartbeats the runs it executes (`SkeinoSettings.run_heartbeat_seconds`, default 30), on a schedule of its own so a slow sweep cannot delay it past the orphan timeout. A sweep at startup and on every tick marks in-flight runs whose heartbeat is older than `orphaned_run_timeout_seconds` (default 120; `None` disables) as `error` with an "orphaned" reason, and moves their thread off `busy` (a thread a later run already settled keeps its status). A run's terminal status is now final: `update_run_status` only changes `pending`/`running` rows, so a slow owner cannot flip a swept run back to `success`; that owner then reports the swept outcome on its stream instead of `end {status: "success"}` and leaves the thread status alone. Likewise, a run cancelled after its `success` was persisted reports `success`, and a streaming run that is superseded, cancelled, or whose insert fails after the row was committed is marked `interrupted` instead of left `pending`. A queued background run cancelled while waiting for the thread no longer moves the thread to `idle` under the run holding it. A thread release that fails is retried on the next sweep, and a thread settle that fails (or is cancelled) after a run's `success` was saved is retried on the next liveness pass, instead of leaving the thread `busy`; that includes a failure to read the thread's state, which keeps the thread `busy` rather than guessing `idle` and dropping a pending interrupt. As a crash-safe backstop for both, the sweep also releases a thread left `busy` for longer than the orphan timeout with no run in flight, settling it by its latest run. A run swept before it started (e.g. while queued) no longer executes or marks its thread `busy`. A run whose row was deleted before it finished (its thread deleted, or the swept row removed) reports that it was deleted instead of `success`, and leaves the thread alone. The sweep's scans are indexed on every store (new SQLite indexes on in-flight runs and on thread status, and a Postgres index on thread status), so a heartbeat no longer reads the whole run history. It is safe across workers sharing a database: a process never sweeps its own runs, and each row is claimed atomically. `orphaned_run_timeout_seconds` must be at least three times `run_heartbeat_seconds`; workers sharing a SQLite or MongoDB store need synchronised clocks (Postgres uses the database clock). Adds `touch_runs` / `fail_stale_runs` to `MetadataStoreProtocol`, and `update_run_status` now returns a `bool` (whether a row changed) and only updates `pending`/`running` rows, so custom metadata stores must implement both. ([#orphaned-runs](https://github.com/ranjitjana027/skeino/issues/orphaned-runs))
+
+
 ## [3.1.1] - 2026-10-01
 
 ### Fixed
@@ -337,7 +353,8 @@ under `changelog.d/` and are collated here on release with `towncrier build`.
 - Pluggable checkpointer registry with Postgres and in-memory implementations.
 - Endpoints: threads, runs (incl. streaming/SSE), assistants, health/info.
 
-[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v3.1.1...HEAD
+[Unreleased]: https://github.com/ranjitjana027/skeino/compare/v4.0.0...HEAD
+[4.0.0]: https://github.com/ranjitjana027/skeino/compare/v3.1.1...v4.0.0
 [3.1.1]: https://github.com/ranjitjana027/skeino/compare/v3.1.0...v3.1.1
 [3.1.0]: https://github.com/ranjitjana027/skeino/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/ranjitjana027/skeino/compare/v3.0.0...v3.0.1
