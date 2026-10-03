@@ -195,32 +195,40 @@ async def test_slow_run_creation_renews_its_reservation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A live creator stuck in its insert past the reservation's lifetime keeps
-    # it fresh, so a release meanwhile still backs off.
+    # it fresh, so a release meanwhile still backs off. A fake clock makes the
+    # lifetime pass, so the test waits on the renewal itself, not on time.
     import asyncio
-    from datetime import timedelta
+    from datetime import UTC, datetime, timedelta
 
     import skeino.persistence.mongo_store as mongo_store
 
     store = await _mongo_store(monkeypatch)
     try:
         tid = await _busy_thread(store)
-        monkeypatch.setattr(
-            mongo_store, "_CREATION_RESERVATION_TTL", timedelta(seconds=0.15)
-        )
-        monkeypatch.setattr(
-            mongo_store, "_CREATION_RESERVATION_RENEWAL", timedelta(seconds=0.03)
-        )
-        insert, go, entered = store._runs.insert_one, asyncio.Event(), asyncio.Event()
+        clock = datetime.now(UTC)
+        monkeypatch.setattr(mongo_store, "utcnow", lambda: clock)
+        monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_RENEWAL", timedelta(0))
+        insert, update = store._runs.insert_one, store._threads.update_one
+        go, entered, renewed = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
         async def slow_insert(*args: Any, **kwargs: Any) -> Any:
             entered.set()  # reserved, about to insert
             await go.wait()
             return await insert(*args, **kwargs)
 
+        async def watched(filter_: Any, change: Any, *args: Any, **kwargs: Any) -> Any:
+            result = await update(filter_, change, *args, **kwargs)
+            stamps = change.get("$set", {}).values()
+            if len(filter_) > 1 and clock in stamps:
+                renewed.set()  # renewed after the clock moved past the lifetime
+            return result
+
         monkeypatch.setattr(store._runs, "insert_one", slow_insert)
+        monkeypatch.setattr(store._threads, "update_one", watched)
         creating = asyncio.create_task(_create_run(store, tid))
         await asyncio.wait_for(entered.wait(), timeout=5)
-        await asyncio.sleep(0.4)  # well past the reservation's lifetime
+        clock += timedelta(minutes=10)  # well past the reservation's lifetime
+        await asyncio.wait_for(renewed.wait(), timeout=5)
         assert await store.release_busy_thread(tid, "idle") is False
         go.set()
         await asyncio.wait_for(creating, timeout=5)
