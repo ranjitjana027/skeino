@@ -190,6 +190,75 @@ async def test_release_busy_thread_ignores_an_expired_creation_reservation(
         await store.aclose()
 
 
+async def test_slow_run_creation_renews_its_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A live creator stuck in its insert past the reservation's lifetime keeps
+    # it fresh, so a release meanwhile still backs off.
+    import asyncio
+    from datetime import timedelta
+
+    import skeino.persistence.mongo_store as mongo_store
+
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid = await _busy_thread(store)
+        monkeypatch.setattr(
+            mongo_store, "_CREATION_RESERVATION_TTL", timedelta(seconds=0.15)
+        )
+        monkeypatch.setattr(
+            mongo_store, "_CREATION_RESERVATION_RENEWAL", timedelta(seconds=0.03)
+        )
+        insert, go = store._runs.insert_one, asyncio.Event()
+
+        async def slow_insert(*args: Any, **kwargs: Any) -> Any:
+            await go.wait()
+            return await insert(*args, **kwargs)
+
+        monkeypatch.setattr(store._runs, "insert_one", slow_insert)
+        creating = asyncio.create_task(_create_run(store, tid))
+        await asyncio.sleep(0.4)  # well past the reservation's lifetime
+        assert await store.release_busy_thread(tid, "idle") is False
+        go.set()
+        await asyncio.wait_for(creating, timeout=5)
+        row = await store.fetch_thread_row(tid)
+        assert row is not None and row["status"] == "busy"
+    finally:
+        await store.aclose()
+
+
+async def test_reservation_renewal_survives_a_failed_write_and_stops_once_taken(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    import asyncio
+    from datetime import timedelta
+
+    import skeino.persistence.mongo_store as mongo_store
+
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid = await _busy_thread(store)
+        monkeypatch.setattr(mongo_store, "_CREATION_RESERVATION_RENEWAL", timedelta(0))
+        update, calls = store._threads.update_one, 0
+
+        async def flaky(*args: Any, **kwargs: Any) -> Any:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("connection reset")
+            return await update(*args, **kwargs)
+
+        monkeypatch.setattr(store._threads, "update_one", flaky)
+        # No reservation on the thread: a release took it, so renewal stops.
+        await asyncio.wait_for(
+            store._renew_reservation(tid, f"creating.{uuid4()}"), timeout=5
+        )
+        assert calls == 2
+        assert "Failed to renew run-creation reservation" in caplog.text
+    finally:
+        await store.aclose()
+
+
 async def test_slow_run_creation_undoes_its_run_once_its_reservation_expired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

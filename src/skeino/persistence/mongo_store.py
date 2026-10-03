@@ -13,6 +13,7 @@ matching the checkpointer builder, so graph state and metadata share the
 operator's chosen database — falling back to ``skeino`` for pathless URIs.
 """
 
+import asyncio
 import logging
 from collections.abc import Collection, Sequence
 from datetime import UTC, datetime, timedelta
@@ -47,10 +48,11 @@ logger = logging.getLogger(__name__)
 
 
 # How long a run creation's reservation on its thread holds off
-# ``release_busy_thread``. Creating a run takes milliseconds; the bound only
-# matters for a process that died mid-creation, whose reservation would
-# otherwise block the thread's release forever.
+# ``release_busy_thread`` unless renewed. A live creator renews it while its
+# insert is under way, so it only lapses for a process that died
+# mid-creation, whose reservation would otherwise block the release forever.
 _CREATION_RESERVATION_TTL = timedelta(minutes=1)
+_CREATION_RESERVATION_RENEWAL = timedelta(seconds=20)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -184,10 +186,11 @@ class MongoMetadataStore:
         clears the reservation after. So a run being created is either
         reserved when the thread is read (and the release backs off), already
         inserted when runs are checked, or reserved after the read (and the
-        compare-and-set fails). A reservation older than
-        ``_CREATION_RESERVATION_TTL`` is presumed abandoned by a process that
-        died mid-creation: it is ignored, and cleared by a successful release.
-        Its creator may only be slow, so it finishes by clearing its own
+        compare-and-set fails). A live creator renews its reservation while
+        its insert is under way, so one older than ``_CREATION_RESERVATION_TTL``
+        is presumed abandoned by a process that died mid-creation: it is
+        ignored, and cleared by a successful release. In case its creator was
+        only cut off from renewing, it finishes by clearing its own
         reservation, conditionally and bumping the version: if a release
         cleared it first, the creator undoes its run and fails; if the creator
         clears it first, that release's compare-and-set fails.
@@ -293,11 +296,14 @@ class MongoMetadataStore:
         await self._threads.update_one(
             {"_id": thread_id}, {"$set": {reservation: now}, "$inc": {"version": 1}}
         )
+        renewal = asyncio.create_task(self._renew_reservation(thread_id, reservation))
         try:
             await self._runs.insert_one(doc)
         except BaseException:
+            renewal.cancel()
             await self._drop_reservation(thread_id, reservation)
             raise
+        renewal.cancel()
         try:
             finished = await self._threads.update_one(
                 {"_id": thread_id, reservation: {"$exists": True}},
@@ -324,6 +330,31 @@ class MongoMetadataStore:
                 )
             raise
         return row
+
+    async def _renew_reservation(self, thread_id: str, reservation: str) -> None:
+        """Keep a run creation's reservation fresh while its insert is slow.
+
+        Bumps the version, so a release that read the thread before the
+        renewal fails its compare-and-set. Stops once the reservation is gone:
+        a release took it, and the creation will undo its run.
+        """
+        while True:
+            await asyncio.sleep(_CREATION_RESERVATION_RENEWAL.total_seconds())
+            try:
+                renewed = await self._threads.update_one(
+                    {"_id": thread_id, reservation: {"$exists": True}},
+                    {"$set": {reservation: utcnow()}, "$inc": {"version": 1}},
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to renew run-creation reservation %s on thread %s",
+                    reservation,
+                    thread_id,
+                    exc_info=exc,
+                )
+                continue
+            if not renewed.matched_count:
+                return
 
     async def _drop_reservation(self, thread_id: str, reservation: str) -> None:
         """Best-effort: an undropped reservation expires on its own."""
