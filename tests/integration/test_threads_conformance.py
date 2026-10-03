@@ -155,17 +155,10 @@ def test_search_by_values(client: TestClient) -> None:
 
 
 SORT_KEYS = ["thread_id", "status", "created_at", "updated_at", "state_updated_at"]
-XFAIL_SORT = pytest.mark.xfail(strict=True, reason="#112: in-memory ignores sort_by")
 
 
 @pytest.mark.parametrize("sort_order", ["asc", "desc"])
-@pytest.mark.parametrize(
-    "sort_by",
-    [
-        key if key == "updated_at" else pytest.param(key, marks=XFAIL_SORT)
-        for key in SORT_KEYS
-    ],
-)
+@pytest.mark.parametrize("sort_by", SORT_KEYS)
 def test_search_sorts_by_every_key_and_direction(sort_by: str, sort_order: str) -> None:
     # Five threads arranged so the store's fallback order (updated_at desc:
     # t1, t2, t4, t3, t5) is monotonic in no other key, in either direction —
