@@ -18,6 +18,8 @@ from collections.abc import AsyncIterator, Collection, Sequence
 from contextlib import asynccontextmanager, suppress
 from typing import Any, Final
 
+from fastapi import HTTPException, status
+
 from skeino.persistence._common import (
     missing_extra,
     resolve_sort_by,
@@ -386,8 +388,13 @@ class MetadataStore:
                             raise thread_reread_error(thread_id) from exc
                         return existing_row
                     raise thread_exists_error(thread_id) from exc
-                created_row: ThreadRow = await cursor.fetchone()
+                created_row: ThreadRow | None = await cursor.fetchone()
             await conn.commit()
+        if created_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create thread {thread_id}.",
+            )
         return created_row
 
     async def update_thread(
@@ -510,8 +517,13 @@ class MetadataStore:
                         multitask_strategy,
                     ),
                 )
-                run_row: RunRow = await cursor.fetchone()
+                run_row: RunRow | None = await cursor.fetchone()
             await conn.commit()
+        if run_row is None:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to create run {run_id}.",
+            )
         return run_row
 
     async def update_run_status(

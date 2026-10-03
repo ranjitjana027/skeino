@@ -12,6 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException
 
 from skeino.persistence import metadata_store as ms
 from skeino.schemas import ThreadSearchRequest
@@ -397,3 +398,25 @@ async def test_unlock_failure_does_not_mask_the_real_error(
 
     # And the connection is still closed, so the lock is not leaked.
     assert _FakeDirectConnection.instances[0].closed == 1
+
+
+async def test_create_thread_fails_loudly_when_insert_returns_no_row(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    # A BEFORE INSERT trigger returning NULL suppresses the row, so RETURNING
+    # yields nothing. That must surface as a 500, not a None "ThreadRow".
+    with pytest.raises(HTTPException) as excinfo:
+        await pooled_store.create_thread(
+            str(uuid4()), metadata={}, config={}, ttl=None, if_exists="raise"
+        )
+    assert excinfo.value.status_code == 500
+
+
+async def test_create_run_fails_loudly_when_insert_returns_no_row(
+    pooled_store: ms.MetadataStore,
+) -> None:
+    with pytest.raises(HTTPException) as excinfo:
+        await pooled_store.create_run(
+            str(uuid4()), str(uuid4()), "asst", {}, {}, "reject"
+        )
+    assert excinfo.value.status_code == 500
