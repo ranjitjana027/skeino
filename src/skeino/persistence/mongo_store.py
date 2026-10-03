@@ -42,8 +42,20 @@ _DEFAULT_SORT_BY = "updated_at"
 logger = logging.getLogger(__name__)
 
 
+# How long a run creation's reservation on its thread holds off
+# ``release_busy_thread``. Creating a run takes milliseconds; the bound only
+# matters for a process that died mid-creation, whose reservation would
+# otherwise block the thread's release forever.
+_CREATION_RESERVATION_TTL = timedelta(minutes=1)
+
+
 def _utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+def _as_utc(value: datetime) -> datetime:
+    """BSON datetimes come back naive (UTC); make them comparable."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 class MongoMetadataStore:
@@ -184,18 +196,23 @@ class MongoMetadataStore:
         Threads and runs are separate collections, so the check cannot be one
         atomic write without a multi-document transaction (which needs a
         replica set). Instead the write is a compare-and-set on the thread's
-        ``version``, which every status write bumps and :meth:`create_run`
-        bumps right after inserting the run. The version is read before the
-        in-flight check, so a run inserted after the check bumps it before
-        this write (and the write loses) or after it (the run then counts as
-        created after the release). The one gap is a process dying between a
-        run's insert and its bump: that ``pending`` row is treated as created
-        after the release, and the orphan sweep fails it once it goes stale.
+        ``version``, which every status write bumps. :meth:`create_run`
+        reserves the thread (bumping the version) before inserting its run and
+        clears the reservation after. So a run being created is either
+        reserved when the thread is read (and the release backs off), already
+        inserted when runs are checked, or reserved after the read (and the
+        compare-and-set fails). A reservation older than
+        ``_CREATION_RESERVATION_TTL`` belongs to a process that died
+        mid-creation; it is ignored, and cleared by a successful release.
         """
         doc = await self._threads.find_one(
-            {"_id": thread_id, "status": "busy"}, {"version": 1}
+            {"_id": thread_id, "status": "busy"}, {"version": 1, "creating": 1}
         )
         if doc is None:
+            return False
+        creating: dict[str, datetime] = doc.get("creating") or {}
+        expired = _utcnow() - _CREATION_RESERVATION_TTL
+        if any(_as_utc(reserved) > expired for reserved in creating.values()):
             return False
         in_flight = await self._runs.find_one(
             {
@@ -210,6 +227,9 @@ class MongoMetadataStore:
         updates: dict[str, Any] = {"status": status_value, "updated_at": now}
         if mark_state_updated:
             updates["state_updated_at"] = now
+        change: dict[str, Any] = {"$set": updates, "$inc": {"version": 1}}
+        if creating:  # every one of them expired
+            change["$unset"] = {f"creating.{run_id}": "" for run_id in creating}
         result = await self._threads.update_one(
             {
                 "_id": thread_id,
@@ -217,7 +237,7 @@ class MongoMetadataStore:
                 # ``None`` also matches a thread written before the counter.
                 "version": doc.get("version"),
             },
-            {"$set": updates, "$inc": {"version": 1}},
+            change,
         )
         return bool(result.matched_count)
 
@@ -286,18 +306,24 @@ class MongoMetadataStore:
             "multitask_strategy": multitask_strategy,
             "error": None,
         }
-        await self._runs.insert_one(doc)
+        reservation = f"creating.{run_id}"
+        # Reserve the thread for the insert (see ``release_busy_thread``).
+        await self._threads.update_one(
+            {"_id": thread_id}, {"$set": {reservation: now}, "$inc": {"version": 1}}
+        )
         try:
-            # After the insert, not before: ``release_busy_thread`` reads the
-            # version before its in-flight check, so a bump that preceded the
-            # insert could land before that read and let a run inserted after
-            # the check go unnoticed. After it, the release either sees this
-            # run in flight or loses its compare-and-set to this bump.
-            await self._threads.update_one({"_id": thread_id}, {"$inc": {"version": 1}})
+            await self._runs.insert_one(doc)
+        except BaseException:
+            await self._drop_reservation(thread_id, reservation)
+            raise
+        try:
+            await self._threads.update_one(
+                {"_id": thread_id}, {"$unset": {reservation: ""}}
+            )
         except BaseException:
             # A run whose creation failed has no owner: undo the insert rather
             # than leave a ``pending`` row looking in flight until the orphan
-            # timeout.
+            # timeout. The reservation expires on its own.
             try:
                 await self._runs.delete_one({"_id": run_id})
             except Exception as cleanup_exc:
@@ -308,6 +334,20 @@ class MongoMetadataStore:
                 )
             raise
         return self._run_row(doc)
+
+    async def _drop_reservation(self, thread_id: str, reservation: str) -> None:
+        """Best-effort: an undropped reservation expires on its own."""
+        try:
+            await self._threads.update_one(
+                {"_id": thread_id}, {"$unset": {reservation: ""}}
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to drop run-creation reservation %s on thread %s",
+                reservation,
+                thread_id,
+                exc_info=exc,
+            )
 
     async def update_run_status(
         self,

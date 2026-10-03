@@ -90,89 +90,143 @@ async def test_release_busy_thread_loses_to_a_run_started_after_its_check(
         await store.aclose()
 
 
-async def test_run_creation_failing_after_its_insert_leaves_no_row(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # The version bump follows the insert: if it fails, the inserted run has
-    # no owner and must not linger ``pending`` until the orphan timeout.
+async def _mongo_store(monkeypatch: pytest.MonkeyPatch) -> MongoMetadataStore:
     import motor.motor_asyncio
 
     monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
     store = MongoMetadataStore("mongodb://mock", db_name=f"r{uuid4().hex}")
     await store.setup()
+    return store
+
+
+async def _busy_thread(store: MongoMetadataStore) -> str:
+    tid = str(uuid4())
+    await store.create_thread(tid, metadata={}, config={}, ttl=None, if_exists="raise")
+    await store.update_thread(tid, status_value="busy")
+    return tid
+
+
+def _create_run(store: MongoMetadataStore, tid: str, run_id: str | None = None) -> Any:
+    return store.create_run(
+        run_id or str(uuid4()),
+        tid,
+        "agent",
+        metadata={},
+        kwargs={},
+        multitask_strategy="enqueue",
+    )
+
+
+async def test_release_busy_thread_backs_off_while_a_run_is_being_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The worst interleaving: the release's in-flight check runs before the
+    # run's insert, and its write after the insert but before the run's
+    # creation has finished. The thread was already reserved for that insert
+    # when the release read it, so the release must back off.
+    import asyncio
+
+    store = await _mongo_store(monkeypatch)
     try:
-        tid, run_id = str(uuid4()), str(uuid4())
-        await store.create_thread(
-            tid, metadata={}, config={}, ttl=None, if_exists="raise"
-        )
+        tid = await _busy_thread(store)
+        insert, find_run = store._runs.insert_one, store._runs.find_one
+        update = store._threads.update_one
+        go, inserted, finish = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-        async def broken(*_args: Any, **_kwargs: Any) -> Any:
-            raise RuntimeError("connection reset")
+        async def held_insert(*args: Any, **kwargs: Any) -> Any:
+            await go.wait()
+            result = await insert(*args, **kwargs)
+            inserted.set()
+            return result
 
-        monkeypatch.setattr(store._threads, "update_one", broken)
-        with pytest.raises(RuntimeError, match="connection reset"):
-            await store.create_run(
-                run_id,
-                tid,
-                "agent",
-                metadata={},
-                kwargs={},
-                multitask_strategy="enqueue",
-            )
-        assert await store.fetch_run_row(tid, run_id) is None
+        async def held_finish(
+            filter_: Any, change: Any, *args: Any, **kwargs: Any
+        ) -> Any:
+            if "$unset" in change and "status" not in filter_:
+                await finish.wait()  # the run's creation not finished yet
+            return await update(filter_, change, *args, **kwargs)
+
+        async def racing(*args: Any, **kwargs: Any) -> Any:
+            found = await find_run(*args, **kwargs)  # before the insert
+            go.set()
+            await inserted.wait()  # the write comes after it
+            return found
+
+        monkeypatch.setattr(store._runs, "insert_one", held_insert)
+        monkeypatch.setattr(store._threads, "update_one", held_finish)
+        monkeypatch.setattr(store._runs, "find_one", racing)
+        creating = asyncio.create_task(_create_run(store, tid))
+        await asyncio.sleep(0.01)  # the creation is under way, awaiting its insert
+        releasing = asyncio.create_task(store.release_busy_thread(tid, "error"))
+        await asyncio.sleep(0.01)
+        go.set()  # let the insert proceed even if the release backed off early
+        assert await asyncio.wait_for(releasing, timeout=5) is False
+        finish.set()
+        await creating
+        row = await store.fetch_thread_row(tid)
+        assert row is not None and row["status"] == "busy"
     finally:
         await store.aclose()
 
 
-async def test_release_busy_thread_sees_a_run_whose_insert_straddles_its_check(
+async def test_release_busy_thread_ignores_an_expired_creation_reservation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Why ``create_run`` bumps the version after its insert, not before: a
-    # bump-first run could bump before the release reads the version, then
-    # insert between the release's in-flight check and its write, and the
-    # compare-and-set would release a thread with that run in flight.
-    import asyncio
+    # A process that died mid-creation leaves its reservation behind: it must
+    # not block the thread's release for good.
+    from datetime import UTC, datetime, timedelta
 
-    import motor.motor_asyncio
-
-    monkeypatch.setattr(motor.motor_asyncio, "AsyncIOMotorClient", AsyncMongoMockClient)
-    store = MongoMetadataStore("mongodb://mock", db_name=f"r{uuid4().hex}")
-    await store.setup()
+    store = await _mongo_store(monkeypatch)
     try:
-        tid = str(uuid4())
-        await store.create_thread(
-            tid, metadata={}, config={}, ttl=None, if_exists="raise"
+        tid = await _busy_thread(store)
+        dead = datetime.now(UTC) - timedelta(minutes=5)
+        await store._threads.update_one(
+            {"_id": tid}, {"$set": {f"creating.{uuid4()}": dead}}
         )
-        await store.update_thread(tid, status_value="busy")
-        insert, find_run = store._runs.insert_one, store._runs.find_one
-        go = asyncio.Event()
+        assert await store.release_busy_thread(tid, "error") is True
+        doc = await store._threads.find_one({"_id": tid})
+        assert doc is not None and not doc.get("creating")
+    finally:
+        await store.aclose()
 
-        async def slow_insert(*args: Any, **kwargs: Any) -> Any:
-            await go.wait()  # held until the release has checked
-            return await insert(*args, **kwargs)
 
-        monkeypatch.setattr(store._runs, "insert_one", slow_insert)
-        creating = asyncio.create_task(
-            store.create_run(
-                str(uuid4()),
-                tid,
-                "agent",
-                metadata={},
-                kwargs={},
-                multitask_strategy="enqueue",
-            )
-        )
-        await asyncio.sleep(0)  # the run's creation is under way
+async def test_run_insert_failing_drops_its_reservation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid = await _busy_thread(store)
 
-        async def racing(*args: Any, **kwargs: Any) -> Any:
-            found = await find_run(*args, **kwargs)  # not inserted yet
-            go.set()
-            await creating  # inserted (and bumped) before the release writes
-            return found
+        async def broken(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("connection reset")
 
-        monkeypatch.setattr(store._runs, "find_one", racing)
-        assert await store.release_busy_thread(tid, "error") is False
-        row = await store.fetch_thread_row(tid)
-        assert row is not None and row["status"] == "busy"
+        monkeypatch.setattr(store._runs, "insert_one", broken)
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await _create_run(store, tid)
+        # No reservation left to hold off the release.
+        assert await store.release_busy_thread(tid, "error") is True
+    finally:
+        await store.aclose()
+
+
+async def test_run_creation_failing_after_its_insert_leaves_no_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Clearing the reservation follows the insert: if it fails, the inserted
+    # run has no owner and must not linger ``pending`` until the orphan timeout.
+    store = await _mongo_store(monkeypatch)
+    try:
+        tid, run_id = await _busy_thread(store), str(uuid4())
+        update = store._threads.update_one
+
+        async def broken(filter_: Any, change: Any, *args: Any, **kwargs: Any) -> Any:
+            if "$unset" in change:
+                raise RuntimeError("connection reset")
+            return await update(filter_, change, *args, **kwargs)
+
+        monkeypatch.setattr(store._threads, "update_one", broken)
+        with pytest.raises(RuntimeError, match="connection reset"):
+            await _create_run(store, tid, run_id)
+        assert await store.fetch_run_row(tid, run_id) is None
     finally:
         await store.aclose()
