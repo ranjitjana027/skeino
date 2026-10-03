@@ -76,7 +76,6 @@ def test_output_schema_hides_internal_key_on_values_stream(graph_name: str) -> N
         assert all("internal" not in snapshot for snapshot in snapshots)
 
 
-@pytest.mark.xfail(strict=True, reason="#120: runs/wait ignores output_schema")
 @pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
 def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
     with real_client(graph_name) as client:
@@ -84,7 +83,6 @@ def test_output_schema_hides_internal_key_on_wait(graph_name: str) -> None:
         assert INTERNAL_VALUE not in str(output)
 
 
-@pytest.mark.xfail(strict=True, reason="#120: runs/join ignores output_schema")
 @pytest.mark.parametrize("graph_name", ["typed_output", "pydantic_output"])
 def test_output_schema_hides_internal_key_on_join(graph_name: str) -> None:
     with real_client(graph_name) as client:
