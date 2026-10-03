@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -1550,7 +1551,10 @@ async def test_stateless_stream_cancelled_before_admission_starts_discards_once(
         assert not ops._registry.active_runs(discarded[0])
 
 
-async def test_admission_failure_after_the_client_left_is_logged() -> None:
+async def test_admission_failure_after_the_client_left_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="skeino.ops.runs")
     async with running_app() as (app, _graph, _client):
         ops = app.state.skeino.run_ops
         store = ops._metadata_store
@@ -1561,15 +1565,7 @@ async def test_admission_failure_after_the_client_left_is_logged() -> None:
             await release.wait()
             raise RuntimeError("insert failed")
 
-        logged: list[str] = []
-        log_error = ops._log_error
-
-        def record(msg: str, *args: Any, exc: BaseException | None = None) -> None:
-            logged.append(msg % args)
-            log_error(msg, *args, exc=exc)
-
         store.create_run = failing
-        ops._log_error = record
         leaving = asyncio.create_task(
             ops.create_streaming_run(_THREAD, _request(on_disconnect="continue"))
         )
@@ -1580,11 +1576,11 @@ async def test_admission_failure_after_the_client_left_is_logged() -> None:
         release.set()
         for _ in range(100):
             await asyncio.sleep(0.005)
-            if logged:
+            if caplog.records:
                 break
         assert any(
             "admission failed after its client left" in line and "insert failed" in line
-            for line in logged
+            for line in caplog.messages
         )
         assert not ops._registry.active_runs(_THREAD)
         assert not ops._lock_manager.get(_THREAD).locked()
@@ -1819,7 +1815,10 @@ async def test_abandoned_admission_releases_its_subscription(
         assert (await ops.get_run(_THREAD, run_id)).status == expected
 
 
-async def test_admission_failing_as_its_client_leaves_is_logged() -> None:
+async def test_admission_failing_as_its_client_leaves_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.ERROR, logger="skeino.ops.runs")
     async with running_app() as (app, _graph, _client):
         ops = app.state.skeino.run_ops
         store = ops._metadata_store
@@ -1840,21 +1839,13 @@ async def test_admission_failing_as_its_client_leaves_is_logged() -> None:
 
         ops._registry.spawn = spawn_and_leave_on_failure
 
-        logged: list[str] = []
-        log_error = ops._log_error
-
-        def record(msg: str, *args: Any, exc: BaseException | None = None) -> None:
-            logged.append(msg % args)
-            log_error(msg, *args, exc=exc)
-
         store.create_run = failing
-        ops._log_error = record
         leaving = asyncio.create_task(
             ops.create_streaming_run(_THREAD, _request(on_disconnect="cancel"))
         )
         with pytest.raises(asyncio.CancelledError):
             await leaving
-        assert any("insert failed" in line for line in logged)
+        assert any("insert failed" in line for line in caplog.messages)
 
 
 async def test_insert_failing_after_commit_leaves_no_pending_row() -> None:
