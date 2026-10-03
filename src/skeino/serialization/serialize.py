@@ -113,43 +113,30 @@ def serialize_value(value: Any) -> JsonValue:
     """Recursively convert runtime objects into JSON-safe values."""
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
-
     if isinstance(value, UUID):
         return str(value)
-
     if isinstance(value, datetime):
         return value.isoformat()
-
     if isinstance(value, BaseMessage):
         return serialize_message(value)
-
     if isinstance(value, dict):
         return {str(key): serialize_value(item) for key, item in value.items()}
-
     if isinstance(value, (list, tuple)):
         return [serialize_value(item) for item in value]
-
     if is_dataclass(value) and not isinstance(value, type):
-        # LangGraph hands back slotted dataclasses — ``Interrupt`` above all,
-        # which rides the ``__interrupt__`` channel in ``values``/``updates``
-        # events. They expose neither ``_asdict`` nor ``__dict__``, so without
-        # this they fell through to ``str(value)`` and a client received the
-        # Python repr of an interrupt instead of ``{"value": ..., "id": ...}``.
-        # Read the declared fields rather than ``asdict()``: no deep copy, and
-        # nested messages still take the branch above.
+        # LangGraph's slotted dataclasses (``Interrupt`` above all) have neither
+        # ``_asdict`` nor ``__dict__``; read the declared fields so a client gets
+        # ``{"value": ..., "id": ...}`` rather than a Python repr.
         return serialize_value({f.name: getattr(value, f.name) for f in fields(value)})
-
     if hasattr(value, "_asdict"):
         return serialize_value(value._asdict())
-
     if hasattr(value, "__dict__"):
-        serializable_dict = {
+        public = {
             key: item
             for key, item in vars(value).items()
             if not key.startswith("_") and not callable(item)
         }
-        return serialize_value(serializable_dict)
-
+        return serialize_value(public)
     return str(value)
 
 
@@ -170,65 +157,6 @@ def serialize_optional_mapping(value: Any) -> dict[str, JsonValue] | None:
         return None
     serialized = serialize_value(value)
     return serialized if isinstance(serialized, dict) else None
-
-
-def serialize_collection(value: Any) -> dict[str, JsonValue] | list[JsonValue]:
-    """Serialize a value expected to be a dict or list into its JSON-safe form."""
-    serialized = serialize_value(value)
-    if isinstance(serialized, (dict, list)):
-        return serialized
-    return {}
-
-
-def _serialize_snapshot_message(message: BaseMessage) -> JsonValue:
-    """Serialize a LangChain message using its full schema for Studio compatibility."""
-    return serialize_value(message.model_dump())
-
-
-def serialize_snapshot_value(value: Any) -> JsonValue:
-    """Serialize state snapshot values preserving full LangChain message schemas.
-
-    LangGraph Studio requires the complete message dict (additional_kwargs,
-    response_metadata, name, tool_calls, etc.) to render state panels correctly.
-    This is distinct from ``serialize_value`` which produces a stripped-down format
-    for the streaming frontend.
-    """
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-
-    if isinstance(value, UUID):
-        return str(value)
-
-    if isinstance(value, datetime):
-        return value.isoformat()
-
-    if isinstance(value, BaseMessage):
-        return _serialize_snapshot_message(value)
-
-    if isinstance(value, dict):
-        return {str(key): serialize_snapshot_value(item) for key, item in value.items()}
-
-    if isinstance(value, (list, tuple)):
-        return [serialize_snapshot_value(item) for item in value]
-
-    if is_dataclass(value) and not isinstance(value, type):
-        # Same slotted-dataclass case as in ``serialize_value``.
-        return serialize_snapshot_value(
-            {f.name: getattr(value, f.name) for f in fields(value)}
-        )
-
-    if hasattr(value, "_asdict"):
-        return serialize_snapshot_value(value._asdict())
-
-    if hasattr(value, "__dict__"):
-        serializable_dict = {
-            key: item
-            for key, item in vars(value).items()
-            if not key.startswith("_") and not callable(item)
-        }
-        return serialize_snapshot_value(serializable_dict)
-
-    return str(value)
 
 
 def serialize_interrupt(interrupt: Any) -> InterruptModel:
@@ -275,8 +203,9 @@ def serialize_state_snapshot(snapshot: Any) -> ThreadStateModel:
     """Convert a LangGraph state snapshot into the API response model."""
     checkpoint_config = snapshot.config.get("configurable", {})
     parent_config = getattr(snapshot, "parent_config", None)
+    values = serialize_value(snapshot.values)
     return ThreadStateModel(
-        values=serialize_collection(snapshot.values),
+        values=values if isinstance(values, (dict, list)) else {},
         next=[str(item) for item in snapshot.next],
         tasks=[serialize_task(task) for task in snapshot.tasks],
         checkpoint=CheckpointConfigModel(
