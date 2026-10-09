@@ -33,6 +33,10 @@ that supports project hooks; inspect `/hooks` to confirm they loaded. See the
 The hook commands assume a POSIX shell (`python3`, `$(git rev-parse ...)`) and have
 not been tested on native Windows; use WSL there, or add a `commandWindows`
 override in `.codex/hooks.json`.
+The shared skills are linked into `.claude/skills/` with symlinks, so the checkout
+must support them (`git config core.symlinks true`, or WSL on Windows). If
+`.claude/skills/cut-release` is a one-line file instead of a directory, Claude
+will not find the skills.
 Claude marketplace plugins remain configured in `.claude/settings.json`;
 Codex Python/LangGraph skills must be installed separately in your user setup.
 

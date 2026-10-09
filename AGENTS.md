@@ -136,7 +136,8 @@ Verified against this codebase — don't "fix" these:
 
 - This file is the shared instruction source for Codex and Claude Code.
 - Shared repository skills live in `.agents/skills/`; `.claude/skills/` entries
-  link to those same folders. Maintain the shared copies.
+  link to those same folders (needs a symlink-capable checkout). Maintain the
+  shared copies.
 - Update `poetry.lock` only through Poetry commands; never hand-edit it.
   Never write secrets into committed files.
 - Run the five checks above before finishing code changes and report failures
