@@ -2,7 +2,7 @@
 name: add-api-endpoint
 description: >-
   Scaffold a new HTTP endpoint or API feature in the skeino server across all
-  its layers (schema → ops → route → persistence both backends → FakeGraph →
+  its layers (schema → ops → route → persistence all affected backends → FakeGraph →
   tests → changelog → docs) and open a PR. Use when adding or extending an
   endpoint/feature — especially the LangGraph server-API parity work (threads,
   runs, assistants, store, crons) — so the change follows skeino's layered
@@ -13,7 +13,7 @@ description: >-
 
 A deterministic loop for shipping a server-API change. skeino layers a request
 as `api/` (thin) → `ops/` (logic) → `persistence/` + `streaming/`, with pydantic
-`schemas/`. Thread the change through in order. See `CLAUDE.md` for architecture.
+`schemas/`. Thread the change through in order. See `AGENTS.md` for architecture.
 
 ## 0. Branch & issue
 
@@ -37,11 +37,12 @@ as `api/` (thin) → `ops/` (logic) → `persistence/` + `streaming/`, with pyda
    `parse_request_model(...)`, `get_state(request)`, call the op, return.
    Register literal subpaths before `{param}` paths.
 4. **Persistence** — if you touch storage, update the
-   `MetadataStoreProtocol` in `persistence/base.py` **and both**
+   `MetadataStoreProtocol` in `persistence/base.py` **and all affected implementations**
    `persistence/metadata_store.py` (Postgres; mirror the existing
    `async with await psycopg.AsyncConnection.connect(self._postgres_uri)`
    pattern, bind every value via `%s`) **and** `persistence/in_memory_store.py`.
-   Keep the two implementations behaviourally identical.
+   Also update `sqlite_store.py` and `mongo_store.py` when the contract changes.
+   Keep all implementations behaviourally identical.
 5. **Checkpointer** — graph state/history lives in `graph.checkpointer`
    (has `adelete_thread`, etc.); guard with `getattr` so it's optional.
 

@@ -13,12 +13,18 @@ A green run resets the counter.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
-RETRY_MARKER = Path(__file__).resolve().parent / ".stop-test-blocks"
+MARKER_NAME = (
+    ".codex-stop-test-blocks"
+    if os.environ.get("SKEINO_HOOK_AGENT") == "codex"
+    else ".stop-test-blocks"
+)
+RETRY_MARKER = Path(__file__).resolve().parent / MARKER_NAME
 MAX_BLOCKS = 3
 
 

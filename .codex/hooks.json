@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/protect-files.py\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SKEINO_HOOK_AGENT=codex python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/run-tests-on-stop.py\"",
+            "timeout": 300
+          }
+        ]
+      }
+    ]
+  }
+}

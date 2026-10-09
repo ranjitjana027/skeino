@@ -13,6 +13,37 @@ cd skeino
 poetry install
 ```
 
+## Working with Codex and Claude Code
+
+Both agents share `AGENTS.md` and the workflows in `.agents/skills/`.
+Current Claude Code versions load `AGENTS.md` directly when no `CLAUDE.md`
+is present. Claude discovers the shared workflows through symlinks in
+`.claude/skills/`. Edit the shared sources to keep them aligned.
+
+Claude hooks are registered in `.claude/settings.json`; Codex hooks are in
+`.codex/hooks.json`. Both use the scripts in `.claude/hooks/` to guard direct
+lockfile/secrets edits and run pytest after Python changes. The file guard
+covers edit/patch tools, not arbitrary shell writes. The stop hook stops
+blocking after three consecutive failures so the agent can report the problem.
+
+For Codex, start a new session in this repository and review/trust the project
+and its hooks through `/hooks` when prompted. Hooks require a Codex version
+that supports project hooks; inspect `/hooks` to confirm they loaded. See the
+[official hooks documentation](https://learn.chatgpt.com/docs/hooks).
+Claude marketplace plugins remain configured in `.claude/settings.json`;
+Codex Python/LangGraph skills must be installed separately in your user setup.
+
+For simultaneous work, give each agent its own branch and git worktree.
+For example, from a clean checkout:
+
+```bash
+git worktree add ../skeino-codex -b feat/codex-task
+git worktree add ../skeino-claude -b feat/claude-task
+```
+
+Open each agent in its assigned worktree and install dependencies there with
+`poetry install`. Both agents must run the required checks below.
+
 ## Running the checks
 
 All of these run in CI and must pass before a PR can be merged:

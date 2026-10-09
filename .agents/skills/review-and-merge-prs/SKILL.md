@@ -24,10 +24,10 @@ Read the **whole** diff, not just the description. Check it against the issue it
 
 ## 2. Review for correctness
 
-Hold each PR to skeino's definition of done (see `CLAUDE.md`):
+Hold each PR to skeino's definition of done (see `AGENTS.md`):
 
 - Layers respected (`api` thin → `ops` logic → `persistence`/`streaming`), shared
-  `Literal` types not widened to `str`, **both** store backends updated when
+  `Literal` types not widened to `str`, all affected store backends updated when
   persistence changes.
 - Tests are **non-vacuous** — they'd fail if the feature broke (e.g. `FakeGraph`
   was extended to actually exercise the new behaviour), and cover 404/409/422.
