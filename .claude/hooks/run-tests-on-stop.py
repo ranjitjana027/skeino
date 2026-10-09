@@ -13,15 +13,15 @@ A green run resets the counter.
 """
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
+# Codex passes ``--agent codex`` so each agent keeps its own retry counter.
 MARKER_NAME = (
     ".codex-stop-test-blocks"
-    if os.environ.get("SKEINO_HOOK_AGENT") == "codex"
+    if sys.argv[1:3] == ["--agent", "codex"]
     else ".stop-test-blocks"
 )
 RETRY_MARKER = Path(__file__).resolve().parent / MARKER_NAME

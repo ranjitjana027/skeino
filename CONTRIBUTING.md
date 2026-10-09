@@ -30,6 +30,9 @@ For Codex, start a new session in this repository and review/trust the project
 and its hooks through `/hooks` when prompted. Hooks require a Codex version
 that supports project hooks; inspect `/hooks` to confirm they loaded. See the
 [official hooks documentation](https://learn.chatgpt.com/docs/hooks).
+The hook commands assume a POSIX shell (`python3`, `$(git rev-parse ...)`) and have
+not been tested on native Windows; use WSL there, or add a `commandWindows`
+override in `.codex/hooks.json`.
 Claude marketplace plugins remain configured in `.claude/settings.json`;
 Codex Python/LangGraph skills must be installed separately in your user setup.
 

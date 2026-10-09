@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "SKEINO_HOOK_AGENT=codex python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/run-tests-on-stop.py\"",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/.claude/hooks/run-tests-on-stop.py\" --agent codex",
             "timeout": 300
           }
         ]
