@@ -36,3 +36,4 @@ junit.xml
 .vscode/
 .DS_Store
 .claude/hooks/.stop-test-blocks
+.claude/hooks/.codex-stop-test-blocks

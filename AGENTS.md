@@ -131,3 +131,16 @@ Verified against this codebase — don't "fix" these:
   (it uses the instance's `__traceback__`), even outside an `except` block.
 - `asyncio_mode = "auto"` means bare `async def` tests run without
   `@pytest.mark.asyncio`.
+
+## Agent setup
+
+- This file is the shared instruction source for Codex and Claude Code.
+- Shared repository skills live in `.agents/skills/`; `.claude/skills/` entries
+  link to those same folders (needs a symlink-capable checkout). Maintain the
+  shared copies.
+- Update `poetry.lock` only through Poetry commands; never hand-edit it.
+  Never write secrets into committed files.
+- Run the five checks above before finishing code changes and report failures
+  or checks that could not run. Hooks provide a pytest guard, not all five checks.
+- When both agents work concurrently, use separate branches and git worktrees.
+  Do not switch branches or alter the other agent's worktree.
