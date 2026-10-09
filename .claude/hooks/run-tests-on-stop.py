@@ -9,7 +9,8 @@ continues until the suite is green.
 Loop guard: each consecutive block bumps a marker-file counter; after
 ``MAX_BLOCKS`` consecutive red runs the hook lets the turn end (so an
 unfixable failure can be reported to the user instead of looping forever).
-A green run resets the counter.
+A green run resets the counter. When the guard gives up, it still reports the
+final failure (with the test output tail) as a non-blocking system message.
 """
 
 import json
@@ -31,7 +32,8 @@ MAX_BLOCKS = 3
 def _touched_code_paths() -> bool:
     """True if the working tree has staged/unstaged/untracked src or test .py files."""
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
+        # --untracked-files=all lists files inside brand-new directories too.
+        ["git", "status", "--porcelain", "--untracked-files=all"],
         cwd=PROJECT_DIR,
         capture_output=True,
         text=True,
@@ -39,9 +41,11 @@ def _touched_code_paths() -> bool:
     )
     for line in result.stdout.splitlines():
         # Porcelain format: ``XY path`` (or ``XY old -> new`` for renames).
-        path = line[3:].split(" -> ")[-1].strip().strip('"')
-        if path.endswith(".py") and path.startswith(("src/", "tests/")):
-            return True
+        # Check both sides so moving a file out of src/ or tests/ still counts.
+        for part in line[3:].split(" -> "):
+            path = part.strip().strip('"')
+            if path.endswith(".py") and path.startswith(("src/", "tests/")):
+                return True
     return False
 
 
@@ -74,14 +78,25 @@ def main() -> None:
         return
 
     blocks = _consecutive_blocks() + 1
+    tail = "\n".join((result.stdout + result.stderr).splitlines()[-40:])
     if blocks >= MAX_BLOCKS:
         # Give up blocking: let the turn end so the failure gets reported to
-        # the user rather than burning attempts forever.
+        # the user rather than burning attempts forever, but say so.
         RETRY_MARKER.unlink(missing_ok=True)
+        print(
+            json.dumps(
+                {
+                    "systemMessage": (
+                        "Test suite is still failing after "
+                        f"{MAX_BLOCKS - 1} blocked attempts; the stop guard "
+                        "gave up. Report this failure.\n\n" + tail
+                    )
+                }
+            )
+        )
         return
     RETRY_MARKER.write_text(str(blocks))
 
-    tail = "\n".join((result.stdout + result.stderr).splitlines()[-40:])
     print(
         "Stop blocked: the test suite is failing after your changes "
         f"(attempt {blocks}/{MAX_BLOCKS}). Fix the regression before "
