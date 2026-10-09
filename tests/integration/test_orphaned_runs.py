@@ -211,19 +211,20 @@ async def test_one_failing_thread_release_does_not_strand_the_others(
         other_thread, other_run = await _crashed_run(ops, age_seconds=3600)
         store = ops._metadata_store
         fetch = store.fetch_thread_row
+        release = store.release_busy_thread
 
-        async def flaky(thread_id: str) -> Any:
+        async def flaky(thread_id: str, *args: Any, **kwargs: Any) -> bool:
             if thread_id == broken_thread:
                 raise sqlite3.OperationalError("database is locked")
-            return await fetch(thread_id)
+            return await release(thread_id, *args, **kwargs)
 
-        store.fetch_thread_row = flaky
+        store.release_busy_thread = flaky
         # Runs are stale (an hour old); the threads just went busy. A window
         # wider than any CI stall keeps the stuck-thread backstop from
         # releasing the broken thread, so only the in-process retry can.
         stale = 60
         failed = await ops.fail_orphaned_runs(stale_after_seconds=stale)
-        store.fetch_thread_row = fetch
+        store.release_busy_thread = release
         assert sorted(failed) == sorted([broken_run, other_run])
         assert (await fetch(other_thread))["status"] == "error"
         assert "Failed to release thread" in caplog.text
@@ -585,3 +586,72 @@ async def test_sqlite_sweep_queries_use_an_index(tmp_path: Path) -> None:
             for plan in plans.values()
             for step in plan.split(" | ")
         ), plans
+
+
+async def _start_run_elsewhere(store: Any, thread_id: str) -> str:
+    """What another worker does to start a run: row first, then ``busy``."""
+    run_id = str(uuid4())
+    await store.create_run(
+        run_id, thread_id, "agent", metadata={}, kwargs={}, multitask_strategy="enqueue"
+    )
+    await store.update_run_status(run_id, "running")
+    await store.update_thread(thread_id, status_value="busy")
+    return run_id
+
+
+async def test_stuck_release_spares_a_run_another_worker_starts_meanwhile(
+    tmp_path: Path,
+) -> None:
+    # #140: the release decided the thread had nothing in flight, then another
+    # worker started a run on it before the write. The write must lose.
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id = await _stuck_thread(ops, run_status="error", thread_age_seconds=60)
+        store = ops._metadata_store
+        list_runs = store.list_run_rows
+        started: list[str] = []
+
+        async def racing(*args: Any, **kwargs: Any) -> Any:
+            rows = await list_runs(*args, **kwargs)
+            if not started:  # the release read the latest run: race it now
+                started.append(await _start_run_elsewhere(store, thread_id))
+            return rows
+
+        store.list_run_rows = racing
+        await ops.fail_orphaned_runs(stale_after_seconds=30)
+        store.list_run_rows = list_runs
+        assert started
+        assert (await store.fetch_thread_row(thread_id))["status"] == "busy"
+
+
+async def test_settle_retry_spares_a_run_another_worker_starts_meanwhile(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "skeino.db"
+    async with _running(
+        _app(db, FakeGraph(), orphaned_run_timeout_seconds=None)
+    ) as ops:
+        thread_id = await _stuck_thread(ops, run_status="success", thread_age_seconds=0)
+        store = ops._metadata_store
+        ops._unsettled_threads.add(thread_id)  # its own settle failed
+        settled_status = ops._settled_thread_status
+        started: list[str] = []
+
+        async def racing(tid: str) -> Any:
+            settled = await settled_status(tid)
+            if not started:
+                started.append(await _start_run_elsewhere(store, thread_id))
+            return settled
+
+        ops._settled_thread_status = racing
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert started
+        assert (await store.fetch_thread_row(thread_id))["status"] == "busy"
+        # Kept for a later pass, which settles it once that run is done.
+        assert thread_id in ops._unsettled_threads
+        await store.update_run_status(started[0], "success")
+        await ops.liveness_pass(stale_after_seconds=None)
+        assert (await store.fetch_thread_row(thread_id))["status"] == "idle"
+        assert thread_id not in ops._unsettled_threads

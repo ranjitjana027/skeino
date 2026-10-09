@@ -250,6 +250,31 @@ class SqliteMetadataStore:
             await self._conn.execute(query, values)
             await self._conn.commit()
 
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Set a busy thread's status if no run is in flight on it.
+
+        One statement: SQLite runs writers one at a time, so the in-flight
+        check and the write cannot interleave with another process's insert.
+        """
+        now = utcnow().isoformat()
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "UPDATE app_threads SET status = ?, updated_at = ?, "
+                "state_updated_at = CASE WHEN ? THEN ? ELSE state_updated_at END "
+                "WHERE thread_id = ? AND status = 'busy' AND NOT EXISTS ("
+                "SELECT 1 FROM app_runs WHERE app_runs.thread_id = ? "
+                "AND app_runs.status IN ('pending', 'running'))",
+                (status_value, now, mark_state_updated, now, thread_id, thread_id),
+            )
+            await self._conn.commit()
+        return bool(cursor.rowcount)
+
     async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """Return stored thread rows (filtered by ids/status, sorted, paginated)."""
         conditions: list[str] = []

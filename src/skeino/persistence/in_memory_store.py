@@ -88,6 +88,33 @@ class InMemoryMetadataStore:
         if mark_state_updated:
             row["state_updated_at"] = utcnow()
 
+    async def release_busy_thread(
+        self,
+        thread_id: str,
+        status_value: ThreadStatus,
+        *,
+        mark_state_updated: bool = False,
+    ) -> bool:
+        """Set a busy thread's status if no run is in flight on it.
+
+        Atomic: nothing here awaits, so no other coroutine interleaves.
+        """
+        row = self._threads.get(thread_id)
+        if row is None or row["status"] != "busy":
+            return False
+        if any(
+            str(run["thread_id"]) == thread_id
+            and run["status"] in IN_FLIGHT_RUN_STATUSES
+            for run in self._runs.values()
+        ):
+            return False
+        now = utcnow()
+        row["updated_at"] = now
+        row["status"] = status_value
+        if mark_state_updated:
+            row["state_updated_at"] = now
+        return True
+
     async def search_thread_rows(self, request: ThreadSearchRequest) -> list[ThreadRow]:
         """List thread rows respecting basic filter / pagination flags."""
         rows = list(self._threads.values())
