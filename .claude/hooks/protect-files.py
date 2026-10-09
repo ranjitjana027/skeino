@@ -12,6 +12,7 @@ import sys
 
 # poetry.lock must only change via `poetry` commands; never hand-edit secrets.
 PROTECTED = re.compile(r"(^|/)(poetry\.lock|\.env(\.[^/]+)?)$")
+PATCH_TARGET = re.compile(r"\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$")
 
 
 def main() -> None:
@@ -24,12 +25,11 @@ def main() -> None:
     tool_input = payload.get("tool_input", {})
     paths = [tool_input.get("file_path", "")]
     # Include every patch target and rename destination in Codex patches.
-    patch = tool_input.get("command", "")
-    paths.extend(
-        re.findall(
-            r"^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$", patch, re.M
-        )
-    )
+    # splitlines() handles CRLF patches; a stray "\r" would hide the target.
+    for line in tool_input.get("command", "").splitlines():
+        match = PATCH_TARGET.match(line)
+        if match:
+            paths.append(match.group(1).strip())
     path = next((path for path in paths if PROTECTED.search(path)), "")
     if path:
         print(
